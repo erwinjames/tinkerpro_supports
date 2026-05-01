@@ -90,12 +90,12 @@ BEGIN
         BLOCK "040904e4"
         BEGIN
             VALUE "CompanyName", "io.tinkerpro" "\0"
-            VALUE "FileDescription", "employee_app" "\0"
+            VALUE "FileDescription", "TpSupport" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
-            VALUE "InternalName", "employee_app" "\0"
+            VALUE "InternalName", "TpSupport" "\0"
             VALUE "LegalCopyright", "Copyright (C) 2026 io.tinkerpro. All rights reserved." "\0"
-            VALUE "OriginalFilename", "employee_app.exe" "\0"
-            VALUE "ProductName", "employee_app" "\0"
+            VALUE "OriginalFilename", "TpSupport.exe" "\0"
+            VALUE "ProductName", "TpSupport" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END

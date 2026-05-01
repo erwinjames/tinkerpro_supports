@@ -31,7 +31,7 @@ if errorlevel 1 goto :fail
 
 echo.
 echo ==^> Build complete
-echo     exe:    %CD%\build\windows\x64\runner\Release\employee_app.exe
+echo     exe:    %CD%\build\windows\x64\runner\Release\TpSupport.exe
 echo     bundle: %CD%\build\windows\x64\runner\Release\
 echo.
 echo Ship the WHOLE Release folder, not just the exe.

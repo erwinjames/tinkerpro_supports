@@ -102,7 +102,7 @@ Build failed. Common causes:
 
 # ── 4. Verify output + summary ────────────────────────────────
 $outDir = Join-Path $projectRoot 'build\windows\x64\runner\Release'
-$exe    = Join-Path $outDir    'employee_app.exe'
+$exe    = Join-Path $outDir    'TpSupport.exe'
 
 if (-not (Test-Path $exe)) {
     Fail "Build reported success but $exe is missing. Check build/windows/ logs."
@@ -126,5 +126,5 @@ Write-Host 'To run on this machine:' -ForegroundColor Green
 Write-Host "  & '$exe'"
 Write-Host ''
 Write-Host 'To distribute, zip the entire Release folder:' -ForegroundColor Green
-Write-Host "  Compress-Archive -Path '$outDir\*' -DestinationPath 'employee_app-windows-x64.zip'"
+Write-Host "  Compress-Archive -Path '$outDir\*' -DestinationPath 'TpSupport-windows-x64.zip'"
 Write-Host ''
