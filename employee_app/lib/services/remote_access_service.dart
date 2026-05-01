@@ -44,8 +44,74 @@ class RemoteAccessService {
     _prepared = true;
     try {
       _bundledBinaryPath = await _extractBundled();
+      await _configureRelay();
     } catch (e) {
       debugPrint('[remote-access] prepare() failed: $e');
+    }
+  }
+
+  /// If the build supplied a self-hosted RustDesk relay via
+  /// `--dart-define=RUSTDESK_RELAY_HOST=...` (and optionally
+  /// `RUSTDESK_RELAY_KEY=...`), pre-write those into RustDesk2.toml so
+  /// the bundled RustDesk skips the public rendezvous (rs-ny.rustdesk.com)
+  /// and registers with our relay instead. Idempotent — `_setTopLevel`
+  /// and `_setOptionInRustDeskToml` both replace existing values rather
+  /// than duplicating them.
+  Future<void> _configureRelay() async {
+    const host = String.fromEnvironment('RUSTDESK_RELAY_HOST');
+    const key = String.fromEnvironment('RUSTDESK_RELAY_KEY');
+    if (host.isEmpty) return; // build wasn't pinned to a private relay
+
+    final tomlPath = _rustDeskTomlPath();
+    if (tomlPath == null) return;
+    final f = File(tomlPath);
+    if (!await f.parent.exists()) {
+      await f.parent.create(recursive: true);
+    }
+
+    await _setTopLevelInRustDeskToml('rendezvous_server', '$host:21116');
+    await _setOptionInRustDeskToml('custom-rendezvous-server', host);
+    await _setOptionInRustDeskToml('relay-server', host);
+    if (key.isNotEmpty) {
+      await _setOptionInRustDeskToml('key', key);
+    }
+    // Disable RustDesk's public API server so it doesn't try to phone
+    // home for updates / address-book sync.
+    await _setOptionInRustDeskToml('api-server', '');
+  }
+
+  /// Like `_setOptionInRustDeskToml` but for top-level keys (the ones
+  /// that live above the first `[section]` header — e.g.
+  /// `rendezvous_server = '...'`).
+  Future<void> _setTopLevelInRustDeskToml(String key, String value) async {
+    final tomlPath = _rustDeskTomlPath();
+    if (tomlPath == null) return;
+    try {
+      final f = File(tomlPath);
+      var contents = await f.exists() ? await f.readAsString() : '';
+
+      final sectionMatch =
+          RegExp(r'^\s*\[', multiLine: true).firstMatch(contents);
+      final sectionIdx = sectionMatch?.start ?? contents.length;
+
+      final keyRe = RegExp(
+        '^\\s*${RegExp.escape(key)}\\s*=.*\$',
+        multiLine: true,
+      );
+      final newLine = "$key = '$value'";
+      final existing = keyRe.firstMatch(contents);
+
+      if (existing != null && existing.start < sectionIdx) {
+        contents = contents.replaceFirst(keyRe, newLine);
+      } else {
+        final before = contents.substring(0, sectionIdx);
+        final after = contents.substring(sectionIdx);
+        final sep = before.isEmpty || before.endsWith('\n') ? '' : '\n';
+        contents = '$before$sep$newLine\n$after';
+      }
+      await f.writeAsString(contents, flush: true);
+    } catch (e) {
+      debugPrint('[remote-access] _setTopLevelInRustDeskToml($key): $e');
     }
   }
 

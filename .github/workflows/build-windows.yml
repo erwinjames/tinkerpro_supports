@@ -55,7 +55,9 @@ jobs:
             --dart-define="CHAT_SOKETI_HOST=$env:SOKETI_HOST" `
             --dart-define="CHAT_SOKETI_PORT=443" `
             --dart-define="CHAT_SOKETI_TLS=true" `
-            --dart-define="CHAT_SOKETI_KEY=tinkerpro-chat-key"
+            --dart-define="CHAT_SOKETI_KEY=tinkerpro-chat-key" `
+            --dart-define="RUSTDESK_RELAY_HOST=192.168.1.23" `
+            --dart-define="RUSTDESK_RELAY_KEY=M5nva66QiMeNabC58GraFDPyMY5cKPNDKHgmPYA+b2c="
         shell: pwsh
 
       - name: Zip the Release folder
