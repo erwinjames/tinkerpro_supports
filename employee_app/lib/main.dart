@@ -118,10 +118,16 @@ class _BootstrapState extends State<_Bootstrap> {
     final lan = LanPresence(userId: info.meId, storeName: info.storeName);
     lan.start();
 
-    // Eagerly extract the bundled RustDesk binary so the first /remote
-    // command doesn't have to wait on an 80 MB asset copy. Async, non-
-    // blocking — if it fails we fall back to system rustdesk anyway.
-    unawaited(RemoteAccessService.instance.prepare());
+    // Eagerly extract the bundled RustDesk binary AND start it so it
+    // registers its ID with the rendezvous server in the background.
+    // The first /remote command otherwise sees a 10–30s window where
+    // the ID exists locally but the rendezvous hasn't picked it up yet,
+    // and admin's first connect attempt fails with "ID does not exist".
+    // Pre-launching closes that gap.
+    unawaited(() async {
+      await RemoteAccessService.instance.prepare();
+      await RemoteAccessService.instance.launch();
+    }());
 
     setState(() {
       _info = info;
