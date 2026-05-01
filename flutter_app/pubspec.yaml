@@ -1,0 +1,91 @@
+name: tinkerpro_support_flutter
+description: "TinkerPro Support companion app"
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.11.4
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.8
+
+  # Networking + cookie-aware login.
+  http: ^1.2.2
+
+  # Persistent storage for server URL and session cookie.
+  shared_preferences: ^2.3.2
+
+  # Firebase Cloud Messaging.
+  firebase_core: ^4.6.0
+  firebase_messaging: ^16.1.3
+
+  # In-app display for foreground notifications.
+  flutter_local_notifications: ^18.0.1
+
+  # Google Fonts — JetBrains Mono (display) + Space Grotesk (body).
+  # Avoids shipping .ttf files while keeping the industrial-blueprint type system.
+  google_fonts: ^6.2.1
+
+  # Open tel: / mailto: / https: URIs through the OS handler. Used for
+  # tap-to-dial on lead phone numbers and tap-to-email.
+  url_launcher: ^6.3.1
+
+  # Chat MVP — minimal Pusher-protocol client over WebSocket (points at Soketi).
+  # Using web_socket_channel directly because pusher_channels_flutter does not
+  # expose `host`/`wsPort` to Dart, which we need for self-hosted Soketi.
+  web_socket_channel: ^3.0.0
+
+  # Chat attachments — pickers, cookie-aware image rendering, and a
+  # cross-platform file opener for downloaded non-image attachments.
+  image_picker: ^1.1.2
+  file_picker: ^8.1.2
+  cached_network_image: ^3.4.1
+  path_provider: ^2.1.4
+  open_filex: ^4.5.0
+
+  # WebRTC for voice + video calls. Signaling rides on the existing
+  # Soketi/Pusher channels (chat.signal API).
+  flutter_webrtc: ^0.12.0
+  permission_handler: ^11.3.1
+
+  # Native incoming-call UI for killed-app push wakeups. On Android: shows a
+  # full-screen heads-up notification + ConnectionService entry. On iOS:
+  # CallKit (Phase 2 — needs PushKit + APNS direct, not wired yet). The
+  # FCM background handler (push_service.dart) hands off to this when an
+  # `incoming_call` data push arrives.
+  flutter_callkit_incoming: ^2.5.0
+
+  # In-app audio cues — foreground ringtone (CallKit handles the killed/
+  # background path), outgoing ringback, chat ping. WAV bytes synthesized
+  # at runtime in lib/services/ringtone_service.dart so we ship no assets.
+  audioplayers: ^6.1.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  # Generates launcher icons (and Android adaptive icon foreground/background)
+  # for every density bucket from a single source image. Run with:
+  #   dart run flutter_launcher_icons
+  flutter_launcher_icons: ^0.14.1
+
+# Launcher icon configuration. The orange brand colour matches Brand.signal
+# (theme.dart) so the adaptive-icon background reads as on-brand instead of
+# white/grey.
+flutter_launcher_icons:
+  android: "ic_launcher"
+  ios: true
+  image_path: "assets/brand/tinkerpro-icon-512.png"
+  remove_alpha_ios: true
+  adaptive_icon_background: "#0A0908"
+  adaptive_icon_foreground: "assets/brand/tinkerpro-icon-512.png"
+  min_sdk_android: 21
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/brand/

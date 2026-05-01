@@ -1,0 +1,67 @@
+name: customer_app
+description: "TinkerPro customer portal — TIN-based access to your registration status, support chat, and voice calls with the admin team."
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.11.4
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.8
+
+  # Networking + cookie session (PHP session id rides on cookies).
+  http: ^1.2.0
+  cookie_jar: ^4.0.8
+  dio: ^5.4.0
+  dio_cookie_manager: ^3.1.1
+
+  # Persisted preferences (active customer id, branch, last TIN).
+  shared_preferences: ^2.2.2
+
+  # Realtime — minimal Pusher-protocol client over WebSocket.
+  web_socket_channel: ^3.0.0
+
+  # WebRTC voice calls (admins receive via the existing site-wide widget).
+  flutter_webrtc: ^0.12.0
+  permission_handler: ^11.3.1
+
+  # Chat attachments — pickers + cross-platform open helpers.
+  image_picker: ^1.1.2
+  file_picker: ^8.1.2
+  path_provider: ^2.1.4
+  open_filex: ^4.5.0
+
+  # Image rendering: chat thumbnails go through lib/widgets/authed_image.dart
+  # which fetches via Dio (so the cookie jar travels). cached_network_image
+  # uses its own HTTP client and would 401 on chat.downloadAttachment.
+
+  # In-app audio cues — incoming-call ringtone, outgoing ringback, chat ping.
+  # WAV bytes are synthesized at runtime (see lib/services/ringtone_service.dart)
+  # so we don't ship sound assets.
+  audioplayers: ^6.1.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  flutter_lints: ^6.0.0
+
+  # Generates launcher icons (and Android adaptive icon foreground/background)
+  # for every density bucket from a single source image. Run with:
+  #   dart run flutter_launcher_icons
+  flutter_launcher_icons: ^0.14.1
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/brand/
+
+flutter_launcher_icons:
+  android: "ic_launcher"
+  ios: true
+  image_path: "assets/brand/tinkerpro-icon-512.png"
+  adaptive_icon_background: "#0F0F0F"
+  adaptive_icon_foreground: "assets/brand/tinkerpro-icon-512.png"
