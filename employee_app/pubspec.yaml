@@ -47,3 +47,8 @@ flutter:
   uses-material-design: true
   assets:
     - assets/brand/
+    # Bundled RustDesk portable binaries — extracted to a writable dir
+    # on first launch by lib/services/remote_access_service.dart, so the
+    # employee never has to run a separate installer. ~105 MB combined.
+    # If repo size is a concern, move these to git-lfs.
+    - assets/rustdesk/

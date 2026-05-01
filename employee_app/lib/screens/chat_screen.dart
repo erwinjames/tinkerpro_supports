@@ -12,6 +12,7 @@ import '../services/call_service.dart';
 import '../services/chat_realtime.dart';
 import '../services/chat_service.dart';
 import '../services/lan_presence.dart';
+import '../services/remote_access_service.dart';
 import '../services/ringtone_service.dart';
 import '../services/session_store.dart';
 import '../theme.dart';
@@ -55,6 +56,10 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
   bool _loading = true;
   bool _callScreenOpen = false;
   bool _invitePromptOpen = false;
+  // Tracks /remote messages the user has already answered (Allow or
+  // Deny) so the inline card doesn't keep showing buttons after the
+  // response was sent.
+  final Set<Object> _resolvedRemotes = {};
   StreamSubscription<ChatMessage>? _msgSub;
   StreamSubscription<ConversationInvite>? _inviteSub;
 
@@ -102,6 +107,16 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
       _messages
         ..clear()
         ..addAll(list.reversed); // chat_service returns newest-first
+      // Suppress the inline /remote card for everything that's
+      // already in the chat backlog. Only NEW /remote messages
+      // arriving via _onIncoming after this point will render the
+      // Allow/Deny card. Old ones become regular text bubbles.
+      for (final m in _messages) {
+        if (m.senderId != _meId &&
+            m.body.toLowerCase().contains('/remote')) {
+          _resolvedRemotes.add(m.id);
+        }
+      }
       _loading = false;
     });
     _scrollToBottom();
@@ -116,7 +131,78 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
       if (m.senderId != _meId) {
         unawaited(RingtoneService.instance.ping());
       }
+      // /remote messages are rendered as interactive cards inline in
+      // the chat (see _buildBubble). No dialog needed — user just
+      // taps Allow/Deny on the bubble itself.
     }
+  }
+
+  /// True when `m` is an incoming `/remote` request that hasn't been
+  /// resolved yet. Used by the bubble renderer to swap in the
+  /// interactive Allow/Deny card.
+  bool _isPendingRemoteRequest(ChatMessage m) {
+    if (m.senderId == _meId) return false;
+    if (!m.body.toLowerCase().contains('/remote')) return false;
+    if (_resolvedRemotes.contains(m.id)) return false;
+    return true;
+  }
+
+  /// User tapped Deny on a /remote card. Mark the message resolved
+  /// so the buttons go away, and post a denial reply.
+  Future<void> _denyRemoteAccess(ChatMessage m) async {
+    setState(() => _resolvedRemotes.add(m.id));
+    await widget.chat.send(
+      convId: _convId,
+      body: 'Remote access denied.',
+      clientNonce: _newNonce(),
+    );
+  }
+
+  /// User tapped Allow on a /remote card. Configure RustDesk for
+  /// password-mode auto-accept (so the employee doesn't get a second
+  /// confirmation inside RustDesk itself), then reply in chat with
+  /// both the ID and the freshly-generated password.
+  Future<void> _allowRemoteAccess(ChatMessage m) async {
+    setState(() => _resolvedRemotes.add(m.id));
+
+    final available = await RemoteAccessService.instance.isAvailable();
+    if (!available) {
+      await widget.chat.send(
+        convId: _convId,
+        body: 'Remote access unavailable — the bundled RustDesk failed '
+            'to extract on this machine. Reinstall the employee app, or '
+            'install RustDesk from https://rustdesk.com.',
+        clientNonce: _newNonce(),
+      );
+      if (mounted) _toast('RustDesk not available');
+      return;
+    }
+
+    final session = await RemoteAccessService.instance
+        .prepareForIncoming(retryFor: const Duration(seconds: 10));
+    if (session == null) {
+      await widget.chat.send(
+        convId: _convId,
+        body: 'RustDesk started but no ID was generated yet. Please '
+            'wait a moment and ask the admin to send /remote again.',
+        clientNonce: _newNonce(),
+      );
+      if (mounted) _toast('RustDesk ID not ready — retry in a moment');
+      return;
+    }
+
+    // Reply with both ID and password. The web admin recognises this
+    // exact prefix and renders a clickable
+    // rustdesk://connect/{id}/{password} link that auto-fills both
+    // fields — admin gets one-click connect, no second prompt on
+    // employee's side because approve-mode is now 'password'.
+    await widget.chat.send(
+      convId: _convId,
+      body: 'Remote access approved. RustDesk ID: ${session.id}, '
+          'password: ${session.password}',
+      clientNonce: _newNonce(),
+    );
+    if (mounted) _toast('RustDesk credentials shared with admin');
   }
 
   void _scrollToBottom() {
@@ -451,6 +537,14 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
   }
 
   Widget _buildBubble(ChatMessage m, TextTheme text) {
+    // Special-case incoming /remote: render an interactive card
+    // instead of plain text. Eliminates the showDialog dependency
+    // entirely (Flutter Linux desktop dialogs have a habit of
+    // getting swallowed by the GTK shell).
+    if (_isPendingRemoteRequest(m)) {
+      return _buildRemoteRequestCard(m, text);
+    }
+
     final mine = m.senderId == _meId;
     final align = mine ? CrossAxisAlignment.end : CrossAxisAlignment.start;
     final color = mine ? Brand.signal : Brand.canvas;
@@ -493,6 +587,77 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
   /// Attachments render as click-to-download rows. Inline image preview
   /// would need a cookie-aware HTTP client (CachedNetworkImage doesn't
   /// share Dio's cookie jar) — punt on that until there's a real ask.
+  /// Inline /remote request card with Allow / Deny buttons. Replaces
+  /// the previous showDialog approach — dialogs were getting eaten by
+  /// the Linux GTK shell on this build, so we render the prompt right
+  /// in the message stream where it can't be missed or hidden.
+  Widget _buildRemoteRequestCard(ChatMessage m, TextTheme text) {
+    String inviterName = 'Admin';
+    for (final p in _info.participants) {
+      if (p.userId == m.senderId && p.fullName.isNotEmpty) {
+        inviterName = p.fullName;
+        break;
+      }
+    }
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: Container(
+          constraints: const BoxConstraints(maxWidth: 460),
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: Brand.canvas,
+            border: Border.all(color: Brand.signal, width: 1.4),
+            borderRadius: BorderRadius.circular(14),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.desktop_windows_outlined,
+                      color: Brand.signal, size: 22),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      '$inviterName wants remote access',
+                      style: text.titleSmall,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Approving will open RustDesk and share its ID. Each '
+                'connection still requires a second confirmation inside '
+                'RustDesk before any control is granted.',
+                style: text.bodySmall?.copyWith(color: Brand.textMuted),
+              ),
+              const SizedBox(height: 12),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  TextButton(
+                    onPressed: () => _denyRemoteAccess(m),
+                    child: const Text('Deny'),
+                  ),
+                  const SizedBox(width: 4),
+                  FilledButton.icon(
+                    onPressed: () => _allowRemoteAccess(m),
+                    icon: const Icon(Icons.check, size: 16),
+                    label: const Text('Allow'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   List<Widget> _renderAttachments(ChatMessage m, bool mine, TextTheme text) {
     return m.attachments.map((att) {
       return Padding(

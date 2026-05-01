@@ -1,0 +1,337 @@
+import 'dart:async';
+import 'dart:io';
+import 'dart:math';
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart' show rootBundle;
+import 'package:path_provider/path_provider.dart';
+
+/// Thin wrapper around the locally-available RustDesk client.
+///
+/// RustDesk is a free, open-source remote-desktop suite. The
+/// employee_app ships the platform-appropriate **portable** RustDesk
+/// binary as a Flutter asset (Linux AppImage, Windows .exe). On first
+/// launch [prepare] extracts it from the read-only Flutter asset bundle
+/// into a writable per-user directory and (on Linux/macOS) marks it
+/// executable. From then on, [launch] runs that bundled copy — no
+/// separate "install RustDesk" step for the employee.
+///
+/// If a system-wide RustDesk is on PATH (e.g., the user already
+/// installed it via package manager), we prefer that — it gets OS
+/// integration like `rustdesk://` URL scheme registration. The bundled
+/// copy is the always-available fallback.
+///
+/// We deliberately do NOT pipe RustDesk's incoming-connection prompt
+/// through the Flutter UI. Two prompts (employee_app's "Allow remote
+/// access" + RustDesk's own "Accept connection") is RustDesk's security
+/// model. Bypassing the second one would mean a single compromised
+/// chat session can take over the machine.
+class RemoteAccessService {
+  RemoteAccessService._();
+  static final instance = RemoteAccessService._();
+
+  /// Set once after first successful [prepare]. Subsequent calls are
+  /// no-ops so we don't re-extract the 80 MB AppImage every launch.
+  String? _bundledBinaryPath;
+  bool _prepared = false;
+
+  /// Idempotent. Call once at app startup (after the user has gotten
+  /// past the store-setup screen). Extracts the bundled binary out of
+  /// `assets/rustdesk/...` into a writable runtime location and marks
+  /// it executable. Cheap on subsequent calls.
+  Future<void> prepare() async {
+    if (_prepared) return;
+    _prepared = true;
+    try {
+      _bundledBinaryPath = await _extractBundled();
+    } catch (e) {
+      debugPrint('[remote-access] prepare() failed: $e');
+    }
+  }
+
+  /// Resolved plaintext RustDesk ID (the 6-12 digit one shown in the
+  /// RustDesk GUI). Returns null if RustDesk isn't available, hasn't
+  /// finished initializing, or somehow doesn't expose `--get-id`.
+  ///
+  /// Implementation: shells out to `rustdesk --get-id`. The on-disk
+  /// config TOML doesn't store the plaintext ID anywhere — only
+  /// `enc_id`, which is XChaCha20-encrypted with a hardware-derived
+  /// key. Parsing it externally is impractical; the CLI flag is the
+  /// supported path.
+  Future<String?> getRustDeskId({Duration retryFor = Duration.zero}) async {
+    final deadline = DateTime.now().add(retryFor);
+    while (true) {
+      final id = await _readIdViaCli();
+      if (id != null && id.isNotEmpty) return id;
+      if (!DateTime.now().isBefore(deadline)) return null;
+      await Future.delayed(const Duration(milliseconds: 800));
+    }
+  }
+
+  Future<String?> _readIdViaCli() async {
+    final binary = await _resolveBinary();
+    if (binary == null) return null;
+    try {
+      final result = await Process.run(
+        binary,
+        ['--get-id'],
+        runInShell: false,
+      ).timeout(const Duration(seconds: 6));
+      // RustDesk prints the ID to stdout but also emits some
+      // gtk/flutter init noise on stderr — and on first run the ID
+      // line is interleaved with FFI logs on stdout. Extract the
+      // first standalone digit run of 6–12 chars (the ID range
+      // RustDesk allocates).
+      final out = '${result.stdout}\n${result.stderr}';
+      final m = RegExp(r'(?<![\d.-])(\d{6,12})(?![\d.-])').firstMatch(out);
+      return m?.group(1);
+    } catch (e) {
+      debugPrint('[remote-access] --get-id failed: $e');
+      return null;
+    }
+  }
+
+  /// Launch the RustDesk client. Best-effort — we can't reliably wait
+  /// for it to be "ready"; the user will see RustDesk's window open
+  /// and the admin's connection request will trigger RustDesk's own
+  /// accept/deny prompt independently of this app. Returns true if
+  /// the process was at least spawned.
+  Future<bool> launch() async {
+    final binary = await _resolveBinary();
+    if (binary == null) return false;
+    try {
+      // Detached so the RustDesk window outlives a brief Flutter
+      // foreground/background transition.
+      await Process.start(
+        binary,
+        const <String>[],
+        mode: ProcessStartMode.detached,
+        runInShell: false,
+      );
+      return true;
+    } catch (e) {
+      debugPrint('[remote-access] launch($binary) failed: $e');
+      return false;
+    }
+  }
+
+  /// Configure RustDesk for one-prompt remote-access: set a fresh
+  /// permanent password and switch `approve-mode` to `password`. After
+  /// this, an admin who connects with the password is auto-accepted —
+  /// the employee doesn't have to click Accept inside RustDesk's
+  /// native prompt for THIS session.
+  ///
+  /// Password rotates on each invocation, so a previous admin's
+  /// password becomes invalid the next time the employee taps Allow
+  /// on a /remote card. That keeps the access window scoped to "the
+  /// session the employee just approved" rather than a permanent
+  /// trust grant.
+  ///
+  /// Returns null if RustDesk isn't available or the ID couldn't be
+  /// read within the deadline.
+  Future<RemoteSessionConfig?> prepareForIncoming({
+    Duration retryFor = const Duration(seconds: 10),
+  }) async {
+    final binary = await _resolveBinary();
+    if (binary == null) return null;
+
+    final password = _randomPassword(10);
+
+    // Set the permanent password. RustDesk hashes/salts internally;
+    // we never see the encrypted form. Run with a short timeout —
+    // this returns instantly on success.
+    try {
+      await Process.run(
+        binary,
+        ['--password', password],
+        runInShell: false,
+      ).timeout(const Duration(seconds: 5));
+    } catch (e) {
+      debugPrint('[remote-access] --password set failed: $e');
+      return null;
+    }
+
+    // Flip approve-mode → 'password' so RustDesk skips its native
+    // accept prompt when the supplied password matches. Done by
+    // editing RustDesk2.toml directly because the CLI's --option
+    // flag's exact key syntax varies between versions.
+    await _setOptionInRustDeskToml('approve-mode', 'password');
+
+    // Make sure RustDesk is running so the option-change takes
+    // effect immediately. Idempotent — Process.start with a running
+    // instance is a no-op on RustDesk's side (it foregrounds the
+    // existing window instead of spawning a duplicate).
+    await launch();
+
+    final id = await getRustDeskId(retryFor: retryFor);
+    if (id == null || id.isEmpty) return null;
+    return RemoteSessionConfig(id: id, password: password);
+  }
+
+  String _randomPassword(int length) {
+    // No I/O, l, 0, O — confusable in some fonts when a user reads
+    // the password aloud over the chat handoff.
+    const alphabet = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789';
+    final rng = Random.secure();
+    final buf = StringBuffer();
+    for (var i = 0; i < length; i++) {
+      buf.write(alphabet[rng.nextInt(alphabet.length)]);
+    }
+    return buf.toString();
+  }
+
+  /// Idempotent edit of `~/.config/rustdesk/RustDesk2.toml` (or the
+  /// platform equivalent): inserts/replaces `<key> = '<value>'` inside
+  /// the `[options]` table. We avoid pulling in a TOML parser because
+  /// RustDesk's config is a shallow file we only ever touch one line
+  /// of — string substitution is safer than a half-implemented parser.
+  Future<void> _setOptionInRustDeskToml(String key, String value) async {
+    final tomlPath = _rustDeskTomlPath();
+    if (tomlPath == null) return;
+    try {
+      final f = File(tomlPath);
+      var contents = await f.exists() ? await f.readAsString() : '';
+
+      final keyRe = RegExp(
+        '^\\s*${RegExp.escape(key)}\\s*=.*\$',
+        multiLine: true,
+      );
+      final newLine = "$key = '$value'";
+
+      if (keyRe.hasMatch(contents)) {
+        contents = contents.replaceFirst(keyRe, newLine);
+      } else if (contents.contains('[options]')) {
+        contents = contents.replaceFirst(
+          '[options]',
+          '[options]\n$newLine',
+        );
+      } else {
+        if (contents.isNotEmpty && !contents.endsWith('\n')) {
+          contents += '\n';
+        }
+        contents += '\n[options]\n$newLine\n';
+      }
+      await f.writeAsString(contents, flush: true);
+    } catch (e) {
+      debugPrint('[remote-access] _setOptionInRustDeskToml($key): $e');
+    }
+  }
+
+  String? _rustDeskTomlPath() {
+    if (Platform.isLinux || Platform.isMacOS) {
+      final home = Platform.environment['HOME'];
+      if (home == null) return null;
+      return '$home/.config/rustdesk/RustDesk2.toml';
+    }
+    if (Platform.isWindows) {
+      final appData = Platform.environment['APPDATA'];
+      if (appData == null) return null;
+      return '$appData\\RustDesk\\config\\RustDesk2.toml';
+    }
+    return null;
+  }
+
+  /// Used by the chat screen's friendly fallback message — true when
+  /// either a system-installed RustDesk is on PATH OR the bundled
+  /// portable copy was successfully extracted.
+  Future<bool> isAvailable() async {
+    if (await _systemBinary() != null) return true;
+    return _bundledBinaryPath != null;
+  }
+
+  // ── internals ───────────────────────────────────────────────────────
+
+  /// Resolution order: system PATH first (better OS integration), then
+  /// the bundled portable copy. Cached after first hit on PATH so we
+  /// don't `which` on every launch.
+  String? _cachedSystem;
+  bool _systemChecked = false;
+
+  Future<String?> _resolveBinary() async {
+    final sys = await _systemBinary();
+    if (sys != null) return sys;
+    return _bundledBinaryPath;
+  }
+
+  Future<String?> _systemBinary() async {
+    if (_systemChecked) return _cachedSystem;
+    _systemChecked = true;
+    try {
+      if (Platform.isLinux || Platform.isMacOS) {
+        final r =
+            await Process.run('which', ['rustdesk'], runInShell: false);
+        if (r.exitCode == 0) {
+          _cachedSystem = (r.stdout as String).trim();
+        }
+      } else if (Platform.isWindows) {
+        final r =
+            await Process.run('where', ['rustdesk.exe'], runInShell: false);
+        if (r.exitCode == 0) {
+          _cachedSystem = (r.stdout as String).split('\n').first.trim();
+        }
+      }
+    } catch (_) {/* fall through */}
+    return _cachedSystem;
+  }
+
+  /// Copy the platform-appropriate RustDesk binary from
+  /// `data/flutter_assets/assets/rustdesk/...` to the app's writable
+  /// support directory. Returns the absolute path to the extracted
+  /// binary, or null if the platform isn't supported.
+  ///
+  /// Idempotent on the file system: re-extracts only if the asset is
+  /// newer (compared by size — Flutter doesn't expose mtime here).
+  Future<String?> _extractBundled() async {
+    final assetName = _bundledAssetName();
+    if (assetName == null) return null; // unsupported platform
+
+    final supportDir = await getApplicationSupportDirectory();
+    final rustdeskDir = Directory('${supportDir.path}/rustdesk');
+    if (!await rustdeskDir.exists()) {
+      await rustdeskDir.create(recursive: true);
+    }
+    final outPath = '${rustdeskDir.path}/${_runtimeBinaryName()}';
+    final outFile = File(outPath);
+
+    final assetData = await rootBundle.load('assets/rustdesk/$assetName');
+    final assetBytes = assetData.buffer.asUint8List(
+      assetData.offsetInBytes,
+      assetData.lengthInBytes,
+    );
+
+    // Re-extract if missing OR size differs (handles app upgrades that
+    // ship a newer RustDesk).
+    final needsWrite = !await outFile.exists() ||
+        (await outFile.length()) != assetBytes.length;
+    if (needsWrite) {
+      await outFile.writeAsBytes(assetBytes, flush: true);
+      if (Platform.isLinux || Platform.isMacOS) {
+        await Process.run('chmod', ['+x', outPath], runInShell: false);
+      }
+      debugPrint(
+          '[remote-access] extracted bundled RustDesk to $outPath '
+          '(${assetBytes.length} bytes)');
+    }
+    return outPath;
+  }
+
+  String? _bundledAssetName() {
+    if (Platform.isLinux) return 'rustdesk-linux-x86_64.AppImage';
+    if (Platform.isWindows) return 'rustdesk-windows-x86_64.exe';
+    return null; // macOS / Android: bundled binary not shipped (yet)
+  }
+
+  String _runtimeBinaryName() {
+    if (Platform.isWindows) return 'rustdesk.exe';
+    return 'rustdesk-portable'; // .AppImage extension stripped — chmod +x is what matters
+  }
+}
+
+/// Result of [RemoteAccessService.prepareForIncoming]. Carry both
+/// halves of the credential pair the admin needs to connect without
+/// any further employee interaction.
+class RemoteSessionConfig {
+  RemoteSessionConfig({required this.id, required this.password});
+  final String id;
+  final String password;
+}

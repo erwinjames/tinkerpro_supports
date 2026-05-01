@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import 'api_client.dart';
@@ -5,6 +7,7 @@ import 'services/call_service.dart';
 import 'services/chat_realtime.dart';
 import 'services/chat_service.dart';
 import 'services/lan_presence.dart';
+import 'services/remote_access_service.dart';
 import 'services/session_store.dart';
 import 'screens/chat_screen.dart';
 import 'screens/store_setup_screen.dart';
@@ -114,6 +117,11 @@ class _BootstrapState extends State<_Bootstrap> {
     // Same-store LAN discovery for the chat's "Add participant" picker.
     final lan = LanPresence(userId: info.meId, storeName: info.storeName);
     lan.start();
+
+    // Eagerly extract the bundled RustDesk binary so the first /remote
+    // command doesn't have to wait on an 80 MB asset copy. Async, non-
+    // blocking — if it fails we fall back to system rustdesk anyway.
+    unawaited(RemoteAccessService.instance.prepare());
 
     setState(() {
       _info = info;

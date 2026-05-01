@@ -275,3 +275,113 @@ employee_app/
 ```
 
 If something breaks and you don't recognize a file path in the error message, that's where to look.
+
+---
+
+## Remote access via RustDesk
+
+The employee_app **bundles** [RustDesk](https://rustdesk.com) — a free, open-source remote-desktop suite — directly in the app build. The employee never has to install RustDesk separately. The `/remote` chat command flow is: admin types `/remote` in chat → employee gets an in-app Allow/Deny prompt → on Allow the employee_app extracts (first run only) and launches the bundled RustDesk, then shares the ID in chat → admin clicks the ID → RustDesk handles the actual screen + input.
+
+### What's bundled
+
+| Platform | Binary | Size |
+|---|---|---|
+| Linux x64 | `assets/rustdesk/rustdesk-linux-x86_64.AppImage` | ~82 MB |
+| Windows x64 | `assets/rustdesk/rustdesk-windows-x86_64.exe` | ~24 MB |
+| macOS / Android | not bundled — use system install or skip the feature | — |
+
+Both bundled binaries are built from RustDesk 1.4.6 official releases. Only the platform-appropriate one is extracted at runtime; the other sits in the build but never executes. (To shrink builds at the cost of more build-script complexity, you can swap in a per-platform `flutter build --dart-define` flag and conditionally include the asset.)
+
+### How extraction works
+
+On first launch (after `chat.employeeStart` resolves), [main.dart](lib/main.dart) calls `RemoteAccessService.instance.prepare()`. That method:
+
+1. Checks if a system-wide `rustdesk` binary is on `PATH` — if so, it's preferred (better OS integration like `rustdesk://` URL handling).
+2. Otherwise, copies the platform-appropriate asset out of `data/flutter_assets/assets/rustdesk/...` into the app's writable support dir:
+   - Linux: `~/.local/share/io.tinkerpro.employee_app/rustdesk/rustdesk-portable`
+   - Windows: `%APPDATA%\io.tinkerpro\employee_app\rustdesk\rustdesk.exe`
+3. On Linux/macOS, runs `chmod +x` on the extracted file.
+
+Subsequent launches detect the file is already present (size match → skip rewrite) and use it directly. Each `/remote` accept on the employee side spawns the binary detached so RustDesk's window survives Flutter app transitions.
+
+### Repo size note
+
+The two bundled binaries add ~105 MB to the repo. If that's a problem for your VCS:
+
+- **Git LFS**: `git lfs track "assets/rustdesk/*"`, commit `.gitattributes`, then commit the binaries.
+- **Out-of-band download**: keep `assets/rustdesk/` in `.gitignore` and add a `tools/fetch_rustdesk.sh` that downloads them before `flutter build`. Ship the script, not the binaries. (More flexible — auto-tracks new RustDesk versions — but breaks reproducibility.)
+
+Either is fine; the default committed-binaries approach is just simplest for in-house use.
+
+### Updating bundled RustDesk
+
+When RustDesk releases a new version, refresh both binaries:
+
+```bash
+cd assets/rustdesk
+RD=1.4.7  # the new version
+curl -fLo rustdesk-linux-x86_64.AppImage \
+    "https://github.com/rustdesk/rustdesk/releases/download/$RD/rustdesk-$RD-x86_64.AppImage"
+curl -fLo rustdesk-windows-x86_64.exe \
+    "https://github.com/rustdesk/rustdesk/releases/download/$RD/rustdesk-$RD-x86_64.exe"
+```
+
+Rebuild and ship. The runtime extraction code re-extracts when the on-disk size doesn't match the asset size, so users on the new build get the new RustDesk on first launch automatically.
+
+### Point RustDesk at your private relay (recommended)
+
+Optional but recommended for production — wires every machine to the self-hosted relay we run on the VPS instead of RustDesk's public servers. See `docs/rustdesk-vps-setup.md` on the server repo for the full guide. TL;DR: in RustDesk's `⋯ → ID/Relay Server` dialog, set:
+
+- **ID server**: `<your-vps-host>`
+- **Relay server**: `<your-vps-host>`
+- **Key**: paste from `id_ed25519.pub` on the VPS
+
+The status pill in RustDesk's bottom-left should flip from "Ready (Public Server)" → "Ready" when configured correctly.
+
+If you skip this step, the feature still works using RustDesk's public servers — slower and shared, but free and zero-config.
+
+### How `/remote` works in chat
+
+```
+Admin (chat.php):           Employee (employee_app):
+─────────────────           ─────────────────────────
+types  /remote              receives /remote
+                              ↓
+                            "Admin wants remote access. Allow / Deny?"
+                              ↓
+                            Allow → app reads local RustDesk ID,
+                                    launches RustDesk,
+                                    sends back: "Remote access approved.
+                                                 RustDesk ID: 123456789"
+                            Deny  → sends "Remote access denied."
+
+clicks the ID link  ←       chat renders the ID as a clickable
+                            rustdesk://connect/{id} link
+   ↓
+RustDesk client opens, connects to employee's ID
+   ↓
+Employee's RustDesk raises its OWN accept prompt
+(intentional — RustDesk's security model, NOT bypassed)
+   ↓
+Employee clicks Accept → admin has remote control
+```
+
+### What the employee_app actually does
+
+[lib/services/remote_access_service.dart](lib/services/remote_access_service.dart) is the only Flutter-side piece. It:
+
+1. Reads the local RustDesk ID from the TOML config the RustDesk installer creates:
+   - Linux: `~/.config/rustdesk/RustDesk2.toml`
+   - Windows: `%APPDATA%\RustDesk\config\RustDesk2.toml`
+   - macOS: `~/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml`
+2. Probes whether `rustdesk` is on PATH (`which rustdesk` / `where rustdesk.exe`).
+3. Spawns the RustDesk binary in detached mode so it survives the Flutter process.
+
+If RustDesk isn't installed, the employee_app surfaces a friendly fallback in chat ("RustDesk is not installed on this machine. Install it from https://rustdesk.com and try again.") instead of silently failing.
+
+### Security notes
+
+- **Two prompts, by design.** The employee_app's "Allow / Deny" prompt is the *first* gate; RustDesk's own incoming-connection prompt is the *second*. We do not, and should not, bypass RustDesk's prompt — it's the part of the security model that handles the case where the employee_app is compromised or the chat session is hijacked.
+- **`/remote` only triggers from staff messages.** The chat_screen filters by participant role (`admin` / `agent` / `super_admin`); a `/remote` typed by another employee is rendered as plain chat text, not a prompt.
+- **No persistent grant.** Each `/remote` session requires fresh approval. There is currently no "trust this admin" toggle.
+- **The RustDesk ID alone is not enough to connect.** RustDesk needs both the ID and either an explicit accept or a pre-shared password. The employee_app does not configure pre-shared passwords; every connection requires the live accept prompt on the employee's screen.
