@@ -22,6 +22,9 @@ dependencies:
   shared_preferences: ^2.2.2
   path_provider: ^2.1.4
 
+  # HMAC for the per-machine RustDesk permanent-password derivation.
+  crypto: ^3.0.3
+
   # Soketi/Pusher protocol — direct WebSocket because pusher_channels_flutter
   # doesn't expose host/port for self-hosted instances.
   web_socket_channel: ^3.0.0

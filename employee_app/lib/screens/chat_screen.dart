@@ -4,6 +4,7 @@ import 'dart:math';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:open_filex/open_filex.dart';
 
 import '../api_client.dart';
@@ -317,6 +318,84 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
   }
 
   /// Open the LAN-peers picker. Picking a colleague calls
+  /// One-time setup helper: show the per-machine RustDesk permanent
+  /// password derived from the hardware fingerprint, with a copy
+  /// button. Employee opens RustDesk → Settings → Security → Permanent
+  /// password and pastes this in. Same password every time on the
+  /// same machine, so this is a once-per-install step.
+  Future<void> _showRemotePasswordSheet() async {
+    final password = await RemoteAccessService.instance.derivePermanentPassword();
+    if (!mounted) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Brand.canvas,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) {
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(20, 20, 20, 28),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Remote desktop password',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'One-time setup: open RustDesk → Settings → Security '
+                '→ Use permanent password → Set permanent password → '
+                'paste this value.',
+                style: TextStyle(fontSize: 13, height: 1.4),
+              ),
+              const SizedBox(height: 16),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+                decoration: BoxDecoration(
+                  color: Brand.surface,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: SelectableText(
+                        password,
+                        style: const TextStyle(
+                          fontFamily: 'monospace',
+                          fontSize: 18,
+                          letterSpacing: 1.2,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: 'Copy',
+                      icon: const Icon(Icons.copy),
+                      onPressed: () {
+                        Clipboard.setData(ClipboardData(text: password));
+                        _toast('Password copied');
+                      },
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 12),
+              const Text(
+                'This password is unique to THIS machine and stays the same '
+                'across app restarts. Set it in RustDesk once, and every '
+                '/remote from admin will work without re-typing.',
+                style: TextStyle(fontSize: 12, color: Colors.black54),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
   /// `chat.addToConversation` server-side, which adds them to the
   /// current thread AND fires `conversation.created` on their end so
   /// their app prompts them to switch.
@@ -486,6 +565,11 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
           ],
         ),
         actions: [
+          IconButton(
+            tooltip: 'Show remote-desktop password (for first-time setup)',
+            icon: const Icon(Icons.vpn_key_outlined),
+            onPressed: _showRemotePasswordSheet,
+          ),
           IconButton(
             tooltip: 'Add a colleague from this Wi-Fi',
             icon: const Icon(Icons.person_add_alt_1),

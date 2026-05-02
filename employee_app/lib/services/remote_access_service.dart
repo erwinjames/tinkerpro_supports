@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:path_provider/path_provider.dart';
@@ -215,12 +217,11 @@ class RemoteAccessService {
     }
   }
 
-  /// Hand back the ID + the build-baked permanent password. The
-  /// employee sets that password once in RustDesk Settings → Security
-  /// → Permanent password (per Windows install). Every /remote then
-  /// works: admin enters this password in their RustDesk and the
-  /// employee gets a one-tap Accept popup (approve-mode is
-  /// 'password-click').
+  /// Hand back the ID + a permanent password derived from the
+  /// machine's hardware fingerprint. Same machine always produces the
+  /// same password (so the employee sets it in RustDesk Settings once
+  /// and never has to update it), but every workstation has a
+  /// different one — no shared secret across the deployment.
   Future<RemoteSessionConfig?> prepareForIncoming({
     Duration retryFor = const Duration(seconds: 10),
   }) async {
@@ -229,11 +230,99 @@ class RemoteAccessService {
 
     final id = await getRustDeskId(retryFor: retryFor);
     if (id == null || id.isEmpty) return null;
-    const password = String.fromEnvironment('RUSTDESK_PERMANENT_PASSWORD');
-    return RemoteSessionConfig(
-      id: id,
-      password: password.isNotEmpty ? password : null,
+    final password = await derivePermanentPassword();
+    return RemoteSessionConfig(id: id, password: password);
+  }
+
+  /// HMAC-SHA256(salt, machine-fingerprint) truncated to a 12-char
+  /// alphanumeric password. The salt comes from the build via
+  /// `--dart-define=RUSTDESK_PASSWORD_SALT=...` so the same hardware
+  /// produces a different password under a different deployment
+  /// (rotate by changing the salt and rebuilding). Cached after first
+  /// call — fingerprint reads are not free.
+  String? _cachedPassword;
+  Future<String> derivePermanentPassword() async {
+    if (_cachedPassword != null) return _cachedPassword!;
+
+    const salt = String.fromEnvironment(
+      'RUSTDESK_PASSWORD_SALT',
+      defaultValue: 'tinkerpro-remote-default-salt',
     );
+    final fingerprint = await _machineFingerprint();
+    final mac = Hmac(sha256, utf8.encode(salt));
+    final digest = mac.convert(utf8.encode(fingerprint));
+
+    // Base64URL of 9 bytes → 12 chars, all alphanumeric or - / _.
+    // Strip the - and _ to keep it copy-friendly into RustDesk's GUI.
+    final raw = base64Url.encode(digest.bytes.sublist(0, 9));
+    _cachedPassword = raw.replaceAll(RegExp(r'[-_=]'), '0');
+    return _cachedPassword!;
+  }
+
+  /// Read a stable per-machine identifier. Falls back through several
+  /// sources so we always get *something* — never returns empty.
+  Future<String> _machineFingerprint() async {
+    if (Platform.isWindows) {
+      // Windows machine GUID lives in the registry; reg.exe is the
+      // most-portable way to read it without pulling in a Win32 plugin.
+      try {
+        final r = await Process.run(
+          'reg',
+          [
+            'query',
+            r'HKLM\SOFTWARE\Microsoft\Cryptography',
+            '/v',
+            'MachineGuid',
+          ],
+          runInShell: false,
+        ).timeout(const Duration(seconds: 5));
+        final m = RegExp(r'MachineGuid\s+REG_SZ\s+([0-9a-fA-F-]{32,40})')
+            .firstMatch('${r.stdout}');
+        if (m != null) return 'win:${m.group(1)}';
+      } catch (e) {
+        debugPrint('[remote-access] reg query failed: $e');
+      }
+      // Fallback: BIOS serial via wmic.
+      try {
+        final r = await Process.run(
+          'wmic',
+          ['csproduct', 'get', 'uuid'],
+          runInShell: false,
+        ).timeout(const Duration(seconds: 5));
+        final lines = '${r.stdout}'
+            .split(RegExp(r'\r?\n'))
+            .map((s) => s.trim())
+            .where((s) => s.isNotEmpty && s != 'UUID')
+            .toList();
+        if (lines.isNotEmpty) return 'wmi:${lines.first}';
+      } catch (e) {
+        debugPrint('[remote-access] wmic uuid failed: $e');
+      }
+    } else if (Platform.isLinux) {
+      try {
+        final id = await File('/etc/machine-id').readAsString();
+        return 'linux:${id.trim()}';
+      } catch (_) {/* try /var path next */}
+      try {
+        final id = await File('/var/lib/dbus/machine-id').readAsString();
+        return 'linux:${id.trim()}';
+      } catch (_) {/* fall through */}
+    } else if (Platform.isMacOS) {
+      try {
+        final r = await Process.run(
+          'ioreg',
+          ['-rd1', '-c', 'IOPlatformExpertDevice'],
+          runInShell: false,
+        ).timeout(const Duration(seconds: 5));
+        final m = RegExp(r'"IOPlatformUUID"\s*=\s*"([^"]+)"')
+            .firstMatch('${r.stdout}');
+        if (m != null) return 'mac:${m.group(1)}';
+      } catch (_) {/* fall through */}
+    }
+    // Last resort — never let derivation fail completely. Falls back
+    // to a host-network fingerprint that's still stable across reboots
+    // on the same machine.
+    return 'host:${Platform.localHostname}';
   }
 
   // Kept for any future "share a one-shot temp password" flow — not
