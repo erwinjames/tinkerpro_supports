@@ -52,15 +52,14 @@ class RemoteAccessService {
       // at our private relay.
       await _killExistingRustDesk();
       await _configureRelay();
-      // approve-mode='click' so RustDesk pops up an Accept prompt on
-      // the employee's screen for incoming connections. Yes, that's
-      // a second tap on top of the chat /remote Allow — but it's the
-      // only auth path that's actually reliable on Windows portable.
-      // `--password` for the permanent password runs over IPC and
-      // silently no-ops on Windows portable, leaving RustDesk.toml's
-      // password = '' even after we set it. With click mode, password
-      // is moot — the employee's tap is what authorizes.
-      await _setOptionInRustDeskToml('approve-mode', 'click');
+      // approve-mode='password,click' = both required: admin must
+      // supply the matching password AND the employee must tap the
+      // RustDesk Accept popup. Click alone isn't enough in this
+      // RustDesk build — it still validates a password first. The
+      // password lives in --dart-define=RUSTDESK_PERMANENT_PASSWORD
+      // and the employee sets it once in RustDesk Settings → Security
+      // → Permanent password. After that, every /remote works.
+      await _setOptionInRustDeskToml('approve-mode', 'password-click');
       await launch();
     } catch (e) {
       debugPrint('[remote-access] prepare() failed: $e');
@@ -216,10 +215,12 @@ class RemoteAccessService {
     }
   }
 
-  /// Hand back the RustDesk ID admin needs to click. Authorization
-  /// happens via RustDesk's own Accept popup on the employee's screen
-  /// (we set approve-mode='click' during prepare()) — no password
-  /// handoff through chat is needed.
+  /// Hand back the ID + the build-baked permanent password. The
+  /// employee sets that password once in RustDesk Settings → Security
+  /// → Permanent password (per Windows install). Every /remote then
+  /// works: admin enters this password in their RustDesk and the
+  /// employee gets a one-tap Accept popup (approve-mode is
+  /// 'password-click').
   Future<RemoteSessionConfig?> prepareForIncoming({
     Duration retryFor = const Duration(seconds: 10),
   }) async {
@@ -228,7 +229,11 @@ class RemoteAccessService {
 
     final id = await getRustDeskId(retryFor: retryFor);
     if (id == null || id.isEmpty) return null;
-    return RemoteSessionConfig(id: id);
+    const password = String.fromEnvironment('RUSTDESK_PERMANENT_PASSWORD');
+    return RemoteSessionConfig(
+      id: id,
+      password: password.isNotEmpty ? password : null,
+    );
   }
 
   // Kept for any future "share a one-shot temp password" flow — not
@@ -393,10 +398,11 @@ class RemoteAccessService {
   }
 }
 
-/// Result of [RemoteAccessService.prepareForIncoming]. In click mode
-/// the admin only needs the ID — RustDesk asks the employee to accept
-/// the inbound connection on their own screen.
+/// Result of [RemoteAccessService.prepareForIncoming]. ID is the
+/// RustDesk ID for admin to click. Password is the build-baked
+/// permanent password the employee set once in RustDesk Settings.
 class RemoteSessionConfig {
-  RemoteSessionConfig({required this.id});
+  RemoteSessionConfig({required this.id, this.password});
   final String id;
+  final String? password;
 }

@@ -192,16 +192,17 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
     }
 
     // Reply with both ID and password. The web admin recognises this
-    // Web admin's chat.php renders 'RustDesk ID: <id>' as a clickable
-    // rustdesk://connect/<id> link. Admin clicks → RustDesk opens →
-    // employee sees the Accept popup on their screen and taps Accept.
-    // No password handoff: approve-mode='click' authorizes via the
-    // employee tap rather than a credential match (which proved
-    // unreliable on Windows portable, where --password silently
-    // no-ops because it needs an installed RustDesk service).
+    // Web admin's chat.php renders this exact prefix into a clickable
+    // rustdesk://connect/<id> link + a click-to-copy password chip.
+    // Admin clicks → RustDesk opens → admin types the password →
+    // employee gets a one-tap Accept popup → connected.
+    final body = session.password != null
+        ? 'Remote access approved. RustDesk ID: ${session.id}, '
+            'password: ${session.password}'
+        : 'Remote access approved. RustDesk ID: ${session.id}';
     await widget.chat.send(
       convId: _convId,
-      body: 'Remote access approved. RustDesk ID: ${session.id}',
+      body: body,
       clientNonce: _newNonce(),
     );
     if (mounted) {
