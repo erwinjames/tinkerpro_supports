@@ -44,10 +44,35 @@ class RemoteAccessService {
     _prepared = true;
     try {
       _bundledBinaryPath = await _extractBundled();
+      // Stop any pre-existing RustDesk so it picks up our freshly
+      // written config on next launch — RustDesk caches the TOML in
+      // memory at startup and won't re-read it while running. Without
+      // this, an old instance from a previous build keeps using the
+      // public rs-ny.rustdesk.com server even after we point the TOML
+      // at our private relay.
+      await _killExistingRustDesk();
       await _configureRelay();
     } catch (e) {
       debugPrint('[remote-access] prepare() failed: $e');
     }
+  }
+
+  Future<void> _killExistingRustDesk() async {
+    try {
+      if (Platform.isWindows) {
+        await Process.run(
+          'taskkill',
+          ['/F', '/IM', 'rustdesk.exe', '/T'],
+          runInShell: false,
+        ).timeout(const Duration(seconds: 5));
+      } else if (Platform.isLinux || Platform.isMacOS) {
+        await Process.run(
+          'pkill',
+          ['-x', 'rustdesk'],
+          runInShell: false,
+        ).timeout(const Duration(seconds: 5));
+      }
+    } catch (_) {/* nothing to kill — fine */}
   }
 
   /// If the build supplied a self-hosted RustDesk relay via
