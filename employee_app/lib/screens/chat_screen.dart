@@ -192,17 +192,21 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
     }
 
     // Reply with both ID and password. The web admin recognises this
-    // exact prefix and renders a clickable
-    // rustdesk://connect/{id}/{password} link that auto-fills both
-    // fields — admin gets one-click connect, no second prompt on
-    // employee's side because approve-mode is now 'password'.
+    // Web admin's chat.php renders 'RustDesk ID: <id>' as a clickable
+    // rustdesk://connect/<id> link. Admin clicks → RustDesk opens →
+    // employee sees the Accept popup on their screen and taps Accept.
+    // No password handoff: approve-mode='click' authorizes via the
+    // employee tap rather than a credential match (which proved
+    // unreliable on Windows portable, where --password silently
+    // no-ops because it needs an installed RustDesk service).
     await widget.chat.send(
       convId: _convId,
-      body: 'Remote access approved. RustDesk ID: ${session.id}, '
-          'password: ${session.password}',
+      body: 'Remote access approved. RustDesk ID: ${session.id}',
       clientNonce: _newNonce(),
     );
-    if (mounted) _toast('RustDesk credentials shared with admin');
+    if (mounted) {
+      _toast('Tap Accept on the RustDesk popup when admin connects');
+    }
   }
 
   void _scrollToBottom() {

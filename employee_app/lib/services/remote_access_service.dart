@@ -52,58 +52,19 @@ class RemoteAccessService {
       // at our private relay.
       await _killExistingRustDesk();
       await _configureRelay();
-      // approve-mode set in TOML so RustDesk reads it at startup. The
-      // password CANNOT be set yet — `--password` on Windows uses IPC
-      // to a running RustDesk and silently no-ops if there's nothing
-      // to receive it. We launch RustDesk first, then push the
-      // password into the live instance.
-      await _setOptionInRustDeskToml('approve-mode', 'password');
+      // approve-mode='click' so RustDesk pops up an Accept prompt on
+      // the employee's screen for incoming connections. Yes, that's
+      // a second tap on top of the chat /remote Allow — but it's the
+      // only auth path that's actually reliable on Windows portable.
+      // `--password` for the permanent password runs over IPC and
+      // silently no-ops on Windows portable, leaving RustDesk.toml's
+      // password = '' even after we set it. With click mode, password
+      // is moot — the employee's tap is what authorizes.
+      await _setOptionInRustDeskToml('approve-mode', 'click');
       await launch();
-      await _setSessionPasswordInLiveRustDesk();
     } catch (e) {
       debugPrint('[remote-access] prepare() failed: $e');
     }
-  }
-
-  /// Per-launch password generated during prepare() and reused for
-  /// every /remote in this app session. Rotates each app restart, so
-  /// closing the app revokes the credential.
-  String? _sessionPassword;
-
-  /// `rustdesk.exe --password X` on Windows portable is an IPC call to
-  /// a running RustDesk — without a live instance, it writes nothing.
-  /// We poll briefly for RustDesk to come up after launch, then push
-  /// the password. Linux behaves the same way as far as we've seen.
-  Future<void> _setSessionPasswordInLiveRustDesk() async {
-    final binary = await _resolveBinary();
-    if (binary == null) return;
-
-    _sessionPassword = _randomPassword(10);
-
-    // Wait briefly for the just-launched RustDesk to wire up its IPC
-    // socket. ~1.5s seems sufficient on a typical Windows desktop;
-    // we retry up to 8s before giving up.
-    final deadline = DateTime.now().add(const Duration(seconds: 8));
-    while (DateTime.now().isBefore(deadline)) {
-      await Future.delayed(const Duration(milliseconds: 1500));
-      try {
-        final r = await Process.run(
-          binary,
-          ['--password', _sessionPassword!],
-          runInShell: false,
-        ).timeout(const Duration(seconds: 5));
-        // RustDesk's --password prints nothing on success and nothing on
-        // silent failure either, so the only signal is whether the
-        // password actually landed in RustDesk.toml. We can't read that
-        // (encrypted), so trust the call and exit. If it really didn't
-        // take effect, prepareForIncoming will report "Wrong password"
-        // back through chat and we'll re-investigate.
-        if (r.exitCode == 0) return;
-      } catch (e) {
-        debugPrint('[remote-access] --password retry: $e');
-      }
-    }
-    debugPrint('[remote-access] could not set --password within deadline');
   }
 
   Future<void> _killExistingRustDesk() async {
@@ -255,32 +216,24 @@ class RemoteAccessService {
     }
   }
 
-  /// Hand back the credential pair the admin needs to connect. Both
-  /// halves are already loaded into RustDesk — the password was set
-  /// before launch in [prepare] and lives in the session-only
-  /// `_sessionPassword`, the ID is read from RustDesk's CLI.
-  ///
-  /// We don't rotate the password per /remote — RustDesk only loads
-  /// the permanent password at startup, so rotating mid-session would
-  /// give admin a credential the running RustDesk doesn't know yet
-  /// and the connect would fail with "Wrong password". The password
-  /// already rotates per app launch, which is the meaningful
-  /// boundary: closing the app revokes access.
+  /// Hand back the RustDesk ID admin needs to click. Authorization
+  /// happens via RustDesk's own Accept popup on the employee's screen
+  /// (we set approve-mode='click' during prepare()) — no password
+  /// handoff through chat is needed.
   Future<RemoteSessionConfig?> prepareForIncoming({
     Duration retryFor = const Duration(seconds: 10),
   }) async {
-    if (_sessionPassword == null) {
-      debugPrint('[remote-access] no session password — prepare() failed?');
-      return null;
-    }
     // Make sure RustDesk is running (idempotent if already up).
     await launch();
 
     final id = await getRustDeskId(retryFor: retryFor);
     if (id == null || id.isEmpty) return null;
-    return RemoteSessionConfig(id: id, password: _sessionPassword!);
+    return RemoteSessionConfig(id: id);
   }
 
+  // Kept for any future "share a one-shot temp password" flow — not
+  // currently called.
+  // ignore: unused_element
   String _randomPassword(int length) {
     // No I/O, l, 0, O — confusable in some fonts when a user reads
     // the password aloud over the chat handoff.
@@ -440,11 +393,10 @@ class RemoteAccessService {
   }
 }
 
-/// Result of [RemoteAccessService.prepareForIncoming]. Carry both
-/// halves of the credential pair the admin needs to connect without
-/// any further employee interaction.
+/// Result of [RemoteAccessService.prepareForIncoming]. In click mode
+/// the admin only needs the ID — RustDesk asks the employee to accept
+/// the inbound connection on their own screen.
 class RemoteSessionConfig {
-  RemoteSessionConfig({required this.id, required this.password});
+  RemoteSessionConfig({required this.id});
   final String id;
-  final String password;
 }
