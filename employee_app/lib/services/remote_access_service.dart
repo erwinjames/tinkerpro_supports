@@ -52,9 +52,49 @@ class RemoteAccessService {
       // at our private relay.
       await _killExistingRustDesk();
       await _configureRelay();
+      await _configureAccessControl();
     } catch (e) {
       debugPrint('[remote-access] prepare() failed: $e');
     }
+  }
+
+  /// Persistent per-launch password. Generated once during prepare()
+  /// and re-used for every /remote in this app session. Rotates
+  /// automatically each time the app restarts, so it's not a permanent
+  /// trust grant — the employee gets a fresh credential pair next
+  /// session even if they don't think to rotate it manually.
+  ///
+  /// Set HERE rather than in prepareForIncoming() because RustDesk
+  /// only loads its permanent password at startup; running it with a
+  /// fresh `--password` once it's already up has no effect, and
+  /// produces the "Wrong password" RustDesk shows admin when the chat
+  /// reply's password doesn't match what's actually in memory.
+  String? _sessionPassword;
+
+  Future<void> _configureAccessControl() async {
+    final binary = await _resolveBinary();
+    if (binary == null) return;
+
+    _sessionPassword = _randomPassword(10);
+
+    // Permanent password — RustDesk hashes/salts internally and writes
+    // the encrypted form to RustDesk.toml. The next launch reads it.
+    try {
+      await Process.run(
+        binary,
+        ['--password', _sessionPassword!],
+        runInShell: false,
+      ).timeout(const Duration(seconds: 5));
+    } catch (e) {
+      debugPrint('[remote-access] --password set failed: $e');
+    }
+
+    // approve-mode='password' makes RustDesk auto-accept any inbound
+    // connection that supplies the matching password — admin gets a
+    // one-prompt connect (chat link → enter password → in), no second
+    // confirmation on the employee's side. This MUST be set before
+    // RustDesk starts, same reason as the password.
+    await _setOptionInRustDeskToml('approve-mode', 'password');
   }
 
   Future<void> _killExistingRustDesk() async {
@@ -206,57 +246,30 @@ class RemoteAccessService {
     }
   }
 
-  /// Configure RustDesk for one-prompt remote-access: set a fresh
-  /// permanent password and switch `approve-mode` to `password`. After
-  /// this, an admin who connects with the password is auto-accepted —
-  /// the employee doesn't have to click Accept inside RustDesk's
-  /// native prompt for THIS session.
+  /// Hand back the credential pair the admin needs to connect. Both
+  /// halves are already loaded into RustDesk — the password was set
+  /// before launch in [prepare] and lives in the session-only
+  /// `_sessionPassword`, the ID is read from RustDesk's CLI.
   ///
-  /// Password rotates on each invocation, so a previous admin's
-  /// password becomes invalid the next time the employee taps Allow
-  /// on a /remote card. That keeps the access window scoped to "the
-  /// session the employee just approved" rather than a permanent
-  /// trust grant.
-  ///
-  /// Returns null if RustDesk isn't available or the ID couldn't be
-  /// read within the deadline.
+  /// We don't rotate the password per /remote — RustDesk only loads
+  /// the permanent password at startup, so rotating mid-session would
+  /// give admin a credential the running RustDesk doesn't know yet
+  /// and the connect would fail with "Wrong password". The password
+  /// already rotates per app launch, which is the meaningful
+  /// boundary: closing the app revokes access.
   Future<RemoteSessionConfig?> prepareForIncoming({
     Duration retryFor = const Duration(seconds: 10),
   }) async {
-    final binary = await _resolveBinary();
-    if (binary == null) return null;
-
-    final password = _randomPassword(10);
-
-    // Set the permanent password. RustDesk hashes/salts internally;
-    // we never see the encrypted form. Run with a short timeout —
-    // this returns instantly on success.
-    try {
-      await Process.run(
-        binary,
-        ['--password', password],
-        runInShell: false,
-      ).timeout(const Duration(seconds: 5));
-    } catch (e) {
-      debugPrint('[remote-access] --password set failed: $e');
+    if (_sessionPassword == null) {
+      debugPrint('[remote-access] no session password — prepare() failed?');
       return null;
     }
-
-    // Flip approve-mode → 'password' so RustDesk skips its native
-    // accept prompt when the supplied password matches. Done by
-    // editing RustDesk2.toml directly because the CLI's --option
-    // flag's exact key syntax varies between versions.
-    await _setOptionInRustDeskToml('approve-mode', 'password');
-
-    // Make sure RustDesk is running so the option-change takes
-    // effect immediately. Idempotent — Process.start with a running
-    // instance is a no-op on RustDesk's side (it foregrounds the
-    // existing window instead of spawning a duplicate).
+    // Make sure RustDesk is running (idempotent if already up).
     await launch();
 
     final id = await getRustDeskId(retryFor: retryFor);
     if (id == null || id.isEmpty) return null;
-    return RemoteSessionConfig(id: id, password: password);
+    return RemoteSessionConfig(id: id, password: _sessionPassword!);
   }
 
   String _randomPassword(int length) {
