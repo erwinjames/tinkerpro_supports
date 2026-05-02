@@ -256,12 +256,22 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
     final result = await FilePicker.platform.pickFiles(withData: false);
     if (result == null || result.files.isEmpty) return;
     final path = result.files.first.path;
-    if (path == null) return;
-    final att = await widget.chat.uploadAttachment(_convId, File(path));
-    if (att == null) {
-      _toast('Upload failed.');
+    if (path == null) {
+      _toast('Could not access that file (no path).');
       return;
     }
+
+    final ChatAttachment att;
+    try {
+      att = await widget.chat.uploadAttachment(_convId, File(path));
+    } on UploadException catch (e) {
+      if (mounted) _toast('Upload failed: ${e.message}');
+      return;
+    } catch (e) {
+      if (mounted) _toast('Upload failed: $e');
+      return;
+    }
+
     final msg = await widget.chat.send(
       convId: _convId,
       body: '',

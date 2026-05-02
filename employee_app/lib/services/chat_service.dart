@@ -120,13 +120,32 @@ class ChatService {
   }
 
   /// Upload + claim. Returns the attachment id ready to be cited by
-  /// the next [send] call.
-  Future<ChatAttachment?> uploadAttachment(int convId, File file) async {
-    final mp = await dio.MultipartFile.fromFile(file.path,
-        filename: file.uri.pathSegments.last);
+  /// the next [send] call. Throws [UploadException] with the server's
+  /// human-readable message on failure so the UI can show it.
+  Future<ChatAttachment> uploadAttachment(int convId, File file) async {
+    if (!await file.exists()) {
+      throw UploadException('File no longer exists on disk');
+    }
+    final size = await file.length();
+    if (size <= 0) {
+      throw UploadException(
+          'File is empty (0 bytes) — likely a cloud-storage placeholder');
+    }
+
+    // Use the basename for filename — `file.uri.pathSegments.last` returns
+    // an empty string on some Windows paths that end with a drive letter,
+    // and Pusher/Dio falls over with empty filenames.
+    final filename = file.path.split(Platform.pathSeparator).last;
+
+    final mp = await dio.MultipartFile.fromFile(file.path, filename: filename);
     final res = await api.uploadChat('chat.uploadAttachment',
         fields: {'conversation_id': convId.toString()}, file: mp);
-    if (res['success'] != true || res['attachment'] is! Map) return null;
+    if (res['success'] != true || res['attachment'] is! Map) {
+      throw UploadException(
+          (res['message'] as String?)?.trim().isNotEmpty == true
+              ? res['message'] as String
+              : 'Server returned no attachment');
+    }
     return ChatAttachment.fromJson(
         Map<String, dynamic>.from(res['attachment']));
   }
@@ -217,4 +236,11 @@ class EmployeeChatInfo {
   final String meName;
   final String storeName;
   final List<ChatParticipant> participants;
+}
+
+class UploadException implements Exception {
+  UploadException(this.message);
+  final String message;
+  @override
+  String toString() => message;
 }
