@@ -241,8 +241,20 @@ class RemoteAccessService {
   /// (rotate by changing the salt and rebuilding). Cached after first
   /// call — fingerprint reads are not free.
   String? _cachedPassword;
+
+  /// Returns the active permanent password the employee has agreed to
+  /// use with admins. Resolution order:
+  ///   1. user-chosen value saved via [setStoredPermanentPassword]
+  ///   2. HMAC-SHA256(salt, machine-fingerprint) — the auto default
+  /// Either way the same machine returns the same password every call.
   Future<String> derivePermanentPassword() async {
     if (_cachedPassword != null) return _cachedPassword!;
+
+    final stored = await _readStoredPassword();
+    if (stored != null && stored.isNotEmpty) {
+      _cachedPassword = stored;
+      return stored;
+    }
 
     const salt = String.fromEnvironment(
       'RUSTDESK_PASSWORD_SALT',
@@ -257,6 +269,47 @@ class RemoteAccessService {
     final raw = base64Url.encode(digest.bytes.sublist(0, 9));
     _cachedPassword = raw.replaceAll(RegExp(r'[-_=]'), '0');
     return _cachedPassword!;
+  }
+
+  /// Whether the active password is one the employee picked manually
+  /// (vs. the auto-derived fingerprint default). The UI uses this to
+  /// label the "Edit" button correctly.
+  Future<bool> hasUserChosenPassword() async {
+    final stored = await _readStoredPassword();
+    return stored != null && stored.isNotEmpty;
+  }
+
+  /// Save a user-chosen password and switch the active password to it.
+  /// Empty/null clears the override (next derive() falls back to the
+  /// fingerprint default). Trim and basic validation happen here so
+  /// callers don't have to repeat them.
+  Future<void> setStoredPermanentPassword(String? password) async {
+    final f = await _passwordFile();
+    final clean = (password ?? '').trim();
+    if (clean.isEmpty) {
+      if (await f.exists()) await f.delete();
+      _cachedPassword = null;
+      return;
+    }
+    await f.writeAsString(clean, flush: true);
+    _cachedPassword = clean;
+  }
+
+  Future<String?> _readStoredPassword() async {
+    try {
+      final f = await _passwordFile();
+      if (!await f.exists()) return null;
+      final raw = (await f.readAsString()).trim();
+      return raw.isEmpty ? null : raw;
+    } catch (e) {
+      debugPrint('[remote-access] read stored password: $e');
+      return null;
+    }
+  }
+
+  Future<File> _passwordFile() async {
+    final dir = await getApplicationSupportDirectory();
+    return File('${dir.path}/remote-password.txt');
   }
 
   /// Read a stable per-machine identifier. Falls back through several

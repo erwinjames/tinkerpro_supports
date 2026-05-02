@@ -318,79 +318,165 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
   }
 
   /// Open the LAN-peers picker. Picking a colleague calls
-  /// One-time setup helper: show the per-machine RustDesk permanent
-  /// password derived from the hardware fingerprint, with a copy
-  /// button. Employee opens RustDesk → Settings → Security → Permanent
-  /// password and pastes this in. Same password every time on the
-  /// same machine, so this is a once-per-install step.
+  /// Show the active RustDesk permanent password (user-chosen or the
+  /// auto-derived fingerprint default), with a copy button and an
+  /// Edit button so the employee can replace it with one they'll
+  /// remember. After editing, they paste it into RustDesk's Settings
+  /// → Security → Permanent password — once per Windows install.
   Future<void> _showRemotePasswordSheet() async {
-    final password = await RemoteAccessService.instance.derivePermanentPassword();
+    final svc = RemoteAccessService.instance;
+    var password = await svc.derivePermanentPassword();
+    var userChosen = await svc.hasUserChosenPassword();
     if (!mounted) return;
+
     await showModalBottomSheet<void>(
       context: context,
       backgroundColor: Brand.canvas,
+      isScrollControlled: true,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
       builder: (ctx) {
-        return Padding(
-          padding: const EdgeInsets.fromLTRB(20, 20, 20, 28),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'Remote desktop password',
-                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+        return StatefulBuilder(
+          builder: (ctx, setSheet) {
+            Future<void> editPassword() async {
+              final next = await _promptForPassword(
+                  ctx, initial: userChosen ? password : '');
+              if (next == null) return; // cancelled
+              await svc.setStoredPermanentPassword(next);
+              password = await svc.derivePermanentPassword();
+              userChosen = await svc.hasUserChosenPassword();
+              setSheet(() {});
+              if (mounted) {
+                _toast(next.isEmpty
+                    ? 'Reverted to auto-generated password'
+                    : 'Password updated — set the new one in RustDesk');
+              }
+            }
+
+            return Padding(
+              padding: EdgeInsets.fromLTRB(
+                20,
+                20,
+                20,
+                28 + MediaQuery.of(ctx).viewInsets.bottom,
               ),
-              const SizedBox(height: 8),
-              const Text(
-                'One-time setup: open RustDesk → Settings → Security '
-                '→ Use permanent password → Set permanent password → '
-                'paste this value.',
-                style: TextStyle(fontSize: 13, height: 1.4),
-              ),
-              const SizedBox(height: 16),
-              Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
-                decoration: BoxDecoration(
-                  color: Brand.surface,
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: SelectableText(
-                        password,
-                        style: const TextStyle(
-                          fontFamily: 'monospace',
-                          fontSize: 18,
-                          letterSpacing: 1.2,
-                          fontWeight: FontWeight.w600,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      const Expanded(
+                        child: Text(
+                          'Remote desktop password',
+                          style: TextStyle(
+                              fontSize: 16, fontWeight: FontWeight.w600),
                         ),
                       ),
+                      TextButton.icon(
+                        onPressed: editPassword,
+                        icon: const Icon(Icons.edit, size: 16),
+                        label: Text(userChosen ? 'Change' : 'Set my own'),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    userChosen
+                        ? 'You picked this password. Open RustDesk → Settings → Security → Permanent password → set it to the value below.'
+                        : 'Auto-generated for this machine. Open RustDesk → Settings → Security → Permanent password → set it to the value below — or tap "Set my own" to use a password you\'ll remember.',
+                    style: const TextStyle(fontSize: 13, height: 1.4),
+                  ),
+                  const SizedBox(height: 16),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 14),
+                    decoration: BoxDecoration(
+                      color: Brand.surface,
+                      borderRadius: BorderRadius.circular(8),
                     ),
-                    IconButton(
-                      tooltip: 'Copy',
-                      icon: const Icon(Icons.copy),
-                      onPressed: () {
-                        Clipboard.setData(ClipboardData(text: password));
-                        _toast('Password copied');
-                      },
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: SelectableText(
+                            password,
+                            style: const TextStyle(
+                              fontFamily: 'monospace',
+                              fontSize: 18,
+                              letterSpacing: 1.2,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                        IconButton(
+                          tooltip: 'Copy',
+                          icon: const Icon(Icons.copy),
+                          onPressed: () {
+                            Clipboard.setData(ClipboardData(text: password));
+                            _toast('Password copied');
+                          },
+                        ),
+                      ],
                     ),
-                  ],
-                ),
+                  ),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'Whatever shows here is what gets sent to admin every '
+                    'time you tap Allow on a /remote — make sure RustDesk\'s '
+                    'permanent password matches.',
+                    style: TextStyle(fontSize: 12, color: Colors.black54),
+                  ),
+                ],
               ),
-              const SizedBox(height: 12),
-              const Text(
-                'This password is unique to THIS machine and stays the same '
-                'across app restarts. Set it in RustDesk once, and every '
-                '/remote from admin will work without re-typing.',
-                style: TextStyle(fontSize: 12, color: Colors.black54),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Future<String?> _promptForPassword(
+    BuildContext ctx, {
+    required String initial,
+  }) async {
+    final controller = TextEditingController(text: initial);
+    final formKey = GlobalKey<FormState>();
+    return showDialog<String?>(
+      context: ctx,
+      builder: (ctx) {
+        return AlertDialog(
+          title: const Text('Pick a remote desktop password'),
+          content: Form(
+            key: formKey,
+            child: TextFormField(
+              controller: controller,
+              autofocus: true,
+              decoration: const InputDecoration(
+                hintText: 'e.g. store-front-2026',
+                helperText: 'Min 6 characters. Empty resets to auto-generated.',
               ),
-            ],
+              validator: (v) {
+                final t = (v ?? '').trim();
+                if (t.isEmpty) return null; // empty = clear
+                if (t.length < 6) return 'At least 6 characters';
+                return null;
+              },
+            ),
           ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(null),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () {
+                if (!(formKey.currentState?.validate() ?? false)) return;
+                Navigator.of(ctx).pop(controller.text.trim());
+              },
+              child: const Text('Save'),
+            ),
+          ],
         );
       },
     );
