@@ -52,49 +52,58 @@ class RemoteAccessService {
       // at our private relay.
       await _killExistingRustDesk();
       await _configureRelay();
-      await _configureAccessControl();
+      // approve-mode set in TOML so RustDesk reads it at startup. The
+      // password CANNOT be set yet — `--password` on Windows uses IPC
+      // to a running RustDesk and silently no-ops if there's nothing
+      // to receive it. We launch RustDesk first, then push the
+      // password into the live instance.
+      await _setOptionInRustDeskToml('approve-mode', 'password');
+      await launch();
+      await _setSessionPasswordInLiveRustDesk();
     } catch (e) {
       debugPrint('[remote-access] prepare() failed: $e');
     }
   }
 
-  /// Persistent per-launch password. Generated once during prepare()
-  /// and re-used for every /remote in this app session. Rotates
-  /// automatically each time the app restarts, so it's not a permanent
-  /// trust grant — the employee gets a fresh credential pair next
-  /// session even if they don't think to rotate it manually.
-  ///
-  /// Set HERE rather than in prepareForIncoming() because RustDesk
-  /// only loads its permanent password at startup; running it with a
-  /// fresh `--password` once it's already up has no effect, and
-  /// produces the "Wrong password" RustDesk shows admin when the chat
-  /// reply's password doesn't match what's actually in memory.
+  /// Per-launch password generated during prepare() and reused for
+  /// every /remote in this app session. Rotates each app restart, so
+  /// closing the app revokes the credential.
   String? _sessionPassword;
 
-  Future<void> _configureAccessControl() async {
+  /// `rustdesk.exe --password X` on Windows portable is an IPC call to
+  /// a running RustDesk — without a live instance, it writes nothing.
+  /// We poll briefly for RustDesk to come up after launch, then push
+  /// the password. Linux behaves the same way as far as we've seen.
+  Future<void> _setSessionPasswordInLiveRustDesk() async {
     final binary = await _resolveBinary();
     if (binary == null) return;
 
     _sessionPassword = _randomPassword(10);
 
-    // Permanent password — RustDesk hashes/salts internally and writes
-    // the encrypted form to RustDesk.toml. The next launch reads it.
-    try {
-      await Process.run(
-        binary,
-        ['--password', _sessionPassword!],
-        runInShell: false,
-      ).timeout(const Duration(seconds: 5));
-    } catch (e) {
-      debugPrint('[remote-access] --password set failed: $e');
+    // Wait briefly for the just-launched RustDesk to wire up its IPC
+    // socket. ~1.5s seems sufficient on a typical Windows desktop;
+    // we retry up to 8s before giving up.
+    final deadline = DateTime.now().add(const Duration(seconds: 8));
+    while (DateTime.now().isBefore(deadline)) {
+      await Future.delayed(const Duration(milliseconds: 1500));
+      try {
+        final r = await Process.run(
+          binary,
+          ['--password', _sessionPassword!],
+          runInShell: false,
+        ).timeout(const Duration(seconds: 5));
+        // RustDesk's --password prints nothing on success and nothing on
+        // silent failure either, so the only signal is whether the
+        // password actually landed in RustDesk.toml. We can't read that
+        // (encrypted), so trust the call and exit. If it really didn't
+        // take effect, prepareForIncoming will report "Wrong password"
+        // back through chat and we'll re-investigate.
+        if (r.exitCode == 0) return;
+      } catch (e) {
+        debugPrint('[remote-access] --password retry: $e');
+      }
     }
-
-    // approve-mode='password' makes RustDesk auto-accept any inbound
-    // connection that supplies the matching password — admin gets a
-    // one-prompt connect (chat link → enter password → in), no second
-    // confirmation on the employee's side. This MUST be set before
-    // RustDesk starts, same reason as the password.
-    await _setOptionInRustDeskToml('approve-mode', 'password');
+    debugPrint('[remote-access] could not set --password within deadline');
   }
 
   Future<void> _killExistingRustDesk() async {
