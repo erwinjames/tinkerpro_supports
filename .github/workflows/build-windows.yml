@@ -56,7 +56,7 @@ jobs:
             --dart-define="CHAT_SOKETI_PORT=443" `
             --dart-define="CHAT_SOKETI_TLS=true" `
             --dart-define="CHAT_SOKETI_KEY=tinkerpro-chat-key" `
-            --dart-define="RUSTDESK_RELAY_HOST=192.168.1.23" `
+            --dart-define="RUSTDESK_RELAY_HOST=192.168.1.40" `
             --dart-define="RUSTDESK_RELAY_KEY=M5nva66QiMeNabC58GraFDPyMY5cKPNDKHgmPYA+b2c=" `
             --dart-define="RUSTDESK_PASSWORD_SALT=tinkerpro-2026-pepper"
         shell: pwsh
