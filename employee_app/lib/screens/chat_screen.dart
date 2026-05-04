@@ -166,7 +166,9 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
   Future<void> _allowRemoteAccess(ChatMessage m) async {
     setState(() => _resolvedRemotes.add(m.id));
 
-    final available = await RemoteAccessService.instance.isAvailable();
+    final svc = RemoteAccessService.instance;
+
+    final available = await svc.isAvailable();
     if (!available) {
       await widget.chat.send(
         convId: _convId,
@@ -179,8 +181,32 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
       return;
     }
 
-    final session = await RemoteAccessService.instance
-        .prepareForIncoming(retryFor: const Duration(seconds: 10));
+    // First-time setup: if the employee hasn't picked a password yet,
+    // prompt for one inline. The password is what admin will type into
+    // RustDesk's "Verify password" prompt, so the employee should also
+    // set this same password in RustDesk → Settings → Security
+    // → Permanent password.
+    if (!await svc.hasUserChosenPassword()) {
+      if (!mounted) return;
+      final picked = await _promptForPassword(context, initial: '');
+      if (picked == null || picked.isEmpty) {
+        await widget.chat.send(
+          convId: _convId,
+          body: 'Remote access setup not completed — employee did not '
+              'choose a password. Please ask them to retry /remote.',
+          clientNonce: _newNonce(),
+        );
+        setState(() => _resolvedRemotes.remove(m.id));
+        return;
+      }
+      await svc.setStoredPermanentPassword(picked);
+      if (mounted) {
+        await _showPostSetupReminderDialog(picked);
+      }
+    }
+
+    final session = await svc.prepareForIncoming(
+        retryFor: const Duration(seconds: 10));
     if (session == null) {
       await widget.chat.send(
         convId: _convId,
@@ -433,6 +459,70 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
           },
         );
       },
+    );
+  }
+
+  /// Shown right after the employee picks their password the first
+  /// time. Reminds them to set the SAME value in RustDesk's own
+  /// Settings → Security → Permanent password — without that step,
+  /// admin's connect attempt will fail with "Wrong password".
+  Future<void> _showPostSetupReminderDialog(String password) async {
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: const Text('One more step'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Now set the SAME password inside RustDesk so admin can '
+              'connect. Open RustDesk → Settings → Security → "Use both '
+              'passwords" → "Set permanent password" → paste the value '
+              'below.',
+              style: TextStyle(fontSize: 13, height: 1.4),
+            ),
+            const SizedBox(height: 12),
+            Container(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                color: Brand.surface,
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: SelectableText(
+                      password,
+                      style: const TextStyle(
+                        fontFamily: 'monospace',
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: 'Copy',
+                    icon: const Icon(Icons.copy, size: 18),
+                    onPressed: () {
+                      Clipboard.setData(ClipboardData(text: password));
+                      _toast('Copied');
+                    },
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('OK, done'),
+          ),
+        ],
+      ),
     );
   }
 
