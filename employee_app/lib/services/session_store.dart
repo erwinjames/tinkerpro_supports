@@ -19,6 +19,7 @@ class SessionStore {
   static const _kUserId    = 'employee_user_id';
   static const _kConvId    = 'employee_conv_id';
   static const _kPosHost   = 'pos_db_host';
+  static const _kPosPort   = 'pos_db_port';
 
   static Future<SessionStore> open() async {
     final prefs = await SharedPreferences.getInstance();
@@ -39,16 +40,25 @@ class SessionStore {
     await _prefs.setInt(_kConvId, convId);
   }
 
-  /// Last LAN host where we successfully reached the POS `tinkerpro`
+  /// Last LAN host:port where we successfully reached the POS `tinkerpro`
   /// MariaDB. Cached so the ticket form doesn't re-scan the subnet on
   /// every open. Cleared on a connection failure so the next attempt
-  /// re-discovers (e.g., the POS box got a new DHCP lease).
+  /// re-discovers (e.g., the POS box got a new DHCP lease, or the
+  /// merchant moved MariaDB to a non-default port).
   String? get posHost => _prefs.getString(_kPosHost);
-  Future<void> setPosHost(String? v) async {
-    if (v == null || v.isEmpty) {
+  int? get posPort => _prefs.getInt(_kPosPort);
+
+  Future<void> setPosTarget(String? host, int? port) async {
+    if (host == null || host.isEmpty) {
       await _prefs.remove(_kPosHost);
+      await _prefs.remove(_kPosPort);
+      return;
+    }
+    await _prefs.setString(_kPosHost, host);
+    if (port == null) {
+      await _prefs.remove(_kPosPort);
     } else {
-      await _prefs.setString(_kPosHost, v);
+      await _prefs.setInt(_kPosPort, port);
     }
   }
 

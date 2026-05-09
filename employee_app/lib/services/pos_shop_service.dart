@@ -22,14 +22,17 @@ import 'ticket_service.dart' show ShopInfo;
 /// auto-discovery + credential check + database read.
 ///
 /// Discovery walks cached → hint hosts → standard candidates → /24
-/// LAN sweep, validating each by attempting a real MariaDB
-/// handshake + a SELECT against `tinkerpro.shop`. Only hosts where
-/// every step succeeds get cached. Any host that has port 3306 open
-/// but isn't actually our POS gets skipped automatically.
+/// LAN sweep, repeating each step across a list of likely MariaDB
+/// ports (default `[3306, 3307, 3308, 33060, 8889, 4406]`). Only
+/// `(host, port)` pairs where every step succeeds get cached. Any
+/// pair that has the port open but isn't actually our POS gets
+/// skipped automatically.
 ///
 /// Compile-time overrides:
 ///   TPS_POS_HOST     pin to a specific host, skip discovery
-///   TPS_POS_PORT     default 3306
+///   TPS_POS_PORT     port to use when [TPS_POS_HOST] is pinned, default 3306
+///   TPS_POS_PORTS    csv of ports to sweep when discovering, default
+///                    "3306,3307,3308,33060,8889,4406"
 ///   TPS_POS_USER     default root
 ///   TPS_POS_PASS     default empty (XAMPP / TinkerPro POS default)
 ///   TPS_POS_DB       default tinkerpro
@@ -44,11 +47,13 @@ class PosShopService {
   final PosDbConfig _config;
   final PosDiscoveryService _discovery;
   String? _resolvedHost;
+  int? _resolvedPort;
   String? _lastError;
   ShopInfo? _lastResult;
 
   PosDbConfig get config => _config;
   String? get resolvedHost => _resolvedHost;
+  int? get resolvedPort => _resolvedPort;
   String? get lastError => _lastError;
 
   Future<ShopInfo?> getShopInfo({
@@ -58,23 +63,28 @@ class PosShopService {
   }) async {
     _lastError = null;
     _lastResult = null;
+    _resolvedHost = null;
+    _resolvedPort = null;
     final cleanTin = (tin ?? '').replaceAll(RegExp(r'[^0-9]'), '');
 
     if (_config.host.isNotEmpty) {
-      onProgress?.call('Using configured POS host ${_config.host}…');
-      final pinned = await _readShop(_config.host, cleanTin);
+      onProgress?.call(
+          'Using configured POS host ${_config.host}:${_config.port}…');
+      final pinned = await _readShop(_config.host, _config.port, cleanTin);
       if (pinned != null) {
         _resolvedHost = _config.host;
+        _resolvedPort = _config.port;
         return pinned;
       }
       return null;
     }
 
-    final winner = await _discovery.findHost(
+    final winner = await _discovery.findTarget(
+      ports: _config.ports,
       hintHosts: hintHosts,
       onProgress: onProgress,
-      validate: (host) async {
-        final result = await _readShop(host, cleanTin);
+      validate: (host, port) async {
+        final result = await _readShop(host, port, cleanTin);
         if (result != null) {
           _lastResult = result;
           return true;
@@ -86,22 +96,23 @@ class PosShopService {
       _lastError ??= 'No POS on this network accepted our connection.';
       return null;
     }
-    _resolvedHost = winner;
+    _resolvedHost = winner.host;
+    _resolvedPort = winner.port;
     return _lastResult;
   }
 
   /// Connect to one candidate, run the shop SELECT, return the row.
   /// Returns null on any failure (caught + recorded into [_lastError]
   /// so the form can surface the cause to the user). The discovery
-  /// service interprets that as "this host isn't our POS, try the
-  /// next" — so a host whose MariaDB rejects us, or a host with port
-  /// 3306 open but no `tinkerpro` database, gets skipped silently.
-  Future<ShopInfo?> _readShop(String host, String cleanTin) async {
+  /// service interprets that as "this target isn't our POS, try the
+  /// next" — so a host whose MariaDB rejects us, or a host with the
+  /// port open but no `tinkerpro` database, gets skipped silently.
+  Future<ShopInfo?> _readShop(String host, int port, String cleanTin) async {
     MySQLConnection? conn;
     try {
       conn = await MySQLConnection.createConnection(
         host: host,
-        port: _config.port,
+        port: port,
         userName: _config.user,
         password: _config.pass,
         databaseName: _config.db,
@@ -118,7 +129,7 @@ class PosShopService {
         'SELECT shop_name, vat_reg FROM shop ORDER BY id ASC LIMIT 1',
       );
       if (res.numOfRows == 0) {
-        _lastError = '$host: shop table empty';
+        _lastError = '$host:$port: shop table empty';
         return null;
       }
 
@@ -137,8 +148,8 @@ class PosShopService {
         fullName: '',
       );
     } catch (e) {
-      _lastError = '$host: $e';
-      debugPrint('[pos-shop] read failed at $host: $e');
+      _lastError = '$host:$port: $e';
+      debugPrint('[pos-shop] read failed at $host:$port: $e');
       return null;
     } finally {
       try {
@@ -152,6 +163,7 @@ class PosDbConfig {
   const PosDbConfig({
     required this.host,
     required this.port,
+    required this.ports,
     required this.user,
     required this.pass,
     required this.db,
@@ -159,15 +171,36 @@ class PosDbConfig {
 
   final String host;
   final int port;
+
+  /// Port-list to try during /24 discovery (when [host] is empty).
+  /// Defaults to common MariaDB ports; override via TPS_POS_PORTS as a
+  /// comma-separated list (e.g. "3306,3307,8889").
+  final List<int> ports;
+
   final String user;
   final String pass;
   final String db;
 
-  factory PosDbConfig.fromDefines() => const PosDbConfig(
-        host: String.fromEnvironment('TPS_POS_HOST', defaultValue: ''),
-        port: int.fromEnvironment('TPS_POS_PORT', defaultValue: 3306),
-        user: String.fromEnvironment('TPS_POS_USER', defaultValue: 'root'),
-        pass: String.fromEnvironment('TPS_POS_PASS', defaultValue: ''),
-        db: String.fromEnvironment('TPS_POS_DB', defaultValue: 'tinkerpro'),
-      );
+  factory PosDbConfig.fromDefines() {
+    const portsCsv = String.fromEnvironment(
+      'TPS_POS_PORTS',
+      defaultValue: '3306,3307,3308,33060,8889,4406',
+    );
+    final parsed = portsCsv
+        .split(',')
+        .map((s) => int.tryParse(s.trim()))
+        .whereType<int>()
+        .toList(growable: false);
+    final ports = parsed.isEmpty
+        ? const <int>[3306, 3307, 3308, 33060, 8889, 4406]
+        : parsed;
+    return PosDbConfig(
+      host: const String.fromEnvironment('TPS_POS_HOST', defaultValue: ''),
+      port: const int.fromEnvironment('TPS_POS_PORT', defaultValue: 3306),
+      ports: ports,
+      user: const String.fromEnvironment('TPS_POS_USER', defaultValue: 'root'),
+      pass: const String.fromEnvironment('TPS_POS_PASS', defaultValue: ''),
+      db: const String.fromEnvironment('TPS_POS_DB', defaultValue: 'tinkerpro'),
+    );
+  }
 }

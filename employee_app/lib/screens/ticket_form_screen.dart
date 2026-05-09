@@ -475,12 +475,13 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
     final cfg = _posShop.config;
     final host = _posShop.resolvedHost ??
         (cfg.host.isNotEmpty ? cfg.host : 'unknown');
+    final port = _posShop.resolvedPort ?? cfg.port;
     final err = _posShop.lastError;
     final (icon, color, text) = switch (_shopSource) {
       'pos' => (
         Icons.lan_outlined,
         const Color(0xFF16A34A),
-        'VAT status read live from POS at $host:${cfg.port}/${cfg.db}',
+        'VAT status read live from POS at $host:$port/${cfg.db}',
       ),
       'fallback' => (
         Icons.cloud_outlined,
