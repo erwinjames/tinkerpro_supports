@@ -469,7 +469,7 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
       'pos' => (
         Icons.lan_outlined,
         const Color(0xFF16A34A),
-        'VAT status read live from POS at $host:${cfg.httpPort}${cfg.path}',
+        'VAT status read live from POS at $host:${cfg.port}/${cfg.db}',
       ),
       'cloud' => (
         Icons.cloud_outlined,

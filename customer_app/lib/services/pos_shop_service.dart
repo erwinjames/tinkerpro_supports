@@ -1,34 +1,38 @@
-import 'dart:convert';
-import 'dart:io';
-
 import 'package:flutter/foundation.dart';
+import 'package:mysql_client_patched/mysql_client.dart';
 
 import 'pos_discovery_service.dart';
 import 'session_store.dart';
 import 'ticket_service.dart' show ShopInfo;
 
-/// Reads `shop_name` + `vat_reg` from the local POS over HTTP by
-/// hitting the small PHP shim deployed alongside each POS box's
-/// XAMPP install (see customer_app/deploy/tps-shop.php).
+/// Reads `shop_name` + `vat_reg` directly from each POS's MariaDB on
+/// the LAN — no PHP shim, no manual config.
 ///
-/// Why HTTP instead of MySQL:
-/// • Dart's mysql1 package desyncs against MariaDB 10.4+ ("Got
-///   packets out of order") and the alternative `mysql_client`
-///   package mishandles empty-password handshakes. PHP's `pdo_mysql`
-///   has neither bug, so we pay one small HTTP round-trip and let
-///   PHP do the database talk.
-/// • XAMPP ships Apache+PHP+MariaDB together, so any POS install
-///   capable of running the database is already capable of serving
-///   the shim. No extra runtime to install.
+/// We use a vendored fork of `mysql_client` (third_party/
+/// mysql_client_patched) because both available pure-Dart MySQL
+/// clients have show-stopper bugs against current MariaDB:
+///   • upstream `mysql_client` mishandles empty-password handshakes
+///     (sends a 20-byte SHA1(empty) blob instead of a zero-length
+///     authResponse) — fatal for XAMPP / TinkerPro POS installs
+///     which ship with empty root password.
+///   • `mysql1` desyncs with "Got packets out of order" against
+///     MariaDB 10.4+ — fatal for the same installs.
+/// The fork patches the empty-password path; mysql_client's parser
+/// doesn't have the packet-ordering desync, so we get end-to-end
+/// auto-discovery + credential check + database read.
 ///
 /// Discovery walks cached → hint hosts → standard candidates → /24
-/// LAN sweep, validating each with an HTTP GET to /tps-shop.php and
-/// parsing the JSON response. Only validated hosts get cached.
+/// LAN sweep, validating each by attempting a real MariaDB
+/// handshake + a SELECT against `tinkerpro.shop`. Only hosts where
+/// every step succeeds get cached. Any host that has port 3306 open
+/// but isn't actually our POS gets skipped automatically.
 ///
-/// Runtime overrides (compile-time dart-defines):
+/// Compile-time overrides:
 ///   TPS_POS_HOST     pin to a specific host, skip discovery
-///   TPS_POS_HTTP_PORT  default 80
-///   TPS_POS_PATH       default /tps-shop.php
+///   TPS_POS_PORT     default 3306
+///   TPS_POS_USER     default root
+///   TPS_POS_PASS     default empty (XAMPP / TinkerPro POS default)
+///   TPS_POS_DB       default tinkerpro
 class PosShopService {
   PosShopService({
     required SessionStore store,
@@ -79,54 +83,52 @@ class PosShopService {
       },
     );
     if (winner == null) {
-      _lastError ??= 'No POS shim on this network accepted our request.';
+      _lastError ??= 'No POS on this network accepted our connection.';
       return null;
     }
     _resolvedHost = winner;
     return _lastResult;
   }
 
-  /// HTTP GET → tps-shop.php on a single candidate host. Returns the
-  /// ShopInfo on success, null on any failure (caught + recorded into
-  /// [_lastError] so the form can surface the cause).
+  /// Connect to one candidate, run the shop SELECT, return the row.
+  /// Returns null on any failure (caught + recorded into [_lastError]
+  /// so the form can surface the cause to the user). The discovery
+  /// service interprets that as "this host isn't our POS, try the
+  /// next" — so a host whose MariaDB rejects us, or a host with port
+  /// 3306 open but no `tinkerpro` database, gets skipped silently.
   Future<ShopInfo?> _readShop(String host, String cleanTin) async {
-    HttpClient? client;
+    MySQLConnection? conn;
     try {
-      final uri = Uri(
-        scheme: 'http',
+      conn = await MySQLConnection.createConnection(
         host: host,
-        port: _config.httpPort,
-        path: _config.path,
+        port: _config.port,
+        userName: _config.user,
+        password: _config.pass,
+        databaseName: _config.db,
+        secure: false,
       );
-      client = HttpClient()
-        ..connectionTimeout = const Duration(seconds: 3)
-        ..idleTimeout = const Duration(seconds: 3);
-      final req = await client.getUrl(uri);
-      // Some XAMPP defaults reject HTTP/1.0 — be explicit about 1.1.
-      req.headers.set(HttpHeaders.acceptHeader, 'application/json');
-      req.headers.set(HttpHeaders.userAgentHeader, 'TpCustomerApp/1.0');
-      final res = await req.close().timeout(const Duration(seconds: 4));
-      if (res.statusCode != HttpStatus.ok) {
-        _lastError = '$host: HTTP ${res.statusCode}';
+      // Tight timeout — discovery already TCP-probed, so anything
+      // slow at this point is more likely to be a wrong-port service
+      // than an actual POS that's far away.
+      await conn.connect(timeoutMs: 4000);
+
+      // One single text-protocol query. Shop is a one-row config
+      // table per POS install, so the first row is the right row.
+      final res = await conn.execute(
+        'SELECT shop_name, vat_reg FROM shop ORDER BY id ASC LIMIT 1',
+      );
+      if (res.numOfRows == 0) {
+        _lastError = '$host: shop table empty';
         return null;
       }
-      final body = await res.transform(utf8.decoder).join();
-      final decoded = jsonDecode(body);
-      if (decoded is! Map<String, dynamic>) {
-        _lastError = '$host: shim response was not a JSON object';
-        return null;
-      }
-      // Require the marker so we don't mistake some other JSON-spitting
-      // service on this LAN for our shim.
-      if (decoded['tps_shop'] != true) {
-        _lastError = '$host: response did not look like our POS shim';
-        return null;
-      }
-      final vatReg = int.tryParse((decoded['vat_reg'] ?? 0).toString()) ?? 0;
+
+      final row = res.rows.first.assoc();
+      final vatReg = int.tryParse((row['vat_reg'] ?? '0').toString()) ?? 0;
       return ShopInfo(
-        // Always defer business-name display to the customer record —
-        // the POS shop_name is typically the POS provider's brand
-        // ("Tinkerpro") rather than the merchant's business.
+        // Defer business-name display to the customer record from
+        // the support backend — the POS shop_name is typically the
+        // POS provider's brand ("Tinkerpro") rather than the
+        // merchant's own business.
         businessName: '',
         vatReg: vatReg,
         vatLabel: vatReg == 1 ? 'VAT' : 'Non-VAT',
@@ -140,7 +142,7 @@ class PosShopService {
       return null;
     } finally {
       try {
-        client?.close(force: true);
+        await conn?.close();
       } catch (_) {}
     }
   }
@@ -149,22 +151,23 @@ class PosShopService {
 class PosDbConfig {
   const PosDbConfig({
     required this.host,
-    required this.httpPort,
-    required this.path,
+    required this.port,
+    required this.user,
+    required this.pass,
+    required this.db,
   });
 
-  /// Optional override for the POS host. Empty = run discovery.
   final String host;
-
-  /// Apache port hosting the shim. Defaults to 80.
-  final int httpPort;
-
-  /// Path to the shim under the document root.
-  final String path;
+  final int port;
+  final String user;
+  final String pass;
+  final String db;
 
   factory PosDbConfig.fromDefines() => const PosDbConfig(
         host: String.fromEnvironment('TPS_POS_HOST', defaultValue: ''),
-        httpPort: int.fromEnvironment('TPS_POS_HTTP_PORT', defaultValue: 80),
-        path: String.fromEnvironment('TPS_POS_PATH', defaultValue: '/tps-shop.php'),
+        port: int.fromEnvironment('TPS_POS_PORT', defaultValue: 3306),
+        user: String.fromEnvironment('TPS_POS_USER', defaultValue: 'root'),
+        pass: String.fromEnvironment('TPS_POS_PASS', defaultValue: ''),
+        db: String.fromEnvironment('TPS_POS_DB', defaultValue: 'tinkerpro'),
       );
 }

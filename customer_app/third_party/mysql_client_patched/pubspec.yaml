@@ -1,0 +1,17 @@
+name: mysql_client_patched
+description: |
+  Vendored fork of mysql_client 0.0.27 with the empty-password
+  handshake bug fixed. Upstream sends a 20-byte SHA1(empty) blob as
+  the auth response when the password is empty, which MariaDB rejects
+  as "using password: YES". We send a zero-length authResponse instead,
+  which is what the protocol calls for.
+publish_to: 'none'
+version: 0.0.27+tinkerpro.1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  buffer: ^1.1.1
+  crypto: ^3.0.1
+  tuple: ^2.0.0

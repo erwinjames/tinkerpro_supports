@@ -89,6 +89,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.1.2"
+  buffer:
+    dependency: transitive
+    description:
+      name: buffer
+      sha256: "389da2ec2c16283c8787e0adaede82b1842102f8c8aae2f49003a766c5c6b3d1"
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.2.3"
   characters:
     dependency: transitive
     description:
@@ -528,6 +536,13 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.0.0"
+  mysql_client_patched:
+    dependency: "direct main"
+    description:
+      path: "third_party/mysql_client_patched"
+      relative: true
+    source: path
+    version: "0.0.27+tinkerpro.1"
   native_toolchain_c:
     dependency: transitive
     description:
@@ -829,6 +844,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "0.7.10"
+  tuple:
+    dependency: transitive
+    description:
+      name: tuple
+      sha256: a97ce2013f240b2f3807bcbaf218765b6f301c3eff91092bcfa23a039e7dd151
+      url: "https://pub.dev"
+    source: hosted
+    version: "2.0.2"
   typed_data:
     dependency: transitive
     description:

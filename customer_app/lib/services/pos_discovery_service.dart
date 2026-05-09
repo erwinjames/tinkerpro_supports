@@ -5,14 +5,13 @@ import 'package:flutter/foundation.dart';
 
 import 'session_store.dart';
 
-/// Resolves the host running the POS shop database.
+/// Resolves the host running the POS `tinkerpro` MariaDB.
 ///
-/// We don't speak MySQL directly from the Flutter client — the Dart
-/// `mysql1` package desyncs against MariaDB 10.4+ ("Got packets out
-/// of order"), which is the protocol shipped by every recent XAMPP
-/// install. Instead, each POS box hosts a tiny PHP shim
-/// (`tps-shop.php`) on its local Apache that returns the shop info
-/// as JSON. This service finds the host running that shim.
+/// TCP-probes port 3306 across the LAN waterfall and hands every
+/// open host to the caller's [validate] callback (which actually
+/// authenticates + reads `shop`). A TCP-open `:3306` is not enough
+/// to commit a host — many things can listen on that port; only a
+/// host where validate succeeds is committed and cached.
 ///
 /// Two production topologies, both must work:
 ///   • **Single-terminal:** customer_app and the DB live on the same
@@ -37,9 +36,9 @@ class PosDiscoveryService {
 
   final SessionStore _store;
 
-  static const int _port = 80;
-  static const Duration _candidateTimeout = Duration(milliseconds: 600);
-  static const Duration _sweepTimeout = Duration(milliseconds: 350);
+  static const int _port = 3306;
+  static const Duration _candidateTimeout = Duration(milliseconds: 500);
+  static const Duration _sweepTimeout = Duration(milliseconds: 300);
   static const int _maxConcurrentProbes = 32;
 
   Future<String?> findHost({
@@ -55,7 +54,7 @@ class PosDiscoveryService {
       triedTcp.add(clean);
       onProgress?.call('Trying $clean…');
       if (!await _probe(clean, _candidateTimeout)) return null;
-      onProgress?.call('Checking $clean for POS shop info…');
+      onProgress?.call('Authenticating with $clean…');
       if (!await validate(clean)) return null;
       onProgress?.call('Connected to POS at $clean');
       return clean;
@@ -97,7 +96,7 @@ class PosDiscoveryService {
           skip: {addr.address, ...triedTcp},
           validate: (h) async {
             triedTcp.add(h);
-            onProgress?.call('Checking $h for POS shop info…');
+            onProgress?.call('Authenticating with $h…');
             return validate(h);
           },
           onProgress: onProgress,
@@ -181,7 +180,7 @@ class PosDiscoveryService {
 
     String? winner;
     await for (final host in openHosts.stream) {
-      onProgress?.call('Found $host with port 80 open — checking POS shim…');
+      onProgress?.call('Found $host with MariaDB port open — authenticating…');
       if (await validate(host)) {
         winner = host;
         consumerWon = true;

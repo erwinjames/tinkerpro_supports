@@ -43,13 +43,17 @@ dependencies:
   # so we don't ship sound assets.
   audioplayers: ^6.1.0
 
-  # POS shop info no longer goes through a Dart MySQL client — both
-  # available packages have show-stopper bugs against current MariaDB
-  # builds (`mysql_client` mishandles empty-password handshakes;
-  # `mysql1` desyncs with "Got packets out of order" on MariaDB
-  # 10.4+). PosShopService now hits a small PHP shim on each POS box's
-  # local Apache (see customer_app/deploy/tps-shop.php), which sidesteps
-  # both bugs by letting PHP's pdo_mysql do the database talk.
+  # POS shop info read direct from MariaDB on the LAN — no PHP shim
+  # required. We use a vendored fork of mysql_client (third_party/
+  # mysql_client_patched/) that fixes the empty-password handshake
+  # bug upstream has, so XAMPP / TinkerPro POS installs (which ship
+  # with empty root password) authenticate cleanly. mysql_client's
+  # protocol parser doesn't have the "Got packets out of order"
+  # desync that plagues mysql1 on MariaDB 10.4+, so we get
+  # auto-discovery + credential check + database read with no
+  # deployment on the POS side.
+  mysql_client_patched:
+    path: third_party/mysql_client_patched
 
 dev_dependencies:
   flutter_test:
