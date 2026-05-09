@@ -90,7 +90,41 @@ class PosShopService {
   /// Connect + query a single candidate host. Returns the ShopInfo on
   /// success, null on any failure (caught + recorded into [_lastError]
   /// so the form can surface it).
+  ///
+  /// Implementation notes:
+  /// • One single text-protocol query — no prepared statements, no
+  ///   per-call multi-query chain. mysql1 has a known "Got packets out
+  ///   of order" bug against MariaDB 10.4+ when the prepared-statement
+  ///   protocol path is taken, and the bug also reproduces when a
+  ///   second query fires on the same connection. Dropping back to
+  ///   plain COM_QUERY with a fresh connection sidesteps both.
+  /// • The shop table is a one-row config table per POS install, so
+  ///   "ORDER BY id LIMIT 1" returns the right row without needing to
+  ///   filter by TIN. We surface businessName='' here — the form's
+  ///   merge step then prefers the customer's company_name (from the
+  ///   support backend) for display.
   Future<ShopInfo?> _readShop(String host, String cleanTin) async {
+    // mysql1 + MariaDB 10.4+ occasionally errors "Got packets out of
+    // order" on the first connect/query — usually a stale state or an
+    // unexpected EOF packet. Retry once with a brand-new connection
+    // before giving up; the second attempt almost always succeeds.
+    var attempts = 0;
+    while (true) {
+      attempts++;
+      final result = await _readShopOnce(host, cleanTin);
+      if (result != null) return result;
+      final err = _lastError ?? '';
+      final retryable = attempts < 2 &&
+          (err.contains('packets out of order') ||
+              err.contains('1156') ||
+              err.contains('08S01'));
+      if (!retryable) return null;
+      debugPrint('[pos-shop] retrying $host after: $err');
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+    }
+  }
+
+  Future<ShopInfo?> _readShopOnce(String host, String cleanTin) async {
     MySqlConnection? conn;
     try {
       final settings = ConnectionSettings(
@@ -103,43 +137,21 @@ class PosShopService {
       );
       conn = await MySqlConnection.connect(settings);
 
-      Results res;
-      bool matchedByTin = false;
-      if (cleanTin.isNotEmpty) {
-        res = await conn.query(
-          "SELECT shop_name, vat_reg FROM shop "
-          "WHERE REPLACE(REPLACE(REPLACE(COALESCE(shop_tin, ''), '-', ''), ' ', ''), '_', '') = ? "
-          "   OR REPLACE(REPLACE(REPLACE(COALESCE(tin, ''), '-', ''), ' ', ''), '_', '') = ? "
-          "LIMIT 1",
-          [cleanTin, cleanTin],
-        );
-        if (res.isNotEmpty) matchedByTin = true;
-      } else {
-        res = await conn.query(
-            'SELECT shop_name, vat_reg FROM shop ORDER BY id ASC LIMIT 1');
-      }
-      // Single-row config fallback when TIN didn't match — the POS
-      // shop table is one row per install, so its vat_reg drives the
-      // badge even when the customer's TIN was never written into the
-      // shop row.
-      if (res.isEmpty && cleanTin.isNotEmpty) {
-        res = await conn.query(
-            'SELECT shop_name, vat_reg FROM shop ORDER BY id ASC LIMIT 1');
-      }
+      final res = await conn.query(
+        'SELECT shop_name, vat_reg FROM shop ORDER BY id ASC LIMIT 1',
+      );
       if (res.isEmpty) {
         _lastError = '$host: shop table empty';
         return null;
       }
 
       final row = res.first.fields;
-      final shopName = (row['shop_name'] ?? '').toString();
       final vatReg = int.tryParse((row['vat_reg'] ?? 0).toString()) ?? 0;
       return ShopInfo(
-        // Only adopt the POS shop_name when the row actually matched
-        // the customer's TIN; otherwise the single-row fallback would
-        // overwrite the customer's company name with the POS provider's
-        // own brand.
-        businessName: matchedByTin ? shopName : '',
+        // Always defer business-name display to the customer record —
+        // the POS shop_name is typically the POS provider's brand
+        // ("Tinkerpro") rather than the merchant's business.
+        businessName: '',
         vatReg: vatReg,
         vatLabel: vatReg == 1 ? 'VAT' : 'Non-VAT',
         tin: cleanTin,
