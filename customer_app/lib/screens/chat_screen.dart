@@ -18,7 +18,9 @@ import '../services/chat_realtime.dart';
 import '../services/chat_service.dart';
 import '../services/ringtone_service.dart';
 import '../services/session_store.dart';
+import '../services/ticket_service.dart';
 import '../theme.dart';
+import 'ticket_form_screen.dart';
 
 /// Customer-facing chat thread. Mirrors the web portal's floating chat
 /// panel: Messenger-style bubbles, sender label + role badge above
@@ -261,6 +263,15 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final body = _composer.text.trim();
     final pendingIds = _pendingAttachments.map((a) => a.id).toList();
     if (body.isEmpty && pendingIds.isEmpty) return;
+    // Slash-commands hijack the send action so they never hit the wire as
+    // a chat message. `/ticket` is the only one for now — opens the
+    // ticket form, then posts a confirmation bubble back when the
+    // submission succeeds.
+    if (pendingIds.isEmpty && _isSlashCommand(body, '/ticket')) {
+      _composer.clear();
+      await _openTicketForm();
+      return;
+    }
     final nonce = _newNonce();
     final optimistic = ChatMessage(
       id: 'tmp-$nonce',
@@ -306,6 +317,40 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         _messages.add(saved);
       }
     });
+  }
+
+  bool _isSlashCommand(String body, String command) {
+    final trimmed = body.trim();
+    if (trimmed.toLowerCase() == command.toLowerCase()) return true;
+    return trimmed.toLowerCase().startsWith('${command.toLowerCase()} ');
+  }
+
+  Future<void> _openTicketForm() async {
+    final tickets = TicketService(widget.api);
+    final outcome = await Navigator.of(context).push<TicketSubmitOutcome>(
+      MaterialPageRoute(
+        builder: (_) => TicketFormScreen(
+          tickets: tickets,
+          customer: widget.customer,
+          store: widget.store,
+          api: widget.api,
+        ),
+      ),
+    );
+    if (outcome == null || !mounted) return;
+    // Post a confirmation back into the support thread so the customer
+    // and the assigned agent both see the ticket land in chat.
+    final ticketRef = outcome.ticketId != null ? ' #${outcome.ticketId}' : '';
+    final note = '🎫 Ticket$ticketRef submitted: "${outcome.subject}"\n'
+        'Business: ${outcome.businessName} (${outcome.vatLabel})\n'
+        'Priority: ${outcome.priority.toUpperCase()}';
+    _composer.text = note;
+    await _sendMessage();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Ticket submitted. Support will reach out shortly.'),
+      ));
+    }
   }
 
   void _onComposerChanged(String value) {

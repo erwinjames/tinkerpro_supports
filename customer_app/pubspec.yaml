@@ -43,6 +43,18 @@ dependencies:
   # so we don't ship sound assets.
   audioplayers: ^6.1.0
 
+  # Direct LAN read of the local POS database (`tinkerpro`.`shop`) so the
+  # support-ticket form can fill business name + VAT-registration even
+  # when the shop has no internet to the cloud support backend. See
+  # lib/services/pos_shop_service.dart for the read-only query path.
+  #
+  # NB: `mysql1` (not `mysql_client`) — the latter has a broken empty-
+  # password handshake (it sends a 20-byte SHA1(empty) blob instead of
+  # a zero-length authResponse, which MariaDB rejects as "using password
+  # YES"). XAMPP / TinkerPro POS installs ship with empty root password,
+  # so we need the package that gets that path right.
+  mysql1: ^0.20.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
