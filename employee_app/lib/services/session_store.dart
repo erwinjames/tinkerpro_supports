@@ -18,6 +18,7 @@ class SessionStore {
   static const _kStoreName = 'employee_store_name';
   static const _kUserId    = 'employee_user_id';
   static const _kConvId    = 'employee_conv_id';
+  static const _kPosHost   = 'pos_db_host';
 
   static Future<SessionStore> open() async {
     final prefs = await SharedPreferences.getInstance();
@@ -36,6 +37,19 @@ class SessionStore {
   Future<void> saveIdentity({required int userId, required int convId}) async {
     await _prefs.setInt(_kUserId, userId);
     await _prefs.setInt(_kConvId, convId);
+  }
+
+  /// Last LAN host where we successfully reached the POS `tinkerpro`
+  /// MariaDB. Cached so the ticket form doesn't re-scan the subnet on
+  /// every open. Cleared on a connection failure so the next attempt
+  /// re-discovers (e.g., the POS box got a new DHCP lease).
+  String? get posHost => _prefs.getString(_kPosHost);
+  Future<void> setPosHost(String? v) async {
+    if (v == null || v.isEmpty) {
+      await _prefs.remove(_kPosHost);
+    } else {
+      await _prefs.setString(_kPosHost, v);
+    }
   }
 
   /// Wipe everything — used by the "reset store" path if you ever want to

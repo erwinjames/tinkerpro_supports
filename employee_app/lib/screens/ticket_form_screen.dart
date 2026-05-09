@@ -1,29 +1,30 @@
 import 'package:flutter/material.dart';
 
 import '../api_client.dart';
-import '../models/customer_models.dart';
+import '../services/chat_service.dart' show EmployeeChatInfo;
 import '../services/pos_shop_service.dart';
 import '../services/session_store.dart';
 import '../services/ticket_service.dart';
 import '../theme.dart';
 
-/// Pushed when the customer types `/ticket` in the chat composer.
+/// Pushed when the employee types `/ticket` in the chat composer.
 ///
 /// Mirrors the layout of the web portal's customer-ticket.php form, but
-/// swaps the editable Email field for an auto-fetched read-only Business
-/// Name + VAT/Non-VAT chip pulled from the POS shop record (server falls
-/// back to the support customer row when the POS DB isn't present).
+/// auto-fills business name from the saved store name and pulls VAT/
+/// Non-VAT status live from the local POS `tinkerpro.shop` table over
+/// the LAN (single-terminal: localhost; multi-terminal: /24 sweep with
+/// credential check). The employee enters their own name + the issue.
 class TicketFormScreen extends StatefulWidget {
   const TicketFormScreen({
     super.key,
     required this.tickets,
-    required this.customer,
+    required this.info,
     required this.store,
     required this.api,
   });
 
   final TicketService tickets;
-  final Customer customer;
+  final EmployeeChatInfo info;
   final SessionStore store;
   final ApiClient api;
 
@@ -49,7 +50,9 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
   @override
   void initState() {
     super.initState();
-    _name.text = widget.customer.ownerName;
+    // Default the name field to whatever the employee identifies as in
+    // chat. They can overwrite it.
+    _name.text = widget.info.meName;
     _loadShop();
   }
 
@@ -68,45 +71,44 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
       _shopSource = 'pending';
       _shopProgress = 'Looking for the POS server…';
     });
-    // Two-tier read:
-    //   1. Direct LAN MySQL query against the POS, with auto-discovery
-    //      of the POS host (cached → hint hosts → /24 sweep). Works
-    //      offline w.r.t. the cloud support backend — the common shop
-    //      scenario (POS computer up, shop wifi up, internet flaky).
-    //   2. HTTP fallback to the support backend's /getCustomerShopInfo,
-    //      which reads the customer record. Used when the device isn't
-    //      on the shop's LAN (filing a ticket from home / cellular) or
-    //      the LAN sweep didn't find a POS.
+    // POS DB read is the source of truth for vat_reg. The session's
+    // store name covers business-name display when no POS row matches
+    // by TIN (almost always the case — shop_tin is rarely populated).
     final apiHost = _hostFromBaseUrl(widget.api.baseUrl);
-    final hints = <String>[?apiHost];
+    final hints = <String>[if (apiHost != null) apiHost];
     final pos = await _posShop.getShopInfo(
-      tin: widget.customer.tin,
       hintHosts: hints,
       onProgress: (s) {
         if (!mounted) return;
         setState(() => _shopProgress = s);
       },
     );
-    final http = await widget.tickets.getShopInfo();
-
-    final merged = _merge(pos, http);
 
     if (!mounted) return;
     setState(() {
       _loadingShop = false;
-      _shop = merged;
-      _shopSource = pos != null
-          ? 'pos'
-          : http != null
-              ? 'cloud'
-              : 'none';
-      if (merged == null) {
-        _shopError = 'Could not load your business info. Pull to retry.';
-      } else {
-        if (_name.text.trim().isEmpty && merged.fullName.isNotEmpty) {
-          _name.text = merged.fullName;
-        }
+      if (pos == null) {
+        _shop = null;
+        _shopSource = 'none';
+        _shopError =
+            'Could not read shop info from the POS database. Tap Retry.';
+        return;
       }
+      // Adopt the session's store name when the POS row didn't carry
+      // one (typical — the shop table's shop_name is often the POS
+      // provider's brand, not the merchant's business).
+      final businessName = pos.businessName.isNotEmpty
+          ? pos.businessName
+          : (widget.store.storeName ?? '');
+      _shop = ShopInfo(
+        businessName: businessName,
+        vatReg: pos.vatReg,
+        vatLabel: pos.vatLabel,
+        tin: pos.tin,
+        email: '',
+        fullName: '',
+      );
+      _shopSource = 'pos';
     });
   }
 
@@ -123,38 +125,19 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
     }
   }
 
-  /// POS DB is the source of truth for vat_reg (matches what the POS
-  /// prints on receipts). HTTP source carries the customer-record
-  /// niceties (full name, email) and the company_name fallback for
-  /// business name when the POS row didn't match by TIN.
-  ShopInfo? _merge(ShopInfo? pos, ShopInfo? http) {
-    if (pos == null && http == null) return null;
-    if (pos == null) return http;
-    final businessName = pos.businessName.isNotEmpty
-        ? pos.businessName
-        : (http?.businessName ?? widget.customer.companyName);
-    return ShopInfo(
-      businessName: businessName,
-      vatReg: pos.vatReg,
-      vatLabel: pos.vatLabel,
-      tin: pos.tin.isNotEmpty ? pos.tin : (http?.tin ?? widget.customer.tin),
-      email: http?.email ?? widget.customer.email,
-      fullName: http?.fullName ?? widget.customer.ownerName,
-    );
-  }
-
   Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
     final shop = _shop;
     if (shop == null) {
-      _toast('Business info is still loading.');
+      _toast('Shop info is still loading.');
       return;
     }
     setState(() => _submitting = true);
-    final email = shop.email.isNotEmpty ? shop.email : widget.customer.email;
     final result = await widget.tickets.createTicket(
       customerName: _name.text.trim(),
-      customerEmail: email,
+      // Employee app has no portal customer email — the server-side
+      // ticket facade is tolerant of an empty value here.
+      customerEmail: '',
       businessName: shop.businessName,
       vatReg: shop.vatReg,
       subject: _subject.text.trim(),
@@ -471,17 +454,12 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
         const Color(0xFF16A34A),
         'VAT status read live from POS at $host:${cfg.port}/${cfg.db}',
       ),
-      'cloud' => (
-        Icons.cloud_outlined,
-        Brand.signal,
-        err == null
-            ? 'No POS server found on this network — using customer record from support backend'
-            : 'POS unreachable ($err) — using customer record from support backend',
-      ),
       _ => (
         Icons.warning_amber_outlined,
         const Color(0xFFB45309),
-        'No shop data available — VAT status may be stale',
+        err == null
+            ? 'No POS server found on this network'
+            : 'POS unreachable ($err)',
       ),
     };
     return Padding(
@@ -645,9 +623,9 @@ class _PriorityOpt {
 
 /// Returned to the chat screen when a ticket is successfully submitted —
 /// the chat screen uses it to post a confirmation bubble back into the
-/// thread so support sees it land in real time. The ticket id, when
-/// the server returned one, is included so admins can correlate the
-/// chat bubble with the row they're about to Accept in ticket.php.
+/// thread so admins see it land in real time. The ticket id, when the
+/// server returned one, is included so admins can correlate the chat
+/// bubble with the row they're about to Accept in ticket.php.
 class TicketSubmitOutcome {
   TicketSubmitOutcome({
     required this.subject,

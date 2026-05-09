@@ -13,7 +13,6 @@ class SessionStore {
   static const _kCustomerId = 'active_customer_id';
   static const _kHiddenMsgIds = 'hidden_message_ids';
   static const _kRememberMe = 'remember_me';
-  static const _kPosHost = 'pos_db_host';
 
   static Future<SessionStore> create() async {
     final prefs = await SharedPreferences.getInstance();
@@ -59,20 +58,6 @@ class SessionStore {
 
   Future<void> setRememberMe(bool v) async {
     await _prefs.setBool(_kRememberMe, v);
-  }
-
-  /// Last LAN host where we successfully reached the POS `tinkerpro`
-  /// MySQL. Cached so the ticket form doesn't re-scan the subnet on
-  /// every open. Cleared on a connection failure so the next attempt
-  /// re-discovers (e.g., the customer changed wifi or the POS got a
-  /// new DHCP lease).
-  String? get posHost => _prefs.getString(_kPosHost);
-  Future<void> setPosHost(String? v) async {
-    if (v == null || v.isEmpty) {
-      await _prefs.remove(_kPosHost);
-    } else {
-      await _prefs.setString(_kPosHost, v);
-    }
   }
 
   Future<void> clearAll() async {

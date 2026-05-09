@@ -41,6 +41,17 @@ dependencies:
   open_filex: ^4.5.0
   cached_network_image: ^3.4.1
 
+  # POS shop info read direct from MariaDB on the LAN — fully automatic,
+  # no PHP shim required. Vendored fork of mysql_client (third_party/
+  # mysql_client_patched/) that fixes the empty-password handshake bug
+  # upstream has, so XAMPP / TinkerPro POS installs (which ship with
+  # empty root password) authenticate cleanly. mysql_client's parser
+  # doesn't have the "Got packets out of order" desync that plagues
+  # mysql1 on MariaDB 10.4+, so we get auto-discovery + credential
+  # check + database read with no deployment on the POS side.
+  mysql_client_patched:
+    path: third_party/mysql_client_patched
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

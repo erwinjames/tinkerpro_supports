@@ -16,8 +16,10 @@ import '../services/lan_presence.dart';
 import '../services/remote_access_service.dart';
 import '../services/ringtone_service.dart';
 import '../services/session_store.dart';
+import '../services/ticket_service.dart';
 import '../theme.dart';
 import 'call_screen.dart';
+import 'ticket_form_screen.dart';
 
 /// Single-thread chat surface for the employee desktop client.
 ///
@@ -265,9 +267,60 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
     return buf.toString();
   }
 
+  bool _isSlashCommand(String body, String command) {
+    final trimmed = body.trim();
+    if (trimmed.toLowerCase() == command.toLowerCase()) return true;
+    return trimmed.toLowerCase().startsWith('${command.toLowerCase()} ');
+  }
+
+  Future<void> _openTicketForm() async {
+    final tickets = TicketService(widget.api);
+    final outcome = await Navigator.of(context).push<TicketSubmitOutcome>(
+      MaterialPageRoute(
+        builder: (_) => TicketFormScreen(
+          tickets: tickets,
+          info: _info,
+          store: widget.store,
+          api: widget.api,
+        ),
+      ),
+    );
+    if (outcome == null || !mounted) return;
+    // Post a confirmation back into the support thread so admins see
+    // the ticket land in chat in real time.
+    final ticketRef =
+        outcome.ticketId != null ? ' #${outcome.ticketId}' : '';
+    final note = '🎫 Ticket$ticketRef submitted: "${outcome.subject}"\n'
+        'Business: ${outcome.businessName} (${outcome.vatLabel})\n'
+        'Priority: ${outcome.priority.toUpperCase()}';
+    final msg = await widget.chat.send(
+      convId: _convId,
+      body: note,
+      clientNonce: _newNonce(),
+    );
+    if (msg != null && mounted && !_messages.any((m) => m.id == msg.id)) {
+      setState(() => _messages.add(msg));
+      _scrollToBottom();
+    }
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Ticket submitted. Support will reach out shortly.'),
+      ));
+    }
+  }
+
   Future<void> _send() async {
     final text = _composer.text.trim();
     if (text.isEmpty) return;
+    // Slash-commands hijack the send action so they never hit the wire
+    // as a chat message. `/ticket` opens the ticket form; on submit
+    // it returns an outcome which we then post back into the chat as
+    // a confirmation bubble.
+    if (_isSlashCommand(text, '/ticket')) {
+      _composer.clear();
+      await _openTicketForm();
+      return;
+    }
     _composer.clear();
     final msg = await widget.chat.send(
       convId: _convId,
