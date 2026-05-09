@@ -84,31 +84,59 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
       },
     );
 
+    // Fallback: if direct POS DB access fails (network/credentials/firewall),
+    // use support-backend customer info so ticket creation can still proceed.
+    ShopInfo? fallback;
+    if (pos == null) {
+      fallback = await widget.tickets.getShopInfo();
+    }
+
     if (!mounted) return;
     setState(() {
       _loadingShop = false;
-      if (pos == null) {
+      if (pos == null && fallback == null) {
         _shop = null;
         _shopSource = 'none';
-        _shopError =
-            'Could not read shop info from the POS database. Tap Retry.';
+        final posErr = _posShop.lastError;
+        _shopError = posErr == null
+            ? 'Could not read shop info from the POS database. Tap Retry.'
+            : 'Could not read shop info from the POS database ($posErr). Tap Retry.';
         return;
       }
+
+      if (pos == null && fallback != null) {
+        _shop = ShopInfo(
+          businessName: fallback.businessName.isNotEmpty
+              ? fallback.businessName
+              : (widget.store.storeName ?? ''),
+          vatReg: fallback.vatReg,
+          vatLabel: fallback.vatLabel,
+          tin: fallback.tin,
+          email: fallback.email,
+          fullName: fallback.fullName,
+        );
+        _shopSource = 'fallback';
+        _shopError = null;
+        return;
+      }
+
+      final resolvedPos = pos!;
       // Adopt the session's store name when the POS row didn't carry
       // one (typical — the shop table's shop_name is often the POS
       // provider's brand, not the merchant's business).
-      final businessName = pos.businessName.isNotEmpty
-          ? pos.businessName
+      final businessName = resolvedPos.businessName.isNotEmpty
+          ? resolvedPos.businessName
           : (widget.store.storeName ?? '');
       _shop = ShopInfo(
         businessName: businessName,
-        vatReg: pos.vatReg,
-        vatLabel: pos.vatLabel,
-        tin: pos.tin,
+        vatReg: resolvedPos.vatReg,
+        vatLabel: resolvedPos.vatLabel,
+        tin: resolvedPos.tin,
         email: '',
         fullName: '',
       );
       _shopSource = 'pos';
+      _shopError = null;
     });
   }
 
@@ -453,6 +481,11 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
         Icons.lan_outlined,
         const Color(0xFF16A34A),
         'VAT status read live from POS at $host:${cfg.port}/${cfg.db}',
+      ),
+      'fallback' => (
+        Icons.cloud_outlined,
+        const Color(0xFFB45309),
+        'POS DB unreachable; using support backend shop profile',
       ),
       _ => (
         Icons.warning_amber_outlined,
