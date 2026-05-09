@@ -5,7 +5,14 @@ import 'package:flutter/foundation.dart';
 
 import 'session_store.dart';
 
-/// Resolves the host running the POS `tinkerpro` MariaDB.
+/// Resolves the host running the POS shop database.
+///
+/// We don't speak MySQL directly from the Flutter client — the Dart
+/// `mysql1` package desyncs against MariaDB 10.4+ ("Got packets out
+/// of order"), which is the protocol shipped by every recent XAMPP
+/// install. Instead, each POS box hosts a tiny PHP shim
+/// (`tps-shop.php`) on its local Apache that returns the shop info
+/// as JSON. This service finds the host running that shim.
 ///
 /// Two production topologies, both must work:
 ///   • **Single-terminal:** customer_app and the DB live on the same
@@ -15,36 +22,26 @@ import 'session_store.dart';
 ///     a non-server box has to find that server by IP — that's what
 ///     the /24 sweep is for.
 ///
-/// Critical detail: a TCP-open `:3306` does NOT mean the host is the
-/// right one. MariaDB might reject our auth (e.g., grant only allows
-/// `root@localhost`, source IP isn't in the grant tables). So this
-/// service doesn't return "the first port-open host" — it asks the
-/// caller's [validate] callback to confirm each candidate before
-/// committing. Only validated hosts get cached.
-///
-/// Order tried:
-///   1. Cached host from [SessionStore].
+/// Waterfall:
+///   1. Cached host (last validated one) from [SessionStore].
 ///   2. Caller-supplied hint hosts.
 ///   3. Standard candidates: `127.0.0.1`, `localhost`, `10.0.2.2`.
 ///   4. /24 LAN sweep across every up IPv4 NetworkInterface.
+///
+/// A TCP-open `:80` is not enough to commit a host — many things
+/// listen on 80 (routers, printers, NAS). The caller's [validate]
+/// callback hits `/tps-shop.php` and confirms the JSON response is
+/// shaped like ours. Only validated hosts get cached.
 class PosDiscoveryService {
   PosDiscoveryService(this._store);
 
   final SessionStore _store;
 
-  static const int _port = 3306;
-  static const Duration _candidateTimeout = Duration(milliseconds: 400);
-  static const Duration _sweepTimeout = Duration(milliseconds: 250);
+  static const int _port = 80;
+  static const Duration _candidateTimeout = Duration(milliseconds: 600);
+  static const Duration _sweepTimeout = Duration(milliseconds: 350);
   static const int _maxConcurrentProbes = 32;
 
-  /// Walks the discovery waterfall and returns the first host where
-  /// [validate] returns true. Hosts whose TCP probe fails are skipped.
-  /// Hosts that pass the TCP probe but fail [validate] (e.g., MySQL
-  /// auth refused) are also skipped — the next candidate gets tried.
-  ///
-  /// On success, caches the winning host in [SessionStore]. On total
-  /// failure (exhausted all candidates) returns null and clears the
-  /// cache.
   Future<String?> findHost({
     required Future<bool> Function(String host) validate,
     List<String> hintHosts = const [],
@@ -58,23 +55,19 @@ class PosDiscoveryService {
       triedTcp.add(clean);
       onProgress?.call('Trying $clean…');
       if (!await _probe(clean, _candidateTimeout)) return null;
-      onProgress?.call('Authenticating with $clean…');
+      onProgress?.call('Checking $clean for POS shop info…');
       if (!await validate(clean)) return null;
       onProgress?.call('Connected to POS at $clean');
       return clean;
     }
 
-    // 1. Cached host.
     final cached = _store.posHost;
     if (cached != null && cached.isNotEmpty) {
       final ok = await tryHost(cached);
       if (ok != null) return ok;
-      // Cached host didn't work — clear it now so we don't try it on
-      // every form open while it's broken.
       await _store.setPosHost(null);
     }
 
-    // 2 + 3. Hints + standard candidates.
     final candidates = <String>[
       ...hintHosts,
       '127.0.0.1',
@@ -89,9 +82,6 @@ class PosDiscoveryService {
       }
     }
 
-    // 4. LAN /24 sweep across every up IPv4 interface — multi-terminal
-    // POS deployments park the DB on one box and other POS terminals
-    // share it over the shop wifi.
     onProgress?.call('Scanning shop network for POS server…');
     final interfaces = await NetworkInterface.list(
       includeLoopback: false,
@@ -107,7 +97,7 @@ class PosDiscoveryService {
           skip: {addr.address, ...triedTcp},
           validate: (h) async {
             triedTcp.add(h);
-            onProgress?.call('Authenticating with $h…');
+            onProgress?.call('Checking $h for POS shop info…');
             return validate(h);
           },
           onProgress: onProgress,
@@ -135,8 +125,6 @@ class PosDiscoveryService {
     }
   }
 
-  /// "192.168.1.42" → "192.168.1.". Returns null when [ip] isn't a
-  /// dotted-quad IPv4.
   String? _slash24(String ip) {
     final parts = ip.split('.');
     if (parts.length != 4) return null;
@@ -146,9 +134,6 @@ class PosDiscoveryService {
     return '${parts[0]}.${parts[1]}.${parts[2]}.';
   }
 
-  /// Sweeps a /24 in parallel for hosts with `:3306` open, then
-  /// hands each open host to [validate] in arrival order. First
-  /// validated host wins; any in-flight probes are abandoned.
   Future<String?> _sweepSubnet(
     String prefix, {
     required Set<String> skip,
@@ -161,9 +146,6 @@ class PosDiscoveryService {
       if (!skip.contains(h)) hosts.add(h);
     }
 
-    // Pipeline: producer fans out TCP probes with bounded concurrency
-    // and pushes open hosts onto a queue. Consumer drains the queue
-    // sequentially, calling validate on each. First validate=true wins.
     final openHosts = StreamController<String>(sync: false);
     var inFlight = 0;
     var idx = 0;
@@ -199,7 +181,7 @@ class PosDiscoveryService {
 
     String? winner;
     await for (final host in openHosts.stream) {
-      onProgress?.call('Found $host with port open — authenticating…');
+      onProgress?.call('Found $host with port 80 open — checking POS shim…');
       if (await validate(host)) {
         winner = host;
         consumerWon = true;
@@ -207,7 +189,6 @@ class PosDiscoveryService {
         break;
       }
     }
-    // Drain anything still buffered if we exit without a winner.
     if (winner == null && !producerDone) {
       try {
         await openHosts.close();
