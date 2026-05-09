@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../api_client.dart';
 import '../services/chat_service.dart' show EmployeeChatInfo;
+import '../services/pos_discovery_service.dart';
 import '../services/pos_shop_service.dart';
 import '../services/session_store.dart';
 import '../services/ticket_service.dart';
@@ -46,6 +47,14 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
   String _shopSource = 'pending';
   String _shopProgress = '';
   late final PosShopService _posShop = PosShopService(store: widget.store);
+
+  // Diagnostic panel state — see _buildDiagnosticsCard.
+  bool _diagOpen = false;
+  bool _diagScanning = false;
+  String _diagProgress = '';
+  PosScanReport? _diagReport;
+  String? _diagBusyKey; // "host:port" currently being validated by tap-to-connect
+  String? _diagConnectError;
 
   @override
   void initState() {
@@ -308,6 +317,7 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
             _label('🏢 Business Name *'),
             _buildBusinessField(),
             if (!_loadingShop && _shop != null) _buildSourceCaption(),
+            if (!_loadingShop) _buildDiagnosticsCard(),
             const SizedBox(height: 16),
             _label('📝 Subject *'),
             TextFormField(
@@ -526,6 +536,309 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
               ),
             ),
         ],
+      ),
+    );
+  }
+
+  Future<void> _toggleDiagnostics() async {
+    setState(() {
+      _diagOpen = !_diagOpen;
+      _diagConnectError = null;
+    });
+    if (_diagOpen && _diagReport == null && !_diagScanning) {
+      await _runDiagScan();
+    }
+  }
+
+  Future<void> _runDiagScan() async {
+    setState(() {
+      _diagScanning = true;
+      _diagProgress = 'Scanning network…';
+      _diagReport = null;
+      _diagConnectError = null;
+    });
+    final report = await _posShop.scanLan(
+      onProgress: (s) {
+        if (!mounted) return;
+        setState(() => _diagProgress = s);
+      },
+    );
+    if (!mounted) return;
+    setState(() {
+      _diagScanning = false;
+      _diagReport = report;
+      _diagProgress = '';
+    });
+  }
+
+  Future<void> _diagConnect(PosScanRow row) async {
+    final key = '${row.host}:${row.port}';
+    setState(() {
+      _diagBusyKey = key;
+      _diagConnectError = null;
+    });
+    final result = await _posShop.tryTarget(host: row.host, port: row.port);
+    if (!mounted) return;
+    if (result == null) {
+      setState(() {
+        _diagBusyKey = null;
+        _diagConnectError = '$key: ${_posShop.lastError ?? 'connect failed'}';
+      });
+      return;
+    }
+    setState(() {
+      _diagBusyKey = null;
+      _shop = ShopInfo(
+        businessName: result.businessName.isNotEmpty
+            ? result.businessName
+            : (widget.store.storeName ?? ''),
+        vatReg: result.vatReg,
+        vatLabel: result.vatLabel,
+        tin: result.tin,
+        email: result.email,
+        fullName: result.fullName,
+      );
+      _shopSource = 'pos';
+      _shopError = null;
+      _diagOpen = false;
+    });
+  }
+
+  Widget _buildDiagnosticsCard() {
+    final report = _diagReport;
+    final hasResults = report != null && report.openTargets.isNotEmpty;
+    final headerLabel = _diagOpen
+        ? 'Hide POS server diagnostics'
+        : 'POS server diagnostics';
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Container(
+        decoration: BoxDecoration(
+          color: const Color(0xFFF6F7FB),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: const Color(0xFFE1E5E9)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            InkWell(
+              onTap: _toggleDiagnostics,
+              borderRadius: BorderRadius.circular(10),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 12, vertical: 10),
+                child: Row(
+                  children: [
+                    Icon(
+                      _diagOpen
+                          ? Icons.keyboard_arrow_down
+                          : Icons.keyboard_arrow_right,
+                      size: 18,
+                      color: Brand.textMuted,
+                    ),
+                    const SizedBox(width: 4),
+                    Icon(Icons.lan_outlined,
+                        size: 14, color: Brand.textMuted),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        headerLabel,
+                        style: const TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                            color: Brand.textMuted),
+                      ),
+                    ),
+                    if (_diagScanning)
+                      const SizedBox(
+                        width: 12,
+                        height: 12,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 1.6, color: Brand.signal),
+                      )
+                    else if (_diagOpen)
+                      InkWell(
+                        onTap: _diagScanning ? null : _runDiagScan,
+                        borderRadius: BorderRadius.circular(4),
+                        child: const Padding(
+                          padding: EdgeInsets.symmetric(
+                              horizontal: 6, vertical: 2),
+                          child: Text(
+                            'Rescan',
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                              color: Brand.signal,
+                              decoration: TextDecoration.underline,
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+            if (_diagOpen) const Divider(height: 1, color: Color(0xFFE1E5E9)),
+            if (_diagOpen)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (_diagScanning)
+                      Text(
+                        _diagProgress.isEmpty ? 'Scanning…' : _diagProgress,
+                        style: const TextStyle(
+                            fontSize: 11.5, color: Brand.textMuted),
+                      )
+                    else if (report == null)
+                      const Text(
+                        'Tap Rescan to look for MariaDB on the LAN.',
+                        style: TextStyle(
+                            fontSize: 11.5, color: Brand.textMuted),
+                      )
+                    else
+                      _buildDiagReport(report),
+                    if (_diagConnectError != null) ...[
+                      const SizedBox(height: 6),
+                      Text(
+                        _diagConnectError!,
+                        style: const TextStyle(
+                            fontSize: 11.5, color: Brand.danger),
+                      ),
+                    ],
+                    if (hasResults) ...[
+                      const SizedBox(height: 6),
+                      const Text(
+                        'Tap a row to connect — we\'ll authenticate as root '
+                        '(empty password) and read tinkerpro.shop.',
+                        style: TextStyle(
+                          fontSize: 10.5,
+                          fontStyle: FontStyle.italic,
+                          color: Brand.textMuted,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDiagReport(PosScanReport report) {
+    final ifaces = report.interfaces;
+    final rows = report.openTargets;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (ifaces.isEmpty)
+          const Text(
+            'No usable IPv4 interface found on this machine.',
+            style: TextStyle(fontSize: 11.5, color: Brand.danger),
+          )
+        else
+          Text(
+            'Scanned ${ifaces.length == 1 ? "interface" : "interfaces"}: '
+            '${ifaces.map((i) => "${i.name} ${i.address} (${i.subnet})").join(", ")}',
+            style: const TextStyle(fontSize: 11, color: Brand.textMuted),
+          ),
+        const SizedBox(height: 8),
+        if (rows.isEmpty)
+          const Text(
+            'No host on the LAN had any of the MariaDB ports open. '
+            'Check that the POS server is on the same subnet, that '
+            'MariaDB is bound to 0.0.0.0 (not 127.0.0.1), and that '
+            'its port isn\'t blocked by Windows Defender on the '
+            'server side.',
+            style: TextStyle(fontSize: 11.5, color: Brand.textMuted),
+          )
+        else ...[
+          Text(
+            '${rows.length} open '
+            '${rows.length == 1 ? "target" : "targets"} — tap to connect:',
+            style: const TextStyle(
+              fontSize: 11.5,
+              fontWeight: FontWeight.w700,
+              color: Brand.textPrimary,
+            ),
+          ),
+          const SizedBox(height: 6),
+          ...rows.map(_buildDiagRow),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildDiagRow(PosScanRow row) {
+    final key = '${row.host}:${row.port}';
+    final busy = _diagBusyKey == key;
+    final disabled = _diagBusyKey != null;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: InkWell(
+        onTap: disabled ? null : () => _diagConnect(row),
+        borderRadius: BorderRadius.circular(8),
+        child: Container(
+          padding:
+              const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: const Color(0xFFE1E5E9)),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                row.deviceName == null
+                    ? Icons.device_unknown_outlined
+                    : Icons.computer_outlined,
+                size: 16,
+                color: Brand.textMuted,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      row.deviceName ?? 'Unknown device',
+                      style: const TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w700,
+                          color: Brand.textPrimary),
+                    ),
+                    Text(
+                      '${row.host}:${row.port}',
+                      style: const TextStyle(
+                          fontSize: 11, color: Brand.textMuted),
+                    ),
+                  ],
+                ),
+              ),
+              if (busy)
+                const SizedBox(
+                  width: 14,
+                  height: 14,
+                  child: CircularProgressIndicator(
+                      strokeWidth: 1.6, color: Brand.signal),
+                )
+              else
+                Text(
+                  disabled ? '' : 'Connect',
+                  style: const TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    color: Brand.signal,
+                    decoration: TextDecoration.underline,
+                  ),
+                ),
+            ],
+          ),
+        ),
       ),
     );
   }

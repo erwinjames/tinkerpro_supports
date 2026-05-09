@@ -56,6 +56,39 @@ class PosShopService {
   int? get resolvedPort => _resolvedPort;
   String? get lastError => _lastError;
 
+  /// Connect to a specific host:port (no discovery). Used by the
+  /// diagnostic panel when a tech taps a row to commit one of the
+  /// open targets the LAN scan turned up.
+  Future<ShopInfo?> tryTarget({
+    required String host,
+    required int port,
+    String? tin,
+  }) async {
+    _lastError = null;
+    _lastResult = null;
+    _resolvedHost = null;
+    _resolvedPort = null;
+    final cleanTin = (tin ?? '').replaceAll(RegExp(r'[^0-9]'), '');
+    final result = await _readShop(host, port, cleanTin);
+    if (result != null) {
+      _resolvedHost = host;
+      _resolvedPort = port;
+      await _discovery.cacheTarget(host, port);
+    }
+    return result;
+  }
+
+  /// Exhaustive LAN scan for the diagnostic panel — see
+  /// [PosDiscoveryService.scanLan].
+  Future<PosScanReport> scanLan({
+    void Function(String status)? onProgress,
+  }) {
+    return _discovery.scanLan(
+      ports: _config.ports,
+      onProgress: onProgress,
+    );
+  }
+
   Future<ShopInfo?> getShopInfo({
     String? tin,
     List<String> hintHosts = const [],
