@@ -123,7 +123,12 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
     setState(() {
       _messages
         ..clear()
-        ..addAll(list.reversed); // chat_service returns newest-first
+        // chat_service.history() now returns ascending (oldest → newest)
+        // so we append in order — newest ends up at the bottom of the
+        // ListView where new messages from _onIncoming also land.
+        // (Reversing here is what flipped the badges so #22 appeared
+        // above #17 in the chat.)
+        ..addAll(list);
       // Suppress the inline /remote card for everything that's
       // already in the chat backlog. Only NEW /remote messages
       // arriving via _onIncoming after this point will render the
