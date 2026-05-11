@@ -14,6 +14,14 @@ on:
         description: 'CHAT_SOKETI_HOST (WebSocket host — usually same as base_url host)'
         required: true
         default: 'uninterrupted-brent-lunulate.ngrok-free.dev'
+      pos_user:
+        description: 'TPS_POS_USER (MariaDB user the /ticket form authenticates as). Defaults to root, matching production POS installs.'
+        required: true
+        default: 'root'
+      pos_pass:
+        description: 'TPS_POS_PASS (empty for XAMPP/TinkerPro POS defaults).'
+        required: false
+        default: ''
   push:
     tags:
       - 'v*'
@@ -49,6 +57,8 @@ jobs:
         env:
           BASE_URL:    ${{ github.event.inputs.base_url    || 'https://uninterrupted-brent-lunulate.ngrok-free.dev/tinkerpro_support' }}
           SOKETI_HOST: ${{ github.event.inputs.soketi_host || 'uninterrupted-brent-lunulate.ngrok-free.dev' }}
+          POS_USER:    ${{ github.event.inputs.pos_user    || 'root' }}
+          POS_PASS:    ${{ github.event.inputs.pos_pass    || '' }}
         run: |
           flutter build windows --release `
             --dart-define="TPS_BASE_URL=$env:BASE_URL" `
@@ -56,6 +66,8 @@ jobs:
             --dart-define="CHAT_SOKETI_PORT=443" `
             --dart-define="CHAT_SOKETI_TLS=true" `
             --dart-define="CHAT_SOKETI_KEY=tinkerpro-chat-key" `
+            --dart-define="TPS_POS_USER=$env:POS_USER" `
+            --dart-define="TPS_POS_PASS=$env:POS_PASS" `
             --dart-define="RUSTDESK_RELAY_HOST=192.168.1.40" `
             --dart-define="RUSTDESK_RELAY_KEY=M5nva66QiMeNabC58GraFDPyMY5cKPNDKHgmPYA+b2c=" `
             --dart-define="RUSTDESK_PASSWORD_SALT=tinkerpro-2026-pepper"
