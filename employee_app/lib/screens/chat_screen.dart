@@ -1229,9 +1229,7 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
               child: Column(
                 crossAxisAlignment: align,
                 children: [
-                  if (m.body.isNotEmpty)
-                    Text(m.body,
-                        style: text.bodyMedium?.copyWith(color: fg)),
+                  ..._renderBodyWithQuote(m.body, mine, fg, text),
                   if (m.attachments.isNotEmpty)
                     ..._renderAttachments(m, mine, text),
                 ],
@@ -1241,6 +1239,82 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
         ],
       ),
     );
+  }
+
+  /// Splits a message body into an optional "quoted reply" chip and
+  /// the main reply text. Detects the format the composer emits:
+  ///
+  ///     > @sender: original preview…
+  ///     [blank line]
+  ///     the reply
+  ///
+  /// On match: returns a muted quote container followed by the reply
+  /// text in normal color. Otherwise returns a single plain Text.
+  List<Widget> _renderBodyWithQuote(
+      String body, bool mine, Color fg, TextTheme text) {
+    if (body.isEmpty) return const [];
+    final match = RegExp(r'^>\s*@([^:\n]+):\s*(.+?)\n\n(.+)$', dotAll: true)
+        .firstMatch(body);
+    if (match == null) {
+      return [Text(body, style: text.bodyMedium?.copyWith(color: fg))];
+    }
+    final sender = (match.group(1) ?? '').trim();
+    final preview = (match.group(2) ?? '').trim();
+    final reply = (match.group(3) ?? '').trim();
+    // Quote-chip palette: on my (orange) bubbles the chip needs to
+    // contrast against orange, so we use white-tinted; on theirs the
+    // chip uses the standard subtle/stroke neutrals.
+    final quoteBg = mine
+        ? Colors.white.withValues(alpha: 0.18)
+        : Brand.subtle;
+    final quoteAccent = mine
+        ? Colors.white.withValues(alpha: 0.55)
+        : Brand.signal;
+    final quoteSender = mine
+        ? Colors.white.withValues(alpha: 0.95)
+        : Brand.signal;
+    final quoteText = mine
+        ? Colors.white.withValues(alpha: 0.78)
+        : Brand.textMuted;
+    return [
+      Container(
+        margin: const EdgeInsets.only(bottom: 6),
+        padding: const EdgeInsets.fromLTRB(8, 5, 10, 6),
+        decoration: BoxDecoration(
+          color: quoteBg,
+          borderRadius: BorderRadius.circular(6),
+          border: Border(
+              left: BorderSide(color: quoteAccent, width: 2.5)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              sender,
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                color: quoteSender,
+                letterSpacing: -0.05,
+              ),
+            ),
+            const SizedBox(height: 1),
+            Text(
+              preview,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 11.5,
+                color: quoteText,
+                height: 1.35,
+              ),
+            ),
+          ],
+        ),
+      ),
+      Text(reply, style: text.bodyMedium?.copyWith(color: fg)),
+    ];
   }
 
   /// Centered system badge for a ticket lifecycle event. Visual:
