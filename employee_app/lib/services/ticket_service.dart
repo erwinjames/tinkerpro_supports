@@ -68,6 +68,40 @@ class ShopInfo {
   final String fullName;
 
   bool get isVat => vatReg == 1;
+
+  Map<String, dynamic> toJson() => {
+        'businessName': businessName,
+        'vatReg': vatReg,
+        'vatLabel': vatLabel,
+        'tin': tin,
+        'email': email,
+        'fullName': fullName,
+      };
+
+  static ShopInfo? fromJson(Map<String, dynamic> j) {
+    try {
+      return ShopInfo(
+        businessName: (j['businessName'] ?? '').toString(),
+        vatReg: (j['vatReg'] is int)
+            ? j['vatReg'] as int
+            : int.tryParse((j['vatReg'] ?? '0').toString()) ?? 0,
+        vatLabel: (j['vatLabel'] ?? '').toString(),
+        tin: (j['tin'] ?? '').toString(),
+        email: (j['email'] ?? '').toString(),
+        fullName: (j['fullName'] ?? '').toString(),
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  bool sameValuesAs(ShopInfo other) =>
+      businessName == other.businessName &&
+      vatReg == other.vatReg &&
+      vatLabel == other.vatLabel &&
+      tin == other.tin &&
+      email == other.email &&
+      fullName == other.fullName;
 }
 
 class TicketSubmitResult {

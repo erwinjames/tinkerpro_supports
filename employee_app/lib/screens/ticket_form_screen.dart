@@ -62,7 +62,29 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
     // Default the name field to whatever the employee identifies as in
     // chat. They can overwrite it.
     _name.text = widget.info.meName;
-    _loadShop();
+    // Render any previously-cached ShopInfo immediately so the form is
+    // usable on cold open instead of staring at a spinner for 5–7s
+    // while we re-handshake the POS DB. The refresh still runs (silent
+    // when cached, visible otherwise) and overwrites the cache on a
+    // successful read.
+    final cached = widget.store.cachedShop;
+    if (cached != null) {
+      _shop = ShopInfo(
+        businessName: cached.businessName.isNotEmpty
+            ? cached.businessName
+            : (widget.store.storeName ?? ''),
+        vatReg: cached.vatReg,
+        vatLabel: cached.vatLabel,
+        tin: cached.tin,
+        email: cached.email,
+        fullName: cached.fullName,
+      );
+      _shopSource = 'cache';
+      _loadingShop = false;
+      _loadShop(silent: true);
+    } else {
+      _loadShop();
+    }
   }
 
   @override
@@ -73,13 +95,15 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
     super.dispose();
   }
 
-  Future<void> _loadShop() async {
-    setState(() {
-      _loadingShop = true;
-      _shopError = null;
-      _shopSource = 'pending';
-      _shopProgress = 'Looking for the POS server…';
-    });
+  Future<void> _loadShop({bool silent = false}) async {
+    if (!silent) {
+      setState(() {
+        _loadingShop = true;
+        _shopError = null;
+        _shopSource = 'pending';
+        _shopProgress = 'Looking for the POS server…';
+      });
+    }
     // POS DB read is the source of truth for vat_reg. The session's
     // store name covers business-name display when no POS row matches
     // by TIN (almost always the case — shop_tin is rarely populated).
@@ -87,20 +111,55 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
     final hints = <String>[if (apiHost != null) apiHost];
     final pos = await _posShop.getShopInfo(
       hintHosts: hints,
-      onProgress: (s) {
-        if (!mounted) return;
-        setState(() => _shopProgress = s);
-      },
+      onProgress: silent
+          ? null
+          : (s) {
+              if (!mounted) return;
+              setState(() => _shopProgress = s);
+            },
     );
 
     // Fallback: if direct POS DB access fails (network/credentials/firewall),
     // use support-backend customer info so ticket creation can still proceed.
+    // Skip the fallback on silent refreshes — we already have a cached
+    // ShopInfo on screen, no point downgrading it to a less-trusted source.
     ShopInfo? fallback;
-    if (pos == null) {
+    if (pos == null && !silent) {
       fallback = await widget.tickets.getShopInfo();
     }
 
     if (!mounted) return;
+
+    // Silent path: only mutate UI / cache when we actually got fresh POS
+    // data. Failures during background refresh are intentionally
+    // swallowed — the cached values stay on screen so offline still
+    // works.
+    if (silent) {
+      if (pos == null) return;
+      final businessName = pos.businessName.isNotEmpty
+          ? pos.businessName
+          : (widget.store.storeName ?? '');
+      final refreshed = ShopInfo(
+        businessName: businessName,
+        vatReg: pos.vatReg,
+        vatLabel: pos.vatLabel,
+        tin: pos.tin,
+        email: '',
+        fullName: '',
+      );
+      await widget.store.saveCachedShop(refreshed);
+      if (!mounted) return;
+      final current = _shop;
+      if (current == null || !current.sameValuesAs(refreshed)) {
+        setState(() {
+          _shop = refreshed;
+          _shopSource = 'pos';
+          _shopError = null;
+        });
+      }
+      return;
+    }
+
     setState(() {
       _loadingShop = false;
       if (pos == null && fallback == null) {
@@ -147,6 +206,11 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
       _shopSource = 'pos';
       _shopError = null;
     });
+
+    // Persist successful POS reads so the next /ticket open is instant.
+    if (pos != null) {
+      await widget.store.saveCachedShop(_shop!);
+    }
   }
 
   /// Pull "host" out of an http(s) base URL — the support backend often
@@ -586,22 +650,24 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
       });
       return;
     }
+    final adopted = ShopInfo(
+      businessName: result.businessName.isNotEmpty
+          ? result.businessName
+          : (widget.store.storeName ?? ''),
+      vatReg: result.vatReg,
+      vatLabel: result.vatLabel,
+      tin: result.tin,
+      email: result.email,
+      fullName: result.fullName,
+    );
     setState(() {
       _diagBusyKey = null;
-      _shop = ShopInfo(
-        businessName: result.businessName.isNotEmpty
-            ? result.businessName
-            : (widget.store.storeName ?? ''),
-        vatReg: result.vatReg,
-        vatLabel: result.vatLabel,
-        tin: result.tin,
-        email: result.email,
-        fullName: result.fullName,
-      );
+      _shop = adopted;
       _shopSource = 'pos';
       _shopError = null;
       _diagOpen = false;
     });
+    await widget.store.saveCachedShop(adopted);
   }
 
   Widget _buildDiagnosticsCard() {

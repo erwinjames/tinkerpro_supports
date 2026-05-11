@@ -1,4 +1,8 @@
+import 'dart:convert';
+
 import 'package:shared_preferences/shared_preferences.dart';
+
+import 'ticket_service.dart' show ShopInfo;
 
 /// Tiny wrapper around SharedPreferences for the values the employee app
 /// needs to remember across launches: the store name they entered on
@@ -20,6 +24,8 @@ class SessionStore {
   static const _kConvId    = 'employee_conv_id';
   static const _kPosHost   = 'pos_db_host';
   static const _kPosPort   = 'pos_db_port';
+  static const _kShopJson  = 'pos_shop_info_json';
+  static const _kShopAt    = 'pos_shop_info_saved_at';
 
   static Future<SessionStore> open() async {
     final prefs = await SharedPreferences.getInstance();
@@ -62,6 +68,42 @@ class SessionStore {
     }
   }
 
+  /// Last ShopInfo we successfully read from the POS MariaDB. Persisted
+  /// so the ticket form can render business name + VAT label instantly on
+  /// every open and refresh in the background, instead of paying the full
+  /// handshake-auth-select round trip (~5–7s with reverse-DNS stall) on
+  /// each /ticket invocation.
+  ShopInfo? get cachedShop {
+    final raw = _prefs.getString(_kShopJson);
+    if (raw == null || raw.isEmpty) return null;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return null;
+      return ShopInfo.fromJson(decoded.cast<String, dynamic>());
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Wall-clock time of the last successful POS read. Returned alongside
+  /// [cachedShop] callers want to show "Last refreshed …" or apply a TTL
+  /// in the future — current behavior is no TTL, refresh-on-open.
+  DateTime? get cachedShopAt {
+    final ms = _prefs.getInt(_kShopAt);
+    if (ms == null) return null;
+    return DateTime.fromMillisecondsSinceEpoch(ms);
+  }
+
+  Future<void> saveCachedShop(ShopInfo info) async {
+    await _prefs.setString(_kShopJson, jsonEncode(info.toJson()));
+    await _prefs.setInt(_kShopAt, DateTime.now().millisecondsSinceEpoch);
+  }
+
+  Future<void> clearCachedShop() async {
+    await _prefs.remove(_kShopJson);
+    await _prefs.remove(_kShopAt);
+  }
+
   /// Wipe everything — used by the "reset store" path if you ever want to
   /// rebind the desktop client to a different store. Not exposed in the
   /// MVP UI but kept for parity with debug paths.
@@ -69,5 +111,7 @@ class SessionStore {
     await _prefs.remove(_kStoreName);
     await _prefs.remove(_kUserId);
     await _prefs.remove(_kConvId);
+    await _prefs.remove(_kShopJson);
+    await _prefs.remove(_kShopAt);
   }
 }
