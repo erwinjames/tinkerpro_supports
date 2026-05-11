@@ -950,6 +950,52 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
     );
   }
 
+  /// Ticket-lifecycle messages are formatted server-side as plain
+  /// chat text ("🎫 Ticket #N submitted: …", "👋 X has accepted ticket
+  /// #N (\"S\") and will be helping you from here.", "✅ X marked
+  /// ticket #N (\"S\") as resolved…"). Parse those into structured
+  /// records here so the renderer can show a clean centered badge
+  /// instead of a regular bubble.
+  _TicketEvent? _detectTicketEvent(String body) {
+    if (body.isEmpty) return null;
+    // Submitted — line 1 is "🎫 Ticket #N submitted: <subject>".
+    final mSub = RegExp(r'^🎫\s*Ticket\s*#(\d+)\s+submitted(?::\s*(.+))?$',
+            multiLine: false)
+        .firstMatch(body.split('\n').first);
+    if (mSub != null) {
+      return _TicketEvent(
+        kind: _TicketEventKind.submitted,
+        id: int.tryParse(mSub.group(1) ?? '0') ?? 0,
+        subject: (mSub.group(2) ?? '').trim(),
+      );
+    }
+    // Accepted — "👋 {agent} has accepted ticket #N (\"S\") …"
+    final mAcc =
+        RegExp(r'^👋\s*(.+?)\s+has accepted ticket\s*#(\d+)(?:\s*\("([^"]*)"\))?')
+            .firstMatch(body);
+    if (mAcc != null) {
+      return _TicketEvent(
+        kind: _TicketEventKind.accepted,
+        agentName: mAcc.group(1)?.trim() ?? '',
+        id: int.tryParse(mAcc.group(2) ?? '0') ?? 0,
+        subject: (mAcc.group(3) ?? '').trim(),
+      );
+    }
+    // Resolved — "✅ {agent} marked ticket #N (\"S\") as resolved…"
+    final mRes = RegExp(
+            r'^✅\s*(.+?)\s+marked ticket\s*#(\d+)(?:\s*\("([^"]*)"\))?\s+as resolved')
+        .firstMatch(body);
+    if (mRes != null) {
+      return _TicketEvent(
+        kind: _TicketEventKind.resolved,
+        agentName: mRes.group(1)?.trim() ?? '',
+        id: int.tryParse(mRes.group(2) ?? '0') ?? 0,
+        subject: (mRes.group(3) ?? '').trim(),
+      );
+    }
+    return null;
+  }
+
   Widget _buildBubble(ChatMessage m, TextTheme text) {
     // Special-case incoming /remote: render an interactive card
     // instead of plain text. Eliminates the showDialog dependency
@@ -957,6 +1003,14 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
     // getting swallowed by the GTK shell).
     if (_isPendingRemoteRequest(m)) {
       return _buildRemoteRequestCard(m, text);
+    }
+
+    // Ticket lifecycle (submitted / accepted / resolved) renders as a
+    // centered status badge instead of a left/right-aligned bubble so
+    // it reads as a system event, not a participant's chat line.
+    final ev = _detectTicketEvent(m.body);
+    if (ev != null) {
+      return _buildTicketBadge(ev);
     }
 
     final mine = m.senderId == _meId;
@@ -994,6 +1048,100 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  /// Centered system badge for a ticket lifecycle event. Visual:
+  /// pill with leading icon chip + status line + optional subject /
+  /// agent name on the second line. Reads as system metadata (not a
+  /// participant's chat line) because of the centered alignment and
+  /// the brand-tinted surface.
+  Widget _buildTicketBadge(_TicketEvent ev) {
+    final (icon, accent, primaryLine, secondaryLine) = switch (ev.kind) {
+      _TicketEventKind.submitted => (
+        Icons.confirmation_number_outlined,
+        Brand.signal,
+        'Ticket #${ev.id} submitted',
+        ev.subject.isEmpty ? null : '"${ev.subject}"',
+      ),
+      _TicketEventKind.accepted => (
+        Icons.check_circle_outline,
+        const Color(0xFF2563EB),
+        ev.agentName.isEmpty
+            ? 'Ticket #${ev.id} accepted'
+            : '${ev.agentName} accepted ticket #${ev.id}',
+        ev.subject.isEmpty ? "We'll help you from here." : '"${ev.subject}"',
+      ),
+      _TicketEventKind.resolved => (
+        Icons.task_alt_outlined,
+        Brand.success,
+        'Ticket #${ev.id} resolved',
+        ev.agentName.isEmpty ? null : 'by ${ev.agentName}',
+      ),
+    };
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      child: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 460),
+          child: Container(
+            padding: const EdgeInsets.fromLTRB(14, 10, 16, 10),
+            decoration: BoxDecoration(
+              color: accent.withValues(alpha: 0.08),
+              borderRadius: BorderRadius.circular(999),
+              border: Border.all(color: accent.withValues(alpha: 0.30)),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 28,
+                  height: 28,
+                  decoration: BoxDecoration(
+                    color: accent,
+                    shape: BoxShape.circle,
+                  ),
+                  alignment: Alignment.center,
+                  child: Icon(icon, size: 15, color: Colors.white),
+                ),
+                const SizedBox(width: 10),
+                Flexible(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        primaryLine,
+                        style: TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w700,
+                          color: accent,
+                          letterSpacing: -0.05,
+                        ),
+                      ),
+                      if (secondaryLine != null)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 1),
+                          child: Text(
+                            secondaryLine,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontSize: 11.5,
+                              color: Brand.textMuted,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -1275,4 +1423,22 @@ class _LanPickerSheet extends StatelessWidget {
       ),
     );
   }
+}
+
+enum _TicketEventKind { submitted, accepted, resolved }
+
+/// Decoded ticket-lifecycle event extracted from a chat message body.
+/// Used by [_EmployeeChatScreenState._buildTicketBadge] to render a
+/// centered system-style badge instead of a regular bubble.
+class _TicketEvent {
+  _TicketEvent({
+    required this.kind,
+    required this.id,
+    this.agentName = '',
+    this.subject = '',
+  });
+  final _TicketEventKind kind;
+  final int id;
+  final String agentName;
+  final String subject;
 }
