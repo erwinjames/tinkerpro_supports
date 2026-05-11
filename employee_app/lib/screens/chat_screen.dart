@@ -1311,6 +1311,10 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
     // ⋮ action button — visible on hover, sits just outside the
     // bubble (left of mine, right of theirs) so it doesn't crowd the
     // bubble content. Mirrors the web admin pattern.
+    //
+    // Builder captures the button's own local context so the menu
+    // anchors next to the button — without it, findRenderObject()
+    // returns the chat screen's box and the menu pops at (0,0).
     final actionBtn = AnimatedOpacity(
       duration: const Duration(milliseconds: 150),
       opacity: isHovered ? 1 : 0,
@@ -1320,32 +1324,37 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
           color: Colors.transparent,
           shape: const CircleBorder(),
           clipBehavior: Clip.antiAlias,
-          child: InkWell(
-            onTap: canAct
-                ? () {
-                    final renderBox = context.findRenderObject() as RenderBox?;
-                    final overlay =
-                        Overlay.of(context).context.findRenderObject()
-                            as RenderBox?;
-                    if (renderBox == null || overlay == null) return;
-                    // Anchor near the bubble's edge.
-                    final boxOffset = renderBox.localToGlobal(Offset.zero,
-                        ancestor: overlay);
-                    _showMessageActions(
-                        m, boxOffset + const Offset(40, 20));
-                  }
-                : null,
-            child: Container(
-              width: 26,
-              height: 26,
-              alignment: Alignment.center,
-              child: Icon(
-                Icons.more_horiz,
-                size: 16,
-                color: mine ? Brand.textMuted : Brand.textMuted,
+          child: Builder(builder: (btnCtx) {
+            return InkWell(
+              onTap: canAct
+                  ? () {
+                      final rb = btnCtx.findRenderObject() as RenderBox?;
+                      final overlay = Overlay.of(btnCtx)
+                          .context
+                          .findRenderObject() as RenderBox?;
+                      if (rb == null || overlay == null) return;
+                      final btnPos =
+                          rb.localToGlobal(Offset.zero, ancestor: overlay);
+                      // Open the menu just below the button so it
+                      // anchors visually to where the user clicked.
+                      _showMessageActions(
+                        m,
+                        Offset(btnPos.dx, btnPos.dy + rb.size.height),
+                      );
+                    }
+                  : null,
+              child: Container(
+                width: 26,
+                height: 26,
+                alignment: Alignment.center,
+                child: const Icon(
+                  Icons.more_horiz,
+                  size: 16,
+                  color: Brand.textMuted,
+                ),
               ),
-            ),
-          ),
+            );
+          }),
         ),
       ),
     );
