@@ -1169,19 +1169,18 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
   /// view reflects any status changes since the badge was rendered.
   Future<void> _showTicketDetailSheet(int ticketId) async {
     final tickets = TicketService(widget.api);
-    showModalBottomSheet<void>(
+    showDialog<void>(
       context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (sheetCtx) {
+      barrierColor: Colors.black.withValues(alpha: 0.45),
+      builder: (dialogCtx) {
         return FutureBuilder<TicketDetail?>(
           future: tickets.getTicketDetail(ticketId),
           builder: (ctx, snap) {
             if (snap.connectionState != ConnectionState.done) {
-              return _TicketDetailShell(
+              return _TicketDetailDialogShell(
                 ticketId: ticketId,
                 child: const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 36),
+                  padding: EdgeInsets.symmetric(vertical: 56),
                   child: Center(
                       child: CircularProgressIndicator(
                           strokeWidth: 2, color: Brand.signal)),
@@ -1190,10 +1189,10 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
             }
             final d = snap.data;
             if (d == null) {
-              return _TicketDetailShell(
+              return _TicketDetailDialogShell(
                 ticketId: ticketId,
                 child: const Padding(
-                  padding: EdgeInsets.fromLTRB(20, 8, 20, 28),
+                  padding: EdgeInsets.fromLTRB(28, 8, 28, 32),
                   child: Text(
                     "Couldn't load this ticket. It may have been removed.",
                     style: TextStyle(color: Brand.textMuted, fontSize: 13.5),
@@ -1201,7 +1200,7 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
                 ),
               );
             }
-            return _TicketDetailSheet(detail: d);
+            return _TicketDetailDialog(detail: d);
           },
         );
       },
@@ -1487,61 +1486,83 @@ class _LanPickerSheet extends StatelessWidget {
   }
 }
 
-/// Bottom-sheet container shared by the loading/error/loaded states of
-/// the ticket detail flow. Keeps a consistent height + handle so the
-/// transition between states doesn't jump.
-class _TicketDetailShell extends StatelessWidget {
-  const _TicketDetailShell({required this.ticketId, required this.child});
+/// Centered desktop dialog shell for the ticket detail flow. Shared by
+/// the loading / error / loaded states so the transition between them
+/// doesn't jump. Replaces an earlier bottom-sheet design that read as
+/// mobile-style on a 1920px POS workstation.
+class _TicketDetailDialogShell extends StatelessWidget {
+  const _TicketDetailDialogShell({
+    required this.ticketId,
+    required this.child,
+  });
   final int ticketId;
   final Widget child;
 
   @override
   Widget build(BuildContext context) {
-    return SafeArea(
-      top: false,
-      child: Container(
-        decoration: const BoxDecoration(
-          color: Brand.canvas,
-          borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+    return Dialog(
+      backgroundColor: Brand.canvas,
+      elevation: 0,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+      insetPadding: const EdgeInsets.symmetric(horizontal: 40, vertical: 48),
+      clipBehavior: Clip.antiAlias,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(
+          maxWidth: 560,
+          maxHeight: 640,
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Padding(
-              padding: const EdgeInsets.only(top: 10, bottom: 4),
-              child: Container(
-                width: 36,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: Brand.stroke,
-                  borderRadius: BorderRadius.circular(2),
+            // Header row — small "Ticket #N" label on the left, close
+            // affordance on the right. Reads like Linear/Notion dialogs.
+            Container(
+              padding: const EdgeInsets.fromLTRB(24, 18, 12, 14),
+              decoration: const BoxDecoration(
+                border: Border(
+                  bottom: BorderSide(color: Brand.stroke),
                 ),
               ),
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(20, 12, 20, 8),
               child: Row(
                 children: [
+                  Container(
+                    width: 28,
+                    height: 28,
+                    decoration: BoxDecoration(
+                      color: Brand.signal.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    alignment: Alignment.center,
+                    child: const Icon(
+                      Icons.confirmation_number_outlined,
+                      size: 15,
+                      color: Brand.signal,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
                   Text(
                     'Ticket #$ticketId',
                     style: const TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                      color: Brand.textMuted,
-                      letterSpacing: 0.2,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w700,
+                      color: Brand.textPrimary,
+                      letterSpacing: -0.2,
                     ),
                   ),
                   const Spacer(),
-                  IconButton(
-                    icon: const Icon(Icons.close,
-                        size: 20, color: Brand.textMuted),
-                    onPressed: () => Navigator.of(context).pop(),
-                    visualDensity: VisualDensity.compact,
+                  InkWell(
+                    onTap: () => Navigator.of(context).pop(),
+                    borderRadius: BorderRadius.circular(8),
+                    child: const Padding(
+                      padding: EdgeInsets.all(8),
+                      child: Icon(Icons.close,
+                          size: 18, color: Brand.textMuted),
+                    ),
                   ),
                 ],
               ),
             ),
-            child,
+            Flexible(child: child),
           ],
         ),
       ),
@@ -1549,11 +1570,13 @@ class _TicketDetailShell extends StatelessWidget {
   }
 }
 
-/// Renders the full ticket record inside the bottom sheet. Layout:
-/// status pill + priority pill at the top, then subject + description,
-/// then a key/value list of customer/business/agent/dates.
-class _TicketDetailSheet extends StatelessWidget {
-  const _TicketDetailSheet({required this.detail});
+/// Renders the full ticket record inside the centered dialog.
+/// Layout: status + priority pills, subject, description, then a
+/// 2-column meta grid (Customer/Business/Agent/Created/Updated) so we
+/// use the dialog's horizontal space efficiently instead of stacking
+/// every key/value on its own line.
+class _TicketDetailDialog extends StatelessWidget {
+  const _TicketDetailDialog({required this.detail});
   final TicketDetail detail;
 
   @override
@@ -1573,77 +1596,116 @@ class _TicketDetailSheet extends StatelessWidget {
       _ => (Brand.textMuted, detail.priority),
     };
 
-    return _TicketDetailShell(
+    final metaTiles = <Widget>[
+      if (detail.customerName.isNotEmpty)
+        _MetaTile(
+            icon: Icons.person_outline,
+            label: 'Customer',
+            value: detail.customerName),
+      if (detail.businessName.isNotEmpty)
+        _MetaTile(
+            icon: Icons.storefront_outlined,
+            label: 'Business',
+            value: detail.businessName),
+      _MetaTile(
+        icon: Icons.support_agent_outlined,
+        label: 'Assigned to',
+        value:
+            detail.agentName.isEmpty ? 'Unassigned' : detail.agentName,
+        muted: detail.agentName.isEmpty,
+      ),
+      if (detail.createdAt.isNotEmpty)
+        _MetaTile(
+            icon: Icons.event_outlined,
+            label: 'Created',
+            value: detail.createdAt),
+      if (detail.updatedAt.isNotEmpty &&
+          detail.updatedAt != detail.createdAt)
+        _MetaTile(
+            icon: Icons.update_outlined,
+            label: 'Last update',
+            value: detail.updatedAt),
+    ];
+
+    return _TicketDetailDialogShell(
       ticketId: detail.id,
-      child: Flexible(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(20, 4, 20, 24),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Wrap(
-                spacing: 8,
-                runSpacing: 6,
-                children: [
-                  _StatusPill(color: statusColor, label: statusLabel),
-                  _StatusPill(color: priorityColor, label: priorityLabel),
-                ],
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(24, 20, 24, 24),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Wrap(
+              spacing: 8,
+              runSpacing: 6,
+              children: [
+                _StatusPill(color: statusColor, label: statusLabel),
+                _StatusPill(color: priorityColor, label: priorityLabel),
+              ],
+            ),
+            const SizedBox(height: 18),
+            Text(
+              detail.subject.isEmpty ? '(no subject)' : detail.subject,
+              style: const TextStyle(
+                fontSize: 19,
+                fontWeight: FontWeight.w700,
+                color: Brand.textPrimary,
+                letterSpacing: -0.3,
+                height: 1.25,
               ),
-              const SizedBox(height: 14),
-              Text(
-                detail.subject.isEmpty ? '(no subject)' : detail.subject,
-                style: const TextStyle(
-                  fontSize: 17,
-                  fontWeight: FontWeight.w700,
-                  color: Brand.textPrimary,
-                  letterSpacing: -0.2,
-                  height: 1.3,
+            ),
+            if (detail.description.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: Brand.surface,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                      color: Brand.stroke.withValues(alpha: 0.65)),
                 ),
-              ),
-              if (detail.description.isNotEmpty) ...[
-                const SizedBox(height: 10),
-                Text(
+                child: Text(
                   detail.description,
                   style: const TextStyle(
-                    fontSize: 14,
+                    fontSize: 13.5,
                     color: Brand.textPrimary,
                     height: 1.5,
                   ),
                 ),
-              ],
-              const SizedBox(height: 18),
-              const Divider(height: 1, color: Brand.stroke),
-              const SizedBox(height: 14),
-              if (detail.customerName.isNotEmpty)
-                _MetaRow(
-                    icon: Icons.person_outline,
-                    label: 'Customer',
-                    value: detail.customerName),
-              if (detail.businessName.isNotEmpty)
-                _MetaRow(
-                    icon: Icons.storefront_outlined,
-                    label: 'Business',
-                    value: detail.businessName),
-              _MetaRow(
-                icon: Icons.support_agent_outlined,
-                label: 'Assigned to',
-                value: detail.agentName.isEmpty ? 'Unassigned' : detail.agentName,
-                muted: detail.agentName.isEmpty,
               ),
-              if (detail.createdAt.isNotEmpty)
-                _MetaRow(
-                    icon: Icons.event_outlined,
-                    label: 'Created',
-                    value: detail.createdAt),
-              if (detail.updatedAt.isNotEmpty &&
-                  detail.updatedAt != detail.createdAt)
-                _MetaRow(
-                    icon: Icons.update_outlined,
-                    label: 'Last update',
-                    value: detail.updatedAt),
             ],
-          ),
+            const SizedBox(height: 20),
+            // 2-column meta grid. LayoutBuilder so it cleanly collapses
+            // to a single column if the dialog is constrained narrow.
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final twoCol = constraints.maxWidth >= 420;
+                if (!twoCol) {
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      for (final t in metaTiles)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 10),
+                          child: t,
+                        ),
+                    ],
+                  );
+                }
+                return Wrap(
+                  spacing: 20,
+                  runSpacing: 12,
+                  children: [
+                    for (final t in metaTiles)
+                      SizedBox(
+                        width: (constraints.maxWidth - 20) / 2,
+                        child: t,
+                      ),
+                  ],
+                );
+              },
+            ),
+          ],
         ),
       ),
     );
@@ -1677,8 +1739,12 @@ class _StatusPill extends StatelessWidget {
   }
 }
 
-class _MetaRow extends StatelessWidget {
-  const _MetaRow({
+/// Two-line meta tile for the desktop dialog's 2-column grid. Top
+/// line is the label (small + muted), bottom line is the value
+/// (bold). Reads as a key/value card rather than a table row, which
+/// scans cleaner on wide surfaces.
+class _MetaTile extends StatelessWidget {
+  const _MetaTile({
     required this.icon,
     required this.label,
     required this.value,
@@ -1691,37 +1757,42 @@ class _MetaRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 10),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(icon, size: 16, color: Brand.textMuted),
-          const SizedBox(width: 10),
-          SizedBox(
-            width: 96,
-            child: Text(
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Row(
+          children: [
+            Icon(icon, size: 13, color: Brand.textMuted),
+            const SizedBox(width: 6),
+            Text(
               label,
               style: const TextStyle(
-                fontSize: 12,
+                fontSize: 11.5,
                 color: Brand.textMuted,
                 fontWeight: FontWeight.w500,
+                letterSpacing: 0.1,
               ),
             ),
-          ),
-          Expanded(
-            child: Text(
-              value,
-              style: TextStyle(
-                fontSize: 13,
-                fontStyle: muted ? FontStyle.italic : FontStyle.normal,
-                color: muted ? Brand.textMuted : Brand.textPrimary,
-                fontWeight: FontWeight.w600,
-              ),
+          ],
+        ),
+        const SizedBox(height: 3),
+        Padding(
+          padding: const EdgeInsets.only(left: 19),
+          child: Text(
+            value,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: 13,
+              fontStyle: muted ? FontStyle.italic : FontStyle.normal,
+              color: muted ? Brand.textMuted : Brand.textPrimary,
+              fontWeight: muted ? FontWeight.w500 : FontWeight.w600,
+              height: 1.3,
             ),
           ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 }
