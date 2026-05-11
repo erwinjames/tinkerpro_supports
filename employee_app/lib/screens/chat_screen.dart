@@ -1082,12 +1082,12 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
     };
 
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 10),
+      padding: const EdgeInsets.symmetric(vertical: 6),
       child: Center(
         child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 460),
+          constraints: const BoxConstraints(maxWidth: 360),
           child: Container(
-            padding: const EdgeInsets.fromLTRB(14, 10, 16, 10),
+            padding: const EdgeInsets.fromLTRB(8, 5, 12, 5),
             decoration: BoxDecoration(
               color: accent.withValues(alpha: 0.08),
               borderRadius: BorderRadius.circular(999),
@@ -1097,16 +1097,16 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 Container(
-                  width: 28,
-                  height: 28,
+                  width: 18,
+                  height: 18,
                   decoration: BoxDecoration(
                     color: accent,
                     shape: BoxShape.circle,
                   ),
                   alignment: Alignment.center,
-                  child: Icon(icon, size: 15, color: Colors.white),
+                  child: Icon(icon, size: 10, color: Colors.white),
                 ),
-                const SizedBox(width: 10),
+                const SizedBox(width: 8),
                 Flexible(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -1115,10 +1115,11 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
                       Text(
                         primaryLine,
                         style: TextStyle(
-                          fontSize: 12.5,
+                          fontSize: 11,
                           fontWeight: FontWeight.w700,
                           color: accent,
                           letterSpacing: -0.05,
+                          height: 1.2,
                         ),
                       ),
                       if (secondaryLine != null)
@@ -1129,9 +1130,10 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
-                              fontSize: 11.5,
+                              fontSize: 10,
                               color: Brand.textMuted,
                               fontWeight: FontWeight.w500,
+                              height: 1.2,
                             ),
                           ),
                         ),
