@@ -381,69 +381,134 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
         iconTheme: const IconThemeData(color: Brand.textPrimary),
       ),
       body: SafeArea(
-        child: ListView(
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-          children: [
-            _buildIntro(),
-            const SizedBox(height: 16),
-            _buildFormCard(),
-          ],
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            // Premium feel needs a measured reading width — full-bleed
+            // forms on a 1920px POS workstation look like a debug page.
+            // 640px max keeps the form line-length in the 50-65ch sweet
+            // spot, with generous gutters on either side.
+            final maxW = constraints.maxWidth > 760.0 ? 640.0 : double.infinity;
+            return Center(
+              child: ConstrainedBox(
+                constraints: BoxConstraints(maxWidth: maxW),
+                child: ListView(
+                  padding: const EdgeInsets.fromLTRB(20, 24, 20, 48),
+                  children: [
+                    _buildHero(),
+                    const SizedBox(height: 20),
+                    _buildFormCard(),
+                  ],
+                ),
+              ),
+            );
+          },
         ),
       ),
     );
   }
 
-  /// Single-line caption above the form — replaces the old bulky
-  /// gradient header + 4-step "what happens after you submit" panel.
-  /// The same expectation-setting now lives in a smaller composed
-  /// sentence so the form itself becomes the focal content.
-  Widget _buildIntro() {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: const [
-        Icon(Icons.support_agent_outlined, size: 18, color: Brand.signal),
-        SizedBox(width: 10),
-        Expanded(
-          child: Text(
-            "Tell us what's going on — we'll route it to support and you'll get updates right in this chat.",
-            style: TextStyle(color: Brand.textMuted, fontSize: 13, height: 1.45),
-          ),
+  /// Premium hero — soft warm gradient, large refined title, and a
+  /// short reassuring subtitle. Replaces the old gradient block that
+  /// duplicated the AppBar title. Sets the tone for the whole flow.
+  Widget _buildHero() {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(22, 22, 22, 22),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            Brand.signal.withValues(alpha: 0.08),
+            Brand.canvas,
+          ],
         ),
-      ],
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Brand.stroke),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 44,
+            height: 44,
+            decoration: BoxDecoration(
+              color: Brand.signal.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            alignment: Alignment.center,
+            child: const Icon(Icons.support_agent_outlined,
+                color: Brand.signal, size: 22),
+          ),
+          const SizedBox(width: 14),
+          const Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  "Let's get you sorted",
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w700,
+                    color: Brand.textPrimary,
+                    letterSpacing: -0.2,
+                    height: 1.2,
+                  ),
+                ),
+                SizedBox(height: 6),
+                Text(
+                  "Tell us what's happening. We'll route the ticket to support and post updates right back into this chat.",
+                  style: TextStyle(
+                    color: Brand.textMuted,
+                    fontSize: 13,
+                    height: 1.5,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 
   Widget _buildFormCard() {
     return Container(
-      padding: const EdgeInsets.fromLTRB(18, 18, 18, 18),
+      padding: const EdgeInsets.fromLTRB(24, 24, 24, 24),
       decoration: BoxDecoration(
         color: Brand.canvas,
-        borderRadius: BorderRadius.circular(18),
+        borderRadius: BorderRadius.circular(20),
         border: Border.all(color: Brand.stroke),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.025),
+            blurRadius: 24,
+            offset: const Offset(0, 8),
+          ),
+        ],
       ),
       child: Form(
         key: _formKey,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            _sectionHeader('Your details'),
-            _label('Full name', icon: Icons.person_outline, required_: true),
+            _sectionHeader(icon: Icons.badge_outlined, text: 'Your details'),
+            _label('Full name', required_: true),
             TextFormField(
               controller: _name,
               decoration: _fieldDecoration('Enter your full name'),
               validator: (v) =>
                   (v == null || v.trim().isEmpty) ? 'Name is required.' : null,
             ),
-            const SizedBox(height: 18),
-            _label('Business',
-                icon: Icons.business_outlined, required_: true),
+            const SizedBox(height: 20),
+            _label('Business', required_: true),
             _buildBusinessField(),
             if (!_loadingShop && !_needsSetup && _shop != null)
               _buildSourceCaption(),
-            const SizedBox(height: 6),
-            const Divider(height: 28, color: Brand.stroke),
-            _sectionHeader('The issue'),
-            _label('Subject', icon: Icons.subject, required_: true),
+            const SizedBox(height: 8),
+            const _Hairline(),
+            _sectionHeader(
+                icon: Icons.report_problem_outlined, text: 'The issue'),
+            _label('Subject', required_: true),
             TextFormField(
               controller: _subject,
               decoration: _fieldDecoration('Brief description of your issue'),
@@ -451,23 +516,22 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
                   ? 'Subject is required.'
                   : null,
             ),
-            const SizedBox(height: 18),
-            _label('Priority', icon: Icons.flag_outlined),
+            const SizedBox(height: 20),
+            _label('Priority'),
             _buildPriority(),
-            const SizedBox(height: 18),
-            _label('Description',
-                icon: Icons.description_outlined, required_: true),
+            const SizedBox(height: 20),
+            _label('Description', required_: true),
             TextFormField(
               controller: _description,
               minLines: 5,
               maxLines: 8,
               decoration: _fieldDecoration(
-                  "What happened, what you tried, and what you expected to happen. Paste error messages here too."),
+                  "What happened, what you tried, and what you expected. Paste error messages here too."),
               validator: (v) => (v == null || v.trim().isEmpty)
                   ? 'A description is required.'
                   : null,
             ),
-            const SizedBox(height: 24),
+            const SizedBox(height: 28),
             _buildSubmit(),
           ],
         ),
@@ -475,34 +539,48 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
     );
   }
 
-  Widget _sectionHeader(String text) {
+  Widget _sectionHeader({required IconData icon, required String text}) {
     return Padding(
-      padding: const EdgeInsets.only(bottom: 14),
-      child: Text(
-        text.toUpperCase(),
-        style: const TextStyle(
-          fontSize: 11.5,
-          fontWeight: FontWeight.w800,
-          color: Brand.textMuted,
-          letterSpacing: 1.1,
-        ),
+      padding: const EdgeInsets.only(bottom: 18, top: 4),
+      child: Row(
+        children: [
+          Container(
+            width: 26,
+            height: 26,
+            decoration: BoxDecoration(
+              color: Brand.signal.withValues(alpha: 0.10),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            alignment: Alignment.center,
+            child: Icon(icon, size: 14, color: Brand.signal),
+          ),
+          const SizedBox(width: 10),
+          Text(
+            text,
+            style: const TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w700,
+              color: Brand.textPrimary,
+              letterSpacing: -0.1,
+            ),
+          ),
+        ],
       ),
     );
   }
 
-  Widget _label(String text, {required IconData icon, bool required_ = false}) {
+  Widget _label(String text, {bool required_ = false}) {
     return Padding(
-      padding: const EdgeInsets.only(bottom: 6),
+      padding: const EdgeInsets.only(bottom: 8, left: 2),
       child: Row(
         children: [
-          Icon(icon, size: 15, color: Brand.textMuted),
-          const SizedBox(width: 6),
           Text(
             text,
             style: const TextStyle(
               fontWeight: FontWeight.w600,
               color: Brand.textPrimary,
-              fontSize: 13,
+              fontSize: 12.5,
+              letterSpacing: -0.05,
             ),
           ),
           if (required_)
@@ -511,9 +589,9 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
               child: Text(
                 '*',
                 style: TextStyle(
-                    color: Brand.danger,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w700),
+                    color: Brand.signal,
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w800),
               ),
             ),
         ],
@@ -523,30 +601,36 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
 
   InputDecoration _fieldDecoration(String hint) => InputDecoration(
         hintText: hint,
-        hintStyle: const TextStyle(color: Brand.textMuted, fontSize: 13.5),
+        hintStyle: TextStyle(
+          color: Brand.textMuted.withValues(alpha: 0.65),
+          fontSize: 14,
+          fontWeight: FontWeight.w400,
+        ),
         contentPadding:
-            const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+            const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
         filled: true,
-        fillColor: Brand.canvas,
+        fillColor: Brand.surface,
         border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
-          borderSide: const BorderSide(color: Brand.stroke, width: 1.4),
+          borderRadius: BorderRadius.circular(14),
+          borderSide: BorderSide.none,
         ),
         enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
-          borderSide: const BorderSide(color: Brand.stroke, width: 1.4),
+          borderRadius: BorderRadius.circular(14),
+          borderSide: BorderSide(
+              color: Brand.stroke.withValues(alpha: 0.65), width: 1),
         ),
         focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
-          borderSide: const BorderSide(color: Brand.signal, width: 1.8),
+          borderRadius: BorderRadius.circular(14),
+          borderSide: const BorderSide(color: Brand.signal, width: 1.6),
         ),
         errorBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
-          borderSide: const BorderSide(color: Brand.danger, width: 1.4),
+          borderRadius: BorderRadius.circular(14),
+          borderSide:
+              const BorderSide(color: Brand.danger, width: 1),
         ),
         focusedErrorBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
-          borderSide: const BorderSide(color: Brand.danger, width: 1.8),
+          borderRadius: BorderRadius.circular(14),
+          borderSide: const BorderSide(color: Brand.danger, width: 1.6),
         ),
       );
 
@@ -616,14 +700,27 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
     }
     final shop = _shop!;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
       decoration: BoxDecoration(
-        color: Brand.subtle,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Brand.stroke, width: 1.4),
+        color: Brand.surface,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Brand.stroke.withValues(alpha: 0.65)),
       ),
       child: Row(
         children: [
+          Container(
+            width: 36,
+            height: 36,
+            decoration: BoxDecoration(
+              color: Brand.canvas,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: Brand.stroke.withValues(alpha: 0.65)),
+            ),
+            alignment: Alignment.center,
+            child: const Icon(Icons.storefront_outlined,
+                size: 18, color: Brand.textMuted),
+          ),
+          const SizedBox(width: 12),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -633,9 +730,11 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
                       ? 'Unnamed business'
                       : shop.businessName,
                   style: const TextStyle(
-                      fontWeight: FontWeight.w700,
-                      fontSize: 14.5,
-                      color: Brand.textPrimary),
+                    fontWeight: FontWeight.w700,
+                    fontSize: 14.5,
+                    color: Brand.textPrimary,
+                    letterSpacing: -0.1,
+                  ),
                   overflow: TextOverflow.ellipsis,
                 ),
                 if (shop.tin.isNotEmpty)
@@ -1184,49 +1283,95 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
 
   Widget _buildPriority() {
     final opts = const [
-      _PriorityOpt('low', Icons.arrow_downward_rounded, 'Low', Brand.success),
-      _PriorityOpt('medium', Icons.remove_rounded, 'Medium', Brand.warning),
-      _PriorityOpt('high', Icons.priority_high_rounded, 'Urgent', Brand.danger),
+      _PriorityOpt(
+        'low',
+        Icons.south_rounded,
+        'Low',
+        'General question',
+        Brand.success,
+      ),
+      _PriorityOpt(
+        'medium',
+        Icons.drag_handle_rounded,
+        'Medium',
+        'Need help soon',
+        Brand.warning,
+      ),
+      _PriorityOpt(
+        'high',
+        Icons.bolt_rounded,
+        'Urgent',
+        'System down',
+        Brand.danger,
+      ),
     ];
     return Row(
       children: opts.map((o) {
         final selected = _priority == o.value;
         return Expanded(
           child: Padding(
-            padding: EdgeInsets.only(right: o == opts.last ? 0 : 8),
+            padding: EdgeInsets.only(right: o == opts.last ? 0 : 10),
             child: Material(
               color: Colors.transparent,
               child: InkWell(
-                borderRadius: BorderRadius.circular(12),
+                borderRadius: BorderRadius.circular(14),
                 onTap: () => setState(() => _priority = o.value),
                 child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 150),
-                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  duration: const Duration(milliseconds: 180),
+                  curve: Curves.easeOut,
+                  padding: const EdgeInsets.symmetric(
+                      vertical: 14, horizontal: 12),
                   decoration: BoxDecoration(
                     color: selected
-                        ? o.color.withValues(alpha: 0.10)
-                        : Brand.canvas,
-                    borderRadius: BorderRadius.circular(12),
+                        ? o.color.withValues(alpha: 0.08)
+                        : Brand.surface,
+                    borderRadius: BorderRadius.circular(14),
                     border: Border.all(
-                      color: selected ? o.color : Brand.stroke,
-                      width: selected ? 1.6 : 1.4,
+                      color: selected
+                          ? o.color
+                          : Brand.stroke.withValues(alpha: 0.65),
+                      width: selected ? 1.6 : 1,
                     ),
                   ),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
+                  child: Column(
                     children: [
-                      Icon(
-                        o.icon,
-                        size: 16,
-                        color: selected ? o.color : Brand.textMuted,
+                      AnimatedContainer(
+                        duration: const Duration(milliseconds: 180),
+                        width: 34,
+                        height: 34,
+                        decoration: BoxDecoration(
+                          color: selected
+                              ? o.color
+                              : o.color.withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        alignment: Alignment.center,
+                        child: Icon(
+                          o.icon,
+                          size: 18,
+                          color: selected ? Colors.white : o.color,
+                        ),
                       ),
-                      const SizedBox(width: 6),
+                      const SizedBox(height: 10),
                       Text(
                         o.label,
                         style: TextStyle(
                           fontWeight: FontWeight.w700,
-                          color: selected ? o.color : Brand.textPrimary,
+                          color: selected
+                              ? Brand.textPrimary
+                              : Brand.textPrimary,
                           fontSize: 13,
+                          letterSpacing: -0.1,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        o.subtitle,
+                        style: TextStyle(
+                          fontSize: 10.5,
+                          color: Brand.textMuted,
+                          fontWeight:
+                              selected ? FontWeight.w500 : FontWeight.w400,
                         ),
                       ),
                     ],
@@ -1243,30 +1388,69 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
   Widget _buildSubmit() {
     return SizedBox(
       width: double.infinity,
-      height: 50,
-      child: ElevatedButton.icon(
-        onPressed: _submitting ? null : _submit,
-        icon: _submitting
-            ? const SizedBox(
-                width: 18,
-                height: 18,
-                child: CircularProgressIndicator(
-                    strokeWidth: 2, color: Colors.white),
-              )
-            : const Icon(Icons.send_rounded, size: 18),
-        label: Text(_submitting ? 'Submitting…' : 'Submit ticket'),
-        style: ElevatedButton.styleFrom(
-          backgroundColor: Brand.signal,
-          foregroundColor: Colors.white,
-          disabledBackgroundColor: Brand.signal.withValues(alpha: 0.4),
-          elevation: 0,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
+      height: 54,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(14),
+          boxShadow: _submitting
+              ? []
+              : [
+                  BoxShadow(
+                    color: Brand.signal.withValues(alpha: 0.30),
+                    blurRadius: 18,
+                    offset: const Offset(0, 8),
+                  ),
+                ],
+        ),
+        child: ElevatedButton.icon(
+          onPressed: _submitting ? null : _submit,
+          icon: _submitting
+              ? const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(
+                      strokeWidth: 2, color: Colors.white),
+                )
+              : const Icon(Icons.arrow_forward_rounded, size: 18),
+          label: Text(_submitting ? 'Submitting…' : 'Submit ticket'),
+          style: ElevatedButton.styleFrom(
+            backgroundColor: Brand.signal,
+            foregroundColor: Colors.white,
+            disabledBackgroundColor: Brand.signal.withValues(alpha: 0.4),
+            elevation: 0,
+            shadowColor: Colors.transparent,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(14),
+            ),
+            textStyle: const TextStyle(
+              fontSize: 15,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.15,
+            ),
           ),
-          textStyle: const TextStyle(
-            fontSize: 15,
-            fontWeight: FontWeight.w700,
-            letterSpacing: 0.2,
+        ),
+      ),
+    );
+  }
+}
+
+/// Hairline section separator — subtler than the default Divider.
+class _Hairline extends StatelessWidget {
+  const _Hairline();
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 22),
+      child: Container(
+        height: 1,
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            colors: [
+              Brand.stroke.withValues(alpha: 0),
+              Brand.stroke,
+              Brand.stroke.withValues(alpha: 0),
+            ],
           ),
         ),
       ),
@@ -1299,10 +1483,12 @@ class _VatChip extends StatelessWidget {
 }
 
 class _PriorityOpt {
-  const _PriorityOpt(this.value, this.icon, this.label, this.color);
+  const _PriorityOpt(
+      this.value, this.icon, this.label, this.subtitle, this.color);
   final String value;
   final IconData icon;
   final String label;
+  final String subtitle;
   final Color color;
 }
 
