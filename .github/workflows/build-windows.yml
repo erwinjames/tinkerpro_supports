@@ -73,6 +73,16 @@ jobs:
             --dart-define="RUSTDESK_PASSWORD_SALT=tinkerpro-2026-pepper"
         shell: pwsh
 
+      - name: Stage the POS setup script next to TpSupport.exe
+        # Ships with the .exe so a first-time install on a fresh XAMPP
+        # POS box is one click: unzip → run setup-pos-and-run.ps1 →
+        # done. Idempotent on re-run.
+        run: |
+          Copy-Item `
+            -Path setup-pos-and-run.ps1 `
+            -Destination build\windows\x64\runner\Release\setup-pos-and-run.ps1
+        shell: pwsh
+
       - name: Zip the Release folder
         # Ship the WHOLE folder — the .exe alone won't run without
         # the DLLs and data\flutter_assets\ next to it.
