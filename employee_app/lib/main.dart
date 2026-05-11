@@ -149,6 +149,7 @@ class _BootstrapState extends State<_Bootstrap> {
       realtime: realtime,
       chat: _chat,
       shadowUserId: info.meId,
+      conversationId: info.conversationId,
     );
     realtime.connect(
       shadowUserId: info.meId,

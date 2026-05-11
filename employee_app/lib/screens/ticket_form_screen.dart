@@ -478,7 +478,12 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
             _buildBusinessField(),
             if (!_loadingShop && !_needsSetup && _shop != null)
               _buildSourceCaption(),
-            if (!_loadingShop && !_needsSetup) _buildDiagnosticsCard(),
+            // POS server diagnostics card hidden — admin-setup panel
+            // (shown when no manual target is configured) and the
+            // "Edit host" entry in the source caption now cover the
+            // same flow. The diagnostics widgets remain in the file
+            // for future debugging if we ever need to re-enable.
+            // if (!_loadingShop && !_needsSetup) _buildDiagnosticsCard(),
             const SizedBox(height: 16),
             _label('📝 Subject *'),
             TextFormField(
@@ -871,6 +876,7 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
     await widget.store.saveCachedShop(adopted);
   }
 
+  // ignore: unused_element
   Widget _buildDiagnosticsCard() {
     final report = _diagReport;
     final hasResults = report != null && report.openTargets.isNotEmpty;

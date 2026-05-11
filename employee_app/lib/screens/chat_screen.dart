@@ -65,6 +65,16 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
   final Set<Object> _resolvedRemotes = {};
   StreamSubscription<ChatMessage>? _msgSub;
   StreamSubscription<ConversationInvite>? _inviteSub;
+  StreamSubscription<CallPresence>? _presenceSub;
+
+  /// Most recent `busy` presence from a *different* terminal in our
+  /// conversation. While non-null, this terminal's call buttons grey
+  /// out and a banner appears so a tech doesn't fire a competing call
+  /// while a colleague's call is in flight. Cleared on matching `free`
+  /// from the same callId, or by [_presenceAutoClear] (heartbeat
+  /// fallback when the busy emitter crashes silently).
+  CallPresence? _colleagueInCall;
+  Timer? _presenceAutoClear;
 
   /// Mutable copy of the seed info — gets swapped wholesale when the
   /// user accepts an Add-Participant invite from a colleague (we
@@ -90,6 +100,8 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
     _msgSub = widget.realtime.messageEvents.listen(_onIncoming);
     _inviteSub =
         widget.realtime.conversationCreatedEvents.listen(_onConversationInvite);
+    _presenceSub =
+        widget.realtime.callPresenceEvents.listen(_onCallPresence);
     widget.calls.addListener(_onCallChange);
   }
 
@@ -97,6 +109,8 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
   void dispose() {
     _msgSub?.cancel();
     _inviteSub?.cancel();
+    _presenceSub?.cancel();
+    _presenceAutoClear?.cancel();
     widget.calls.removeListener(_onCallChange);
     _composer.dispose();
     _scroll.dispose();
@@ -380,6 +394,33 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
     );
     if (!ok && mounted) {
       _toast('Could not start call.');
+    }
+  }
+
+  void _onCallPresence(CallPresence pres) {
+    // Echoes of our own emit are noise — skip them.
+    if (pres.fromId == _meId) return;
+    if (!mounted) return;
+    if (pres.isBusy) {
+      _presenceAutoClear?.cancel();
+      // 5-minute safety net: if the colleague's terminal crashes
+      // without releasing, we don't want to lock our own buttons
+      // forever. Real calls outlive 5 min sometimes, but at that
+      // point we'd rather risk a false-free than a permanent stick.
+      _presenceAutoClear = Timer(const Duration(minutes: 5), () {
+        if (!mounted) return;
+        setState(() => _colleagueInCall = null);
+      });
+      setState(() => _colleagueInCall = pres);
+    } else if (pres.isFree) {
+      // Only clear if the free matches the call we're tracking — out
+      // of order frees from older calls shouldn't unlock a newer one.
+      final current = _colleagueInCall;
+      if (current != null && current.callId == pres.callId) {
+        _presenceAutoClear?.cancel();
+        _presenceAutoClear = null;
+        setState(() => _colleagueInCall = null);
+      }
     }
   }
 
@@ -805,20 +846,29 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
             onPressed: _openAddParticipantSheet,
           ),
           IconButton(
-            tooltip: 'Voice call',
+            tooltip: _colleagueInCall != null
+                ? '${_colleagueInCall!.fromName} is on a call — please wait'
+                : 'Voice call',
             icon: const Icon(Icons.call),
-            onPressed: () => _placeCall(CallMedia.voice),
+            onPressed: _colleagueInCall != null
+                ? null
+                : () => _placeCall(CallMedia.voice),
           ),
           IconButton(
-            tooltip: 'Video call',
+            tooltip: _colleagueInCall != null
+                ? '${_colleagueInCall!.fromName} is on a call — please wait'
+                : 'Video call',
             icon: const Icon(Icons.videocam),
-            onPressed: () => _placeCall(CallMedia.video),
+            onPressed: _colleagueInCall != null
+                ? null
+                : () => _placeCall(CallMedia.video),
           ),
           const SizedBox(width: 4),
         ],
       ),
       body: Column(
         children: [
+          if (_colleagueInCall != null) _buildColleagueCallBanner(),
           Expanded(
             child: _loading
                 ? const Center(child: CircularProgressIndicator(strokeWidth: 2))
@@ -828,6 +878,42 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
           ),
           _buildComposer(),
         ],
+      ),
+    );
+  }
+
+  Widget _buildColleagueCallBanner() {
+    final pres = _colleagueInCall!;
+    final mediaLabel = pres.media == 'video' ? 'video call' : 'voice call';
+    return Material(
+      color: const Color(0xFFFFF7E6),
+      child: InkWell(
+        // Tapping does nothing meaningful — the banner is informational,
+        // but wrap in InkWell so a tech gets ripple feedback if they try.
+        onTap: () {},
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          child: Row(
+            children: [
+              const Icon(
+                Icons.phone_in_talk_outlined,
+                size: 18,
+                color: Color(0xFFB45309),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  '${pres.fromName.isEmpty ? 'A colleague' : pres.fromName} is on a $mediaLabel with support',
+                  style: const TextStyle(
+                    color: Color(0xFF92400E),
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

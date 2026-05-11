@@ -37,6 +37,7 @@ class CallService extends ChangeNotifier {
     required this.realtime,
     required this.chat,
     required this.shadowUserId,
+    required this.conversationId,
     List<Map<String, dynamic>>? iceServers,
   }) : _iceServers = iceServers ??
             const [
@@ -55,6 +56,11 @@ class CallService extends ChangeNotifier {
   /// `chat.signal` POSTs to via `as_portal=1`). Useful for skipping
   /// echoes of our own signals if the channel ever gets noisy.
   final int shadowUserId;
+
+  /// Conversation we belong to. Used to broadcast `chat.callPresence`
+  /// to colleagues sharing the support thread so their AppBar greys
+  /// out call buttons + shows a banner while we're on a call.
+  final int conversationId;
   final List<Map<String, dynamic>> _iceServers;
   StreamSubscription<CallSignal>? _signalSub;
 
@@ -156,6 +162,10 @@ class CallService extends ChangeNotifier {
 
     await _ensureRenderers();
     unawaited(RingtoneService.instance.startRingback());
+    // Let colleagues in the same conversation know we just claimed
+    // the call slot so their AppBar buttons grey out before we even
+    // touch local media.
+    _emitPresence('busy', callId!);
     notifyListeners();
 
     try {
@@ -256,6 +266,11 @@ class CallService extends ChangeNotifier {
       callId: sig.callId,
       media: sig.media,
     ));
+
+    // Let colleagues in the same conversation know this terminal is
+    // tied up with an incoming call so they can't start a competing
+    // one. We'll emit `free` from _cleanup when the ringing resolves.
+    _emitPresence('busy', sig.callId);
 
     // Auto-decline if the customer never picks up. Without this, a caller
     // who hangs up before we accept would leave us stuck in `ringing`.
@@ -599,6 +614,13 @@ class CallService extends ChangeNotifier {
   // ── Lifecycle utilities ──────────────────────────────────────────────
 
   void _cleanup({required bool silent}) {
+    // Capture & emit BEFORE we wipe state so colleagues see "free"
+    // with the correct callId. Skips harmlessly if no call was ever
+    // started in this instance.
+    final cidForPresence = callId;
+    if (cidForPresence != null && cidForPresence.isNotEmpty) {
+      _emitPresence('free', cidForPresence);
+    }
     unawaited(RingtoneService.instance.stop());
     _ringTimeout?.cancel();
     _ringTimeout = null;
@@ -667,6 +689,19 @@ class CallService extends ChangeNotifier {
   }
 
   String _mediaWire() => media == CallMedia.video ? 'video' : 'voice';
+
+  /// Tell colleagues in our conversation that this terminal is now
+  /// busy/free with a call. Best-effort; failure here never blocks the
+  /// call itself.
+  void _emitPresence(String state, String cid) {
+    if (conversationId <= 0 || cid.isEmpty) return;
+    unawaited(chat.callPresence(
+      conversationId: conversationId,
+      state: state,
+      media: _mediaWire(),
+      callId: cid,
+    ));
+  }
 
   Future<void> _ensureRenderers() async {
     if (_renderersReady) return;

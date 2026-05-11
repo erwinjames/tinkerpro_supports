@@ -216,6 +216,32 @@ class ChatService {
     });
     return res['success'] == true;
   }
+
+  /// Tell every other participant of [conversationId] that this
+  /// terminal is now `'busy'` (call in progress) or `'free'` (call
+  /// ended). The server fan-outs to `private-conv-{convId}`; other
+  /// colleagues on the same conversation pick it up via
+  /// [ChatRealtimeService.callPresenceEvents] and grey out their own
+  /// call buttons + show a banner. Best-effort — a failure here
+  /// shouldn't block the call itself.
+  Future<bool> callPresence({
+    required int conversationId,
+    required String state, // 'busy' | 'free'
+    required String media, // 'voice' | 'video'
+    required String callId,
+  }) async {
+    try {
+      final res = await api.postChat('chat.callPresence', body: {
+        'conversation_id': conversationId.toString(),
+        'state': state,
+        'media': media,
+        'call_id': callId,
+      });
+      return res['success'] == true;
+    } catch (_) {
+      return false;
+    }
+  }
 }
 
 /// Snapshot of the employee's support thread, returned by

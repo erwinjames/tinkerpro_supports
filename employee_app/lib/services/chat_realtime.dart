@@ -103,6 +103,12 @@ class ChatRealtimeService {
   final _readEvents = StreamController<MessageRead>.broadcast();
   final _deletedEvents = StreamController<int>.broadcast(); // message_id
   final _callSignalEvents = StreamController<CallSignal>.broadcast();
+  // Conversation-wide call presence — fires when a colleague in the
+  // same support thread starts/ends a call so this terminal can grey
+  // out its own call buttons and show a banner. Distinct from
+  // _callSignalEvents (which is the per-user WebRTC offer/answer/ICE
+  // relay).
+  final _callPresenceEvents = StreamController<CallPresence>.broadcast();
 
   /// `conversation.created` — fired by the server when this user is
   /// added to a new conversation (e.g., another employee invited them
@@ -116,6 +122,7 @@ class ChatRealtimeService {
   Stream<MessageRead> get readEvents => _readEvents.stream;
   Stream<int> get messageDeletedEvents => _deletedEvents.stream;
   Stream<CallSignal> get callSignalEvents => _callSignalEvents.stream;
+  Stream<CallPresence> get callPresenceEvents => _callPresenceEvents.stream;
   Stream<ConversationInvite> get conversationCreatedEvents =>
       _conversationCreatedEvents.stream;
 
@@ -180,6 +187,7 @@ class ChatRealtimeService {
     await _readEvents.close();
     await _deletedEvents.close();
     await _callSignalEvents.close();
+    await _callPresenceEvents.close();
     await _conversationCreatedEvents.close();
   }
 
@@ -322,6 +330,11 @@ class ChatRealtimeService {
       case 'call.signal':
         if (data != null && !_callSignalEvents.isClosed) {
           _callSignalEvents.add(CallSignal.fromJson(data));
+        }
+        break;
+      case 'call.presence':
+        if (data != null && !_callPresenceEvents.isClosed) {
+          _callPresenceEvents.add(CallPresence.fromJson(data));
         }
         break;
       case 'conversation.created':

@@ -162,6 +162,48 @@ class CallSignal {
   }
 }
 
+/// Conversation-wide call-presence event broadcast on
+/// `private-conv-{id}`. Lets colleagues in the same support thread
+/// (multi-terminal install) see when one of them starts/ends a call so
+/// the chat screen can grey out the call buttons on every *other*
+/// terminal and surface a "`<name>` is on a call" banner.
+///
+/// Distinct from [CallSignal] — that's the per-user WebRTC relay.
+class CallPresence {
+  CallPresence({
+    required this.fromId,
+    required this.fromName,
+    required this.state,
+    required this.media,
+    required this.callId,
+    required this.sentAt,
+  });
+
+  final int fromId;
+  final String fromName;
+  final String state; // 'busy' | 'free'
+  final String media; // 'voice' | 'video'
+  final String callId;
+  final DateTime sentAt;
+
+  bool get isBusy => state == 'busy';
+  bool get isFree => state == 'free';
+
+  factory CallPresence.fromJson(Map<String, dynamic> j) {
+    final epoch = int.tryParse((j['sent_at'] ?? 0).toString()) ?? 0;
+    return CallPresence(
+      fromId: int.tryParse((j['from_id'] ?? 0).toString()) ?? 0,
+      fromName: (j['from_name'] ?? '').toString(),
+      state: (j['state'] ?? '').toString(),
+      media: (j['media'] ?? 'voice').toString(),
+      callId: (j['call_id'] ?? '').toString(),
+      sentAt: epoch > 0
+          ? DateTime.fromMillisecondsSinceEpoch(epoch * 1000)
+          : DateTime.now(),
+    );
+  }
+}
+
 /// Small typing event broadcast on `private-conv-{id}`.
 class TypingEvent {
   TypingEvent({
