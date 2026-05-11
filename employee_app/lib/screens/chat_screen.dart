@@ -1086,65 +1086,120 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
       child: Center(
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 360),
-          child: Container(
-            padding: const EdgeInsets.fromLTRB(8, 5, 12, 5),
-            decoration: BoxDecoration(
-              color: accent.withValues(alpha: 0.08),
+          child: Material(
+            color: Colors.transparent,
+            child: InkWell(
+              onTap: () => _showTicketDetailSheet(ev.id),
               borderRadius: BorderRadius.circular(999),
-              border: Border.all(color: accent.withValues(alpha: 0.30)),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  width: 18,
-                  height: 18,
-                  decoration: BoxDecoration(
-                    color: accent,
-                    shape: BoxShape.circle,
-                  ),
-                  alignment: Alignment.center,
-                  child: Icon(icon, size: 10, color: Colors.white),
+              child: Container(
+                padding: const EdgeInsets.fromLTRB(8, 5, 12, 5),
+                decoration: BoxDecoration(
+                  color: accent.withValues(alpha: 0.08),
+                  borderRadius: BorderRadius.circular(999),
+                  border: Border.all(color: accent.withValues(alpha: 0.30)),
                 ),
-                const SizedBox(width: 8),
-                Flexible(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        primaryLine,
-                        style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w700,
-                          color: accent,
-                          letterSpacing: -0.05,
-                          height: 1.2,
-                        ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      width: 18,
+                      height: 18,
+                      decoration: BoxDecoration(
+                        color: accent,
+                        shape: BoxShape.circle,
                       ),
-                      if (secondaryLine != null)
-                        Padding(
-                          padding: const EdgeInsets.only(top: 1),
-                          child: Text(
-                            secondaryLine,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              fontSize: 10,
-                              color: Brand.textMuted,
-                              fontWeight: FontWeight.w500,
+                      alignment: Alignment.center,
+                      child: Icon(icon, size: 10, color: Colors.white),
+                    ),
+                    const SizedBox(width: 8),
+                    Flexible(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            primaryLine,
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                              color: accent,
+                              letterSpacing: -0.05,
                               height: 1.2,
                             ),
                           ),
-                        ),
-                    ],
-                  ),
+                          if (secondaryLine != null)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 1),
+                              child: Text(
+                                secondaryLine,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontSize: 10,
+                                  color: Brand.textMuted,
+                                  fontWeight: FontWeight.w500,
+                                  height: 1.2,
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Icon(Icons.chevron_right_rounded,
+                        size: 14, color: accent.withValues(alpha: 0.6)),
+                  ],
                 ),
-              ],
+              ),
             ),
           ),
         ),
       ),
+    );
+  }
+
+  /// Opens a bottom sheet with the full ticket record (subject,
+  /// description, status, priority, agent, customer, timestamps).
+  /// Fetched lazily — keeps the chat history light and ensures the
+  /// view reflects any status changes since the badge was rendered.
+  Future<void> _showTicketDetailSheet(int ticketId) async {
+    final tickets = TicketService(widget.api);
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (sheetCtx) {
+        return FutureBuilder<TicketDetail?>(
+          future: tickets.getTicketDetail(ticketId),
+          builder: (ctx, snap) {
+            if (snap.connectionState != ConnectionState.done) {
+              return _TicketDetailShell(
+                ticketId: ticketId,
+                child: const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 36),
+                  child: Center(
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: Brand.signal)),
+                ),
+              );
+            }
+            final d = snap.data;
+            if (d == null) {
+              return _TicketDetailShell(
+                ticketId: ticketId,
+                child: const Padding(
+                  padding: EdgeInsets.fromLTRB(20, 8, 20, 28),
+                  child: Text(
+                    "Couldn't load this ticket. It may have been removed.",
+                    style: TextStyle(color: Brand.textMuted, fontSize: 13.5),
+                  ),
+                ),
+              );
+            }
+            return _TicketDetailSheet(detail: d);
+          },
+        );
+      },
     );
   }
 
@@ -1422,6 +1477,245 @@ class _LanPickerSheet extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// Bottom-sheet container shared by the loading/error/loaded states of
+/// the ticket detail flow. Keeps a consistent height + handle so the
+/// transition between states doesn't jump.
+class _TicketDetailShell extends StatelessWidget {
+  const _TicketDetailShell({required this.ticketId, required this.child});
+  final int ticketId;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      top: false,
+      child: Container(
+        decoration: const BoxDecoration(
+          color: Brand.canvas,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(top: 10, bottom: 4),
+              child: Container(
+                width: 36,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: Brand.stroke,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 12, 20, 8),
+              child: Row(
+                children: [
+                  Text(
+                    'Ticket #$ticketId',
+                    style: const TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: Brand.textMuted,
+                      letterSpacing: 0.2,
+                    ),
+                  ),
+                  const Spacer(),
+                  IconButton(
+                    icon: const Icon(Icons.close,
+                        size: 20, color: Brand.textMuted),
+                    onPressed: () => Navigator.of(context).pop(),
+                    visualDensity: VisualDensity.compact,
+                  ),
+                ],
+              ),
+            ),
+            child,
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Renders the full ticket record inside the bottom sheet. Layout:
+/// status pill + priority pill at the top, then subject + description,
+/// then a key/value list of customer/business/agent/dates.
+class _TicketDetailSheet extends StatelessWidget {
+  const _TicketDetailSheet({required this.detail});
+  final TicketDetail detail;
+
+  @override
+  Widget build(BuildContext context) {
+    final (statusColor, statusLabel) = switch (detail.status) {
+      'new' => (const Color(0xFF2563EB), 'New'),
+      'assigned' || 'in_progress' =>
+        (const Color(0xFF2563EB), 'In progress'),
+      'resolved' => (Brand.success, 'Resolved'),
+      'closed' => (Brand.textMuted, 'Closed'),
+      _ => (Brand.textMuted, detail.status),
+    };
+    final (priorityColor, priorityLabel) = switch (detail.priority) {
+      'low' => (Brand.success, 'Low'),
+      'medium' => (Brand.warning, 'Medium'),
+      'high' => (Brand.danger, 'Urgent'),
+      _ => (Brand.textMuted, detail.priority),
+    };
+
+    return _TicketDetailShell(
+      ticketId: detail.id,
+      child: Flexible(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(20, 4, 20, 24),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Wrap(
+                spacing: 8,
+                runSpacing: 6,
+                children: [
+                  _StatusPill(color: statusColor, label: statusLabel),
+                  _StatusPill(color: priorityColor, label: priorityLabel),
+                ],
+              ),
+              const SizedBox(height: 14),
+              Text(
+                detail.subject.isEmpty ? '(no subject)' : detail.subject,
+                style: const TextStyle(
+                  fontSize: 17,
+                  fontWeight: FontWeight.w700,
+                  color: Brand.textPrimary,
+                  letterSpacing: -0.2,
+                  height: 1.3,
+                ),
+              ),
+              if (detail.description.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                Text(
+                  detail.description,
+                  style: const TextStyle(
+                    fontSize: 14,
+                    color: Brand.textPrimary,
+                    height: 1.5,
+                  ),
+                ),
+              ],
+              const SizedBox(height: 18),
+              const Divider(height: 1, color: Brand.stroke),
+              const SizedBox(height: 14),
+              if (detail.customerName.isNotEmpty)
+                _MetaRow(
+                    icon: Icons.person_outline,
+                    label: 'Customer',
+                    value: detail.customerName),
+              if (detail.businessName.isNotEmpty)
+                _MetaRow(
+                    icon: Icons.storefront_outlined,
+                    label: 'Business',
+                    value: detail.businessName),
+              _MetaRow(
+                icon: Icons.support_agent_outlined,
+                label: 'Assigned to',
+                value: detail.agentName.isEmpty ? 'Unassigned' : detail.agentName,
+                muted: detail.agentName.isEmpty,
+              ),
+              if (detail.createdAt.isNotEmpty)
+                _MetaRow(
+                    icon: Icons.event_outlined,
+                    label: 'Created',
+                    value: detail.createdAt),
+              if (detail.updatedAt.isNotEmpty &&
+                  detail.updatedAt != detail.createdAt)
+                _MetaRow(
+                    icon: Icons.update_outlined,
+                    label: 'Last update',
+                    value: detail.updatedAt),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _StatusPill extends StatelessWidget {
+  const _StatusPill({required this.color, required this.label});
+  final Color color;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: color.withValues(alpha: 0.35)),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          fontSize: 11,
+          fontWeight: FontWeight.w700,
+          color: color,
+          letterSpacing: 0.4,
+        ),
+      ),
+    );
+  }
+}
+
+class _MetaRow extends StatelessWidget {
+  const _MetaRow({
+    required this.icon,
+    required this.label,
+    required this.value,
+    this.muted = false,
+  });
+  final IconData icon;
+  final String label;
+  final String value;
+  final bool muted;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: 16, color: Brand.textMuted),
+          const SizedBox(width: 10),
+          SizedBox(
+            width: 96,
+            child: Text(
+              label,
+              style: const TextStyle(
+                fontSize: 12,
+                color: Brand.textMuted,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              value,
+              style: TextStyle(
+                fontSize: 13,
+                fontStyle: muted ? FontStyle.italic : FontStyle.normal,
+                color: muted ? Brand.textMuted : Brand.textPrimary,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

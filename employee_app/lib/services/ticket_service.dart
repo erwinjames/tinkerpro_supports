@@ -58,6 +58,64 @@ class TicketService {
   }
 }
 
+/// Fetch a single ticket's full record. Used by the chat-screen
+/// tap-to-view-details flow on the ticket status badges.
+extension TicketDetailService on TicketService {
+  Future<TicketDetail?> getTicketDetail(int id) async {
+    if (id <= 0) return null;
+    try {
+      final res =
+          await api.get('chat.getTicketDetail', params: {'id': id.toString()});
+      if (res['success'] != true) return null;
+      final raw = res['ticket'];
+      if (raw is! Map) return null;
+      return TicketDetail.fromJson(Map<String, dynamic>.from(raw));
+    } catch (_) {
+      return null;
+    }
+  }
+}
+
+/// Full ticket record returned by `chat.getTicketDetail`.
+class TicketDetail {
+  TicketDetail({
+    required this.id,
+    required this.subject,
+    required this.description,
+    required this.status,
+    required this.priority,
+    required this.customerName,
+    required this.businessName,
+    required this.agentName,
+    required this.createdAt,
+    required this.updatedAt,
+  });
+
+  final int id;
+  final String subject;
+  final String description;
+  final String status; // new | assigned | in_progress | resolved | closed
+  final String priority; // low | medium | high
+  final String customerName;
+  final String businessName;
+  final String agentName;
+  final String createdAt;
+  final String updatedAt;
+
+  factory TicketDetail.fromJson(Map<String, dynamic> j) => TicketDetail(
+        id: int.tryParse((j['id'] ?? 0).toString()) ?? 0,
+        subject: (j['subject'] ?? '').toString(),
+        description: (j['description'] ?? '').toString(),
+        status: (j['status'] ?? '').toString(),
+        priority: (j['priority'] ?? 'low').toString(),
+        customerName: (j['customer_name'] ?? '').toString(),
+        businessName: (j['business_name'] ?? '').toString(),
+        agentName: (j['agent_name'] ?? '').toString(),
+        createdAt: (j['created_at'] ?? '').toString(),
+        updatedAt: (j['updated_at'] ?? '').toString(),
+      );
+}
+
 class ShopInfo {
   ShopInfo({
     required this.businessName,
