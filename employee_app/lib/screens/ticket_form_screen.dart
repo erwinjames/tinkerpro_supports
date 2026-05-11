@@ -364,27 +364,28 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFFF1F2F5),
+      backgroundColor: Brand.surface,
       appBar: AppBar(
         backgroundColor: Brand.canvas,
         elevation: 0,
         scrolledUnderElevation: 0,
         shape: const Border(bottom: BorderSide(color: Brand.stroke)),
         title: const Text(
-          'Create Support Ticket',
+          'New support ticket',
           style: TextStyle(
-              fontWeight: FontWeight.w800, color: Brand.textPrimary),
+            fontWeight: FontWeight.w700,
+            color: Brand.textPrimary,
+            fontSize: 16,
+          ),
         ),
         iconTheme: const IconThemeData(color: Brand.textPrimary),
       ),
       body: SafeArea(
         child: ListView(
-          padding: const EdgeInsets.fromLTRB(14, 14, 14, 24),
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
           children: [
-            _buildHeader(),
-            const SizedBox(height: 14),
-            _buildInfoBox(),
-            const SizedBox(height: 14),
+            _buildIntro(),
+            const SizedBox(height: 16),
             _buildFormCard(),
           ],
         ),
@@ -392,73 +393,32 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
     );
   }
 
-  Widget _buildHeader() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 22),
-      decoration: BoxDecoration(
-        gradient: const LinearGradient(
-          colors: [Color(0xFFF3F4F7), Color(0xFFF7F2F2)],
+  /// Single-line caption above the form — replaces the old bulky
+  /// gradient header + 4-step "what happens after you submit" panel.
+  /// The same expectation-setting now lives in a smaller composed
+  /// sentence so the form itself becomes the focal content.
+  Widget _buildIntro() {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: const [
+        Icon(Icons.support_agent_outlined, size: 18, color: Brand.signal),
+        SizedBox(width: 10),
+        Expanded(
+          child: Text(
+            "Tell us what's going on — we'll route it to support and you'll get updates right in this chat.",
+            style: TextStyle(color: Brand.textMuted, fontSize: 13, height: 1.45),
+          ),
         ),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Brand.stroke),
-      ),
-      child: const Column(
-        children: [
-          Text(
-            '🎫 Create Support Ticket',
-            style: TextStyle(
-                fontSize: 22,
-                fontWeight: FontWeight.w800,
-                color: Brand.textPrimary),
-          ),
-          SizedBox(height: 6),
-          Text(
-            "We're here to help! Tell us about your issue and we'll get back to you soon.",
-            textAlign: TextAlign.center,
-            style: TextStyle(color: Brand.textMuted, fontSize: 13),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildInfoBox() {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: const Color(0xFFF8F9FF),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: const Color(0xFFE1E8FF)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: const [
-          Text(
-            '📋 What happens after you submit?',
-            style: TextStyle(
-                color: Brand.signal,
-                fontWeight: FontWeight.w800,
-                fontSize: 14),
-          ),
-          SizedBox(height: 8),
-          Text(
-            "1. You'll get a ticket ID via email\n"
-            '2. Our support team will be notified\n'
-            '3. An agent will accept your ticket and start helping\n'
-            '4. You can track progress and chat with the agent',
-            style: TextStyle(color: Brand.textMuted, fontSize: 13, height: 1.5),
-          ),
-        ],
-      ),
+      ],
     );
   }
 
   Widget _buildFormCard() {
     return Container(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.fromLTRB(18, 18, 18, 18),
       decoration: BoxDecoration(
         color: Brand.canvas,
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(18),
         border: Border.all(color: Brand.stroke),
       ),
       child: Form(
@@ -466,26 +426,24 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            _label('👤 Your Full Name *'),
+            _sectionHeader('Your details'),
+            _label('Full name', icon: Icons.person_outline, required_: true),
             TextFormField(
               controller: _name,
               decoration: _fieldDecoration('Enter your full name'),
               validator: (v) =>
                   (v == null || v.trim().isEmpty) ? 'Name is required.' : null,
             ),
-            const SizedBox(height: 16),
-            _label('🏢 Business Name *'),
+            const SizedBox(height: 18),
+            _label('Business',
+                icon: Icons.business_outlined, required_: true),
             _buildBusinessField(),
             if (!_loadingShop && !_needsSetup && _shop != null)
               _buildSourceCaption(),
-            // POS server diagnostics card hidden — admin-setup panel
-            // (shown when no manual target is configured) and the
-            // "Edit host" entry in the source caption now cover the
-            // same flow. The diagnostics widgets remain in the file
-            // for future debugging if we ever need to re-enable.
-            // if (!_loadingShop && !_needsSetup) _buildDiagnosticsCard(),
-            const SizedBox(height: 16),
-            _label('📝 Subject *'),
+            const SizedBox(height: 6),
+            const Divider(height: 28, color: Brand.stroke),
+            _sectionHeader('The issue'),
+            _label('Subject', icon: Icons.subject, required_: true),
             TextFormField(
               controller: _subject,
               decoration: _fieldDecoration('Brief description of your issue'),
@@ -493,22 +451,23 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
                   ? 'Subject is required.'
                   : null,
             ),
-            const SizedBox(height: 16),
-            _label('⚡ Priority Level'),
+            const SizedBox(height: 18),
+            _label('Priority', icon: Icons.flag_outlined),
             _buildPriority(),
-            const SizedBox(height: 16),
-            _label('📄 Describe Your Issue *'),
+            const SizedBox(height: 18),
+            _label('Description',
+                icon: Icons.description_outlined, required_: true),
             TextFormField(
               controller: _description,
               minLines: 5,
               maxLines: 8,
               decoration: _fieldDecoration(
-                  'Please provide as much detail as possible about your issue. Include any error messages, steps you\'ve tried, and what you expected to happen.'),
+                  "What happened, what you tried, and what you expected to happen. Paste error messages here too."),
               validator: (v) => (v == null || v.trim().isEmpty)
                   ? 'A description is required.'
                   : null,
             ),
-            const SizedBox(height: 22),
+            const SizedBox(height: 24),
             _buildSubmit(),
           ],
         ),
@@ -516,15 +475,48 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
     );
   }
 
-  Widget _label(String text) {
+  Widget _sectionHeader(String text) {
     return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.only(bottom: 14),
       child: Text(
-        text,
+        text.toUpperCase(),
         style: const TextStyle(
-            fontWeight: FontWeight.w700,
-            color: Brand.textPrimary,
-            fontSize: 13.5),
+          fontSize: 11.5,
+          fontWeight: FontWeight.w800,
+          color: Brand.textMuted,
+          letterSpacing: 1.1,
+        ),
+      ),
+    );
+  }
+
+  Widget _label(String text, {required IconData icon, bool required_ = false}) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Row(
+        children: [
+          Icon(icon, size: 15, color: Brand.textMuted),
+          const SizedBox(width: 6),
+          Text(
+            text,
+            style: const TextStyle(
+              fontWeight: FontWeight.w600,
+              color: Brand.textPrimary,
+              fontSize: 13,
+            ),
+          ),
+          if (required_)
+            const Padding(
+              padding: EdgeInsets.only(left: 4),
+              child: Text(
+                '*',
+                style: TextStyle(
+                    color: Brand.danger,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700),
+              ),
+            ),
+        ],
       ),
     );
   }
@@ -533,20 +525,28 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
         hintText: hint,
         hintStyle: const TextStyle(color: Brand.textMuted, fontSize: 13.5),
         contentPadding:
-            const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+            const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
         filled: true,
-        fillColor: const Color(0xFFF8F9FB),
+        fillColor: Brand.canvas,
         border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(10),
-          borderSide: const BorderSide(color: Color(0xFFE1E5E9), width: 1.6),
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: Brand.stroke, width: 1.4),
         ),
         enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(10),
-          borderSide: const BorderSide(color: Color(0xFFE1E5E9), width: 1.6),
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: Brand.stroke, width: 1.4),
         ),
         focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(10),
-          borderSide: const BorderSide(color: Brand.signal, width: 2),
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: Brand.signal, width: 1.8),
+        ),
+        errorBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: Brand.danger, width: 1.4),
+        ),
+        focusedErrorBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: Brand.danger, width: 1.8),
         ),
       );
 
@@ -556,9 +556,9 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
       return Container(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
         decoration: BoxDecoration(
-          color: const Color(0xFFF8F9FB),
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: const Color(0xFFE1E5E9), width: 1.6),
+          color: Brand.subtle,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: Brand.stroke, width: 1.4),
         ),
         child: Row(
           children: [
@@ -585,22 +585,31 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
       return Container(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
         decoration: BoxDecoration(
-          color: const Color(0xFFFFF1F2),
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: const Color(0xFFFCA5A5), width: 1.6),
+          color: Brand.danger.withValues(alpha: 0.06),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+              color: Brand.danger.withValues(alpha: 0.35), width: 1.4),
         ),
         child: Row(
           children: [
             const Icon(Icons.error_outline,
                 size: 18, color: Brand.danger),
-            const SizedBox(width: 8),
+            const SizedBox(width: 10),
             Expanded(
               child: Text(
                 _shopError ?? 'Could not load your business info.',
                 style: const TextStyle(color: Brand.danger, fontSize: 13),
               ),
             ),
-            TextButton(onPressed: _loadShop, child: const Text('Retry')),
+            TextButton(
+              onPressed: _loadShop,
+              style: TextButton.styleFrom(
+                foregroundColor: Brand.danger,
+                textStyle:
+                    const TextStyle(fontWeight: FontWeight.w700, fontSize: 13),
+              ),
+              child: const Text('Retry'),
+            ),
           ],
         ),
       );
@@ -609,9 +618,9 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
       decoration: BoxDecoration(
-        color: const Color(0xFFF8F9FB),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: const Color(0xFFE1E5E9), width: 1.6),
+        color: Brand.subtle,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Brand.stroke, width: 1.4),
       ),
       child: Row(
         children: [
@@ -650,21 +659,31 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
 
   Widget _buildSetupPanel() {
     return Container(
-      padding: const EdgeInsets.fromLTRB(14, 14, 14, 14),
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
       decoration: BoxDecoration(
-        color: const Color(0xFFFFF8E1),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: const Color(0xFFFCD34D), width: 1.4),
+        color: Brand.warning.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+            color: Brand.warning.withValues(alpha: 0.45), width: 1.4),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
-            children: const [
-              Icon(Icons.settings_input_antenna_outlined,
-                  size: 18, color: Color(0xFF92400E)),
-              SizedBox(width: 8),
-              Expanded(
+            children: [
+              Container(
+                width: 32,
+                height: 32,
+                decoration: BoxDecoration(
+                  color: Brand.warning.withValues(alpha: 0.18),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                alignment: Alignment.center,
+                child: const Icon(Icons.settings_input_antenna_outlined,
+                    size: 18, color: Color(0xFFB45309)),
+              ),
+              const SizedBox(width: 10),
+              const Expanded(
                 child: Text(
                   'POS server setup needed',
                   style: TextStyle(
@@ -676,14 +695,13 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
               ),
             ],
           ),
-          const SizedBox(height: 6),
+          const SizedBox(height: 8),
           const Text(
-            'A TinkerPro admin only needs to enter this once — host and '
-            'port for the POS MariaDB. We\'ll save it on this machine so '
-            'future /ticket forms open instantly.',
-            style: TextStyle(fontSize: 12, color: Brand.textMuted),
+            "A TinkerPro admin only needs to enter this once. We'll save it "
+            "on this machine so future /ticket forms open instantly.",
+            style: TextStyle(fontSize: 12.5, color: Brand.textMuted, height: 1.4),
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 14),
           Row(
             children: [
               Expanded(
@@ -692,24 +710,23 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
                   controller: _setupHost,
                   enabled: !_setupBusy,
                   autofocus: true,
-                  decoration: const InputDecoration(
-                    labelText: 'Host (IP or hostname)',
-                    hintText: 'e.g. 192.168.1.40',
+                  decoration: _fieldDecoration('e.g. 192.168.1.40').copyWith(
+                    labelText: 'Host',
+                    floatingLabelBehavior: FloatingLabelBehavior.always,
                     isDense: true,
-                    border: OutlineInputBorder(),
                   ),
                   textInputAction: TextInputAction.next,
                 ),
               ),
-              const SizedBox(width: 8),
+              const SizedBox(width: 10),
               Expanded(
                 child: TextField(
                   controller: _setupPort,
                   enabled: !_setupBusy,
-                  decoration: const InputDecoration(
+                  decoration: _fieldDecoration('3306').copyWith(
                     labelText: 'Port',
+                    floatingLabelBehavior: FloatingLabelBehavior.always,
                     isDense: true,
-                    border: OutlineInputBorder(),
                   ),
                   keyboardType: TextInputType.number,
                   onSubmitted: (_) => _saveSetupAndConnect(),
@@ -718,13 +735,26 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
             ],
           ),
           if (_setupError != null) ...[
-            const SizedBox(height: 8),
-            Text(
-              _setupError!,
-              style: const TextStyle(color: Brand.danger, fontSize: 12),
+            const SizedBox(height: 10),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Icon(Icons.error_outline,
+                    size: 14, color: Brand.danger),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    _setupError!,
+                    style: const TextStyle(
+                        color: Brand.danger,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w500),
+                  ),
+                ),
+              ],
             ),
           ],
-          const SizedBox(height: 10),
+          const SizedBox(height: 14),
           Row(
             children: [
               FilledButton.icon(
@@ -736,13 +766,26 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
                         child: CircularProgressIndicator(
                             strokeWidth: 2, color: Colors.white),
                       )
-                    : const Icon(Icons.link, size: 18),
+                    : const Icon(Icons.link, size: 16),
                 label: Text(_setupBusy ? 'Connecting…' : 'Connect & save'),
+                style: FilledButton.styleFrom(
+                  backgroundColor: Brand.signal,
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10)),
+                  textStyle: const TextStyle(
+                      fontSize: 13, fontWeight: FontWeight.w700),
+                ),
               ),
-              const SizedBox(width: 8),
+              const SizedBox(width: 6),
               TextButton(
                 onPressed: _setupBusy ? null : _setupTryAutoDiscover,
-                child: const Text('Try auto-discover instead'),
+                style: TextButton.styleFrom(
+                  foregroundColor: Brand.textMuted,
+                  textStyle: const TextStyle(
+                      fontSize: 12.5, fontWeight: FontWeight.w600),
+                ),
+                child: const Text('Try auto-discover'),
               ),
             ],
           ),
@@ -757,50 +800,55 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
         (cfg.host.isNotEmpty ? cfg.host : 'unknown');
     final port = _posShop.resolvedPort ?? cfg.port;
     final err = _posShop.lastError;
-    final (icon, color, text) = switch (_shopSource) {
-      'pos' => (
-        Icons.lan_outlined,
-        const Color(0xFF16A34A),
-        'VAT status read live from POS at $host:$port/${cfg.db}',
-      ),
+    final (dotColor, text) = switch (_shopSource) {
+      'pos' => (Brand.success, 'Live from POS · $host:$port'),
+      'cache' => (Brand.textMuted, 'Showing saved POS info · $host:$port'),
       'fallback' => (
-        Icons.cloud_outlined,
-        const Color(0xFFB45309),
-        'POS DB unreachable; using support backend shop profile',
+        Brand.warning,
+        'POS unreachable — using backend shop profile',
       ),
       _ => (
-        Icons.warning_amber_outlined,
-        const Color(0xFFB45309),
+        Brand.warning,
         err == null
-            ? 'No POS server found on this network'
+            ? 'POS not reachable'
             : 'POS unreachable ($err)',
       ),
     };
     return Padding(
-      padding: const EdgeInsets.only(top: 6, left: 2),
+      padding: const EdgeInsets.only(top: 8, left: 4),
       child: Row(
         children: [
-          Icon(icon, size: 13, color: color),
-          const SizedBox(width: 5),
+          Container(
+            width: 6,
+            height: 6,
+            decoration: BoxDecoration(
+              color: dotColor,
+              shape: BoxShape.circle,
+            ),
+          ),
+          const SizedBox(width: 8),
           Expanded(
             child: Text(
               text,
-              style: TextStyle(fontSize: 11, color: color),
+              style: const TextStyle(
+                fontSize: 11,
+                color: Brand.textMuted,
+                fontWeight: FontWeight.w500,
+              ),
             ),
           ),
           if (_shopSource != 'pos')
             InkWell(
               onTap: _loadShop,
-              borderRadius: BorderRadius.circular(4),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              borderRadius: BorderRadius.circular(6),
+              child: const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 child: Text(
                   'Retry',
                   style: TextStyle(
                     fontSize: 11,
                     fontWeight: FontWeight.w700,
-                    color: color,
-                    decoration: TextDecoration.underline,
+                    color: Brand.signal,
                   ),
                 ),
               ),
@@ -1136,10 +1184,9 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
 
   Widget _buildPriority() {
     final opts = const [
-      _PriorityOpt('low', '🟢', 'Low', 'General question', Color(0xFF28A745)),
-      _PriorityOpt(
-          'medium', '🟡', 'Medium', 'Need help soon', Color(0xFFFFC107)),
-      _PriorityOpt('high', '🔴', 'Urgent', 'System down', Color(0xFFDC3545)),
+      _PriorityOpt('low', Icons.arrow_downward_rounded, 'Low', Brand.success),
+      _PriorityOpt('medium', Icons.remove_rounded, 'Medium', Brand.warning),
+      _PriorityOpt('high', Icons.priority_high_rounded, 'Urgent', Brand.danger),
     ];
     return Row(
       children: opts.map((o) {
@@ -1147,46 +1194,43 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
         return Expanded(
           child: Padding(
             padding: EdgeInsets.only(right: o == opts.last ? 0 : 8),
-            child: InkWell(
-              borderRadius: BorderRadius.circular(10),
-              onTap: () => setState(() => _priority = o.value),
-              child: Container(
-                padding: const EdgeInsets.symmetric(vertical: 12),
-                decoration: BoxDecoration(
-                  color: selected ? o.color : Colors.white,
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(
-                    color: selected ? o.color : const Color(0xFFE1E5E9),
-                    width: 2,
+            child: Material(
+              color: Colors.transparent,
+              child: InkWell(
+                borderRadius: BorderRadius.circular(12),
+                onTap: () => setState(() => _priority = o.value),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 150),
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  decoration: BoxDecoration(
+                    color: selected
+                        ? o.color.withValues(alpha: 0.10)
+                        : Brand.canvas,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: selected ? o.color : Brand.stroke,
+                      width: selected ? 1.6 : 1.4,
+                    ),
                   ),
-                ),
-                child: Column(
-                  children: [
-                    Text(
-                      '${o.emoji} ${o.label}',
-                      style: TextStyle(
-                        fontWeight: FontWeight.w700,
-                        color: selected
-                            ? (o.value == 'medium'
-                                ? const Color(0xFF333333)
-                                : Colors.white)
-                            : Brand.textPrimary,
-                        fontSize: 13,
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(
+                        o.icon,
+                        size: 16,
+                        color: selected ? o.color : Brand.textMuted,
                       ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      o.subtitle,
-                      style: TextStyle(
-                        fontSize: 10.5,
-                        color: selected
-                            ? (o.value == 'medium'
-                                ? const Color(0xFF333333)
-                                : Colors.white70)
-                            : Brand.textMuted,
+                      const SizedBox(width: 6),
+                      Text(
+                        o.label,
+                        style: TextStyle(
+                          fontWeight: FontWeight.w700,
+                          color: selected ? o.color : Brand.textPrimary,
+                          fontSize: 13,
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -1199,27 +1243,32 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
   Widget _buildSubmit() {
     return SizedBox(
       width: double.infinity,
-      height: 52,
-      child: ElevatedButton(
+      height: 50,
+      child: ElevatedButton.icon(
         onPressed: _submitting ? null : _submit,
-        style: ElevatedButton.styleFrom(
-          backgroundColor: const Color(0xFF1587F1),
-          foregroundColor: Colors.white,
-          disabledBackgroundColor: const Color(0xFFB6D6F4),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(50),
-          ),
-          textStyle:
-              const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
-        ),
-        child: _submitting
+        icon: _submitting
             ? const SizedBox(
-                width: 22,
-                height: 22,
+                width: 18,
+                height: 18,
                 child: CircularProgressIndicator(
                     strokeWidth: 2, color: Colors.white),
               )
-            : const Text('🚀 Submit Ticket'),
+            : const Icon(Icons.send_rounded, size: 18),
+        label: Text(_submitting ? 'Submitting…' : 'Submit ticket'),
+        style: ElevatedButton.styleFrom(
+          backgroundColor: Brand.signal,
+          foregroundColor: Colors.white,
+          disabledBackgroundColor: Brand.signal.withValues(alpha: 0.4),
+          elevation: 0,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+          textStyle: const TextStyle(
+            fontSize: 15,
+            fontWeight: FontWeight.w700,
+            letterSpacing: 0.2,
+          ),
+        ),
       ),
     );
   }
@@ -1250,12 +1299,10 @@ class _VatChip extends StatelessWidget {
 }
 
 class _PriorityOpt {
-  const _PriorityOpt(
-      this.value, this.emoji, this.label, this.subtitle, this.color);
+  const _PriorityOpt(this.value, this.icon, this.label, this.color);
   final String value;
-  final String emoji;
+  final IconData icon;
   final String label;
-  final String subtitle;
   final Color color;
 }
 
