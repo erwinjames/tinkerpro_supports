@@ -151,10 +151,12 @@ class PosShopService {
         databaseName: _config.db,
         secure: false,
       );
-      // Tight timeout — discovery already TCP-probed, so anything
-      // slow at this point is more likely to be a wrong-port service
-      // than an actual POS that's far away.
-      await conn.connect(timeoutMs: 4000);
+      // Discovery already TCP-probed, so the long pole here is the
+      // MariaDB handshake — which on a stock XAMPP install (no
+      // skip-name-resolve) blocks ~5s on a reverse-DNS lookup of the
+      // client IP before sending the greeting. 8s clears that and
+      // still bails on genuinely unreachable services.
+      await conn.connect(timeoutMs: 8000);
 
       // One single text-protocol query. Shop is a one-row config
       // table per POS install, so the first row is the right row.
