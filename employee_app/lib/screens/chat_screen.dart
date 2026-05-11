@@ -1298,7 +1298,8 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
               child: Column(
                 crossAxisAlignment: align,
                 children: [
-                  ..._renderBodyWithQuote(m.body, mine, fg, text),
+                  ..._renderBodyWithQuote(
+                      m.body, mine, fg, text, m.senderId),
                   if (m.attachments.isNotEmpty)
                     ..._renderAttachments(m, mine, text),
                 ],
@@ -1321,7 +1322,7 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
   /// scrolls the chat to the target message + flashes it. Without the
   /// id (older replies pre-dating the embed) the chip is static.
   List<Widget> _renderBodyWithQuote(
-      String body, bool mine, Color fg, TextTheme text) {
+      String body, bool mine, Color fg, TextTheme text, int bubbleSenderId) {
     if (body.isEmpty) return const [];
     final match = RegExp(
             r'^>\s*@([^\[:\n]+?)(?:\s*\[#(\d+)\])?\s*:\s*(.+?)\n\n(.+)$',
@@ -1389,7 +1390,8 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
       Material(
         color: Colors.transparent,
         child: InkWell(
-          onTap: () => _jumpToQuoteTarget(targetId, sender, preview),
+          onTap: () => _jumpToQuoteTarget(
+              targetId, sender, preview, bubbleSenderId),
           borderRadius: BorderRadius.circular(6),
           child: chip,
         ),
@@ -1402,10 +1404,10 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
   /// `[#id]` embedded in the prefix; falls back to a sender+preview
   /// search. If the target isn't in the loaded window, auto-loads
   /// older pages until found or history is exhausted.
-  Future<void> _jumpToQuoteTarget(
-      int? embeddedId, String sender, String preview) async {
-    // Try in the loaded window first.
-    final hitId = _findQuoteTarget(embeddedId, sender, preview);
+  Future<void> _jumpToQuoteTarget(int? embeddedId, String sender,
+      String preview, int bubbleSenderId) async {
+    final hitId =
+        _findQuoteTarget(embeddedId, sender, preview, bubbleSenderId);
     if (hitId != null) {
       _jumpToMessage(hitId);
       return;
@@ -1424,10 +1426,9 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
       setState(() {
         _messages.insertAll(0, older);
       });
-      final retry = _findQuoteTarget(embeddedId, sender, preview);
+      final retry =
+          _findQuoteTarget(embeddedId, sender, preview, bubbleSenderId);
       if (retry != null) {
-        // Allow the new bubbles to mount their GlobalKeys before we
-        // try to ensureVisible them.
         await Future<void>.delayed(const Duration(milliseconds: 50));
         if (!mounted) return;
         _jumpToMessage(retry);
@@ -1438,8 +1439,11 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
   }
 
   /// Search the currently-loaded [_messages] for the message a quote
-  /// chip references. Returns its persisted id or null.
-  int? _findQuoteTarget(int? embeddedId, String sender, String preview) {
+  /// chip references. "you" in the quote prefix is resolved against
+  /// `bubbleSenderId` — the user who *sent* the quoting bubble — not
+  /// the viewer, because that's whose POV the quote was written from.
+  int? _findQuoteTarget(int? embeddedId, String sender, String preview,
+      int bubbleSenderId) {
     if (embeddedId != null) {
       for (final m in _messages) {
         if (m.persistedId == embeddedId) return embeddedId;
@@ -1455,7 +1459,7 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
       final body = m.body.replaceAll(RegExp(r'\s+'), ' ').trim();
       if (!body.toLowerCase().startsWith(previewNorm)) continue;
       if (senderLower == 'you') {
-        if (m.senderId != _meId) continue;
+        if (m.senderId != bubbleSenderId) continue;
       } else {
         final p = widget.info.participants.firstWhere(
           (p) => p.userId == m.senderId,
