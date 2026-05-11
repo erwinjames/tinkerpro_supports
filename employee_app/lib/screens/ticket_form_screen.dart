@@ -383,25 +383,20 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
       body: SafeArea(
         child: LayoutBuilder(
           builder: (context, constraints) {
-            // Premium desktop sizing — 1080px keeps room for two-column
-            // field rows without stretching to debug-page widths on a
-            // 1920px POS workstation. Falls back to fluid width below
-            // the breakpoint.
+            // Use the full app width on desktop — only the outer
+            // padding scales. The wide breakpoint (≥ 960px) still
+            // controls the inner two-column form layout, but the card
+            // itself now stretches edge-to-edge so a maximized window
+            // doesn't show empty gutters.
             final wide = constraints.maxWidth >= 960.0;
-            final maxW = wide ? 1080.0 : double.infinity;
-            return Center(
-              child: ConstrainedBox(
-                constraints: BoxConstraints(maxWidth: maxW),
-                child: ListView(
-                  padding: EdgeInsets.fromLTRB(
-                      wide ? 32 : 20, wide ? 28 : 24, wide ? 32 : 20, 48),
-                  children: [
-                    _buildHero(wide: wide),
-                    SizedBox(height: wide ? 24 : 20),
-                    _buildFormCard(wide: wide),
-                  ],
-                ),
-              ),
+            return ListView(
+              padding: EdgeInsets.fromLTRB(
+                  wide ? 32 : 20, wide ? 28 : 24, wide ? 32 : 20, 48),
+              children: [
+                _buildHero(wide: wide),
+                SizedBox(height: wide ? 24 : 20),
+                _buildFormCard(wide: wide),
+              ],
             );
           },
         ),
