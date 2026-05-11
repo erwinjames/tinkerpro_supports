@@ -53,10 +53,15 @@ class ChatService {
 
   /// Latest [limit] messages for the conversation, oldest first when we
   /// reverse the server's DESC ordering on the way in.
-  Future<List<ChatMessage>> history(int convId, {int limit = 100}) async {
+  Future<List<ChatMessage>> history(
+    int convId, {
+    int limit = 100,
+    int? beforeId,
+  }) async {
     final res = await api.getChat('chat.history', params: {
       'conversation_id': convId.toString(),
       'limit': limit.toString(),
+      if (beforeId != null && beforeId > 0) 'before_id': beforeId.toString(),
     });
     final raw = res['messages'];
     if (raw is! List) return const [];

@@ -1399,13 +1399,52 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
   }
 
   /// Resolve a quote-chip tap to a specific message id. Prefers the
-  /// `[#id]` embedded in the prefix (new format); for older replies
-  /// without an embedded id, falls back to a sender+preview-prefix
-  /// search through the loaded messages.
-  void _jumpToQuoteTarget(int? embeddedId, String sender, String preview) {
-    if (embeddedId != null) {
-      _jumpToMessage(embeddedId);
+  /// `[#id]` embedded in the prefix; falls back to a sender+preview
+  /// search. If the target isn't in the loaded window, auto-loads
+  /// older pages until found or history is exhausted.
+  Future<void> _jumpToQuoteTarget(
+      int? embeddedId, String sender, String preview) async {
+    // Try in the loaded window first.
+    final hitId = _findQuoteTarget(embeddedId, sender, preview);
+    if (hitId != null) {
+      _jumpToMessage(hitId);
       return;
+    }
+    // Page older. Hard-cap at 20 pages so a pathological input can't
+    // hammer the server.
+    for (var i = 0; i < 20; i++) {
+      final oldestId = _messages
+          .map((m) => m.persistedId)
+          .whereType<int>()
+          .fold<int?>(null, (acc, id) => acc == null || id < acc ? id : acc);
+      if (oldestId == null) break;
+      final older = await widget.chat.history(_convId, beforeId: oldestId);
+      if (!mounted) return;
+      if (older.isEmpty) break;
+      setState(() {
+        _messages.insertAll(0, older);
+      });
+      final retry = _findQuoteTarget(embeddedId, sender, preview);
+      if (retry != null) {
+        // Allow the new bubbles to mount their GlobalKeys before we
+        // try to ensureVisible them.
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        if (!mounted) return;
+        _jumpToMessage(retry);
+        return;
+      }
+    }
+    _toast('Original message not found in this conversation.');
+  }
+
+  /// Search the currently-loaded [_messages] for the message a quote
+  /// chip references. Returns its persisted id or null.
+  int? _findQuoteTarget(int? embeddedId, String sender, String preview) {
+    if (embeddedId != null) {
+      for (final m in _messages) {
+        if (m.persistedId == embeddedId) return embeddedId;
+      }
+      return null;
     }
     final senderLower = sender.toLowerCase();
     final previewNorm =
@@ -1415,8 +1454,6 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
       if (mid == null) continue;
       final body = m.body.replaceAll(RegExp(r'\s+'), ' ').trim();
       if (!body.toLowerCase().startsWith(previewNorm)) continue;
-      // Sender match: "you" → my own messages; otherwise compare
-      // against the participant's display name.
       if (senderLower == 'you') {
         if (m.senderId != _meId) continue;
       } else {
@@ -1426,10 +1463,9 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
         );
         if (p.fullName.toLowerCase() != senderLower) continue;
       }
-      _jumpToMessage(mid);
-      return;
+      return mid;
     }
-    _toast('Original message not found in this view.');
+    return null;
   }
 
   /// Highlights the target message + scrolls it into view when the
