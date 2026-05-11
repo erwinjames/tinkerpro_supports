@@ -129,6 +129,7 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
     _readSub?.cancel();
     _deletedSub?.cancel();
     _presenceAutoClear?.cancel();
+    _highlightClearTimer?.cancel();
     widget.calls.removeListener(_onCallChange);
     _composer.dispose();
     _scroll.dispose();
@@ -398,8 +399,14 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
     }
     // If a reply was queued from the message menu, prepend a quote.
     // Client-side quoting (no schema change) — the body becomes:
-    //   > @sender: original preview…
+    //   > @sender [#{id}]: original preview…
+    //   [blank]
     //   the reply
+    // The `[#id]` is the target message's persisted id; the quote
+    // renderer parses it back out and makes the chip clickable so the
+    // viewer can jump to the original. Falls back to a plain chip
+    // (no jump) when no id is available (e.g., quoting a still-
+    // optimistic message).
     String finalText = text;
     final reply = _replyContext;
     if (reply != null) {
@@ -420,7 +427,9 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
           reply.body.replaceAll(RegExp(r'\s+'), ' ').trim();
       final shortPreview =
           preview.length > 200 ? '${preview.substring(0, 200)}…' : preview;
-      finalText = '> @$senderName: $shortPreview\n\n$text';
+      final targetId = reply.persistedId;
+      final tag = targetId != null ? ' [#$targetId]' : '';
+      finalText = '> @$senderName$tag: $shortPreview\n\n$text';
       setState(() => _replyContext = null);
     }
     _composer.clear();
@@ -1237,6 +1246,14 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
     final radius = const Radius.circular(14);
     // Track tap position so the popup menu opens next to the bubble.
     Offset menuAnchor = Offset.zero;
+    // Per-message GlobalKey so jump-to-reply can ensureVisible() this
+    // bubble. Stored across rebuilds in _messageKeys.
+    final mid = m.persistedId;
+    final bubbleKey = mid != null
+        ? (_messageKeys[mid] ??= GlobalKey())
+        : null;
+    final isHighlighted =
+        mid != null && _highlightedMessageId == mid;
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
       child: Column(
@@ -1250,7 +1267,10 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
             onSecondaryTapDown: (d) => menuAnchor = d.globalPosition,
             onLongPress: () => _showMessageActions(m, menuAnchor),
             onSecondaryTap: () => _showMessageActions(m, menuAnchor),
-            child: Container(
+            child: AnimatedContainer(
+              key: bubbleKey,
+              duration: const Duration(milliseconds: 280),
+              curve: Curves.easeOut,
               constraints: const BoxConstraints(maxWidth: 460),
               padding:
                   const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
@@ -1262,7 +1282,18 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
                   bottomLeft: mine ? radius : const Radius.circular(4),
                   bottomRight: mine ? const Radius.circular(4) : radius,
                 ),
-                border: mine ? null : Border.all(color: Brand.stroke),
+                border: isHighlighted
+                    ? Border.all(color: Brand.signal, width: 2)
+                    : (mine ? null : Border.all(color: Brand.stroke)),
+                boxShadow: isHighlighted
+                    ? [
+                        BoxShadow(
+                          color: Brand.signal.withValues(alpha: 0.30),
+                          blurRadius: 14,
+                          spreadRadius: 1,
+                        ),
+                      ]
+                    : null,
               ),
               child: Column(
                 crossAxisAlignment: align,
@@ -1282,23 +1313,28 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
   /// Splits a message body into an optional "quoted reply" chip and
   /// the main reply text. Detects the format the composer emits:
   ///
-  ///     > @sender: original preview…
+  ///     > @sender [#42]: original preview…       ← `[#42]` optional
   ///     [blank line]
   ///     the reply
   ///
-  /// On match: returns a muted quote container followed by the reply
-  /// text in normal color. Otherwise returns a single plain Text.
+  /// When the quote prefix contains `[#id]`, the chip is tappable and
+  /// scrolls the chat to the target message + flashes it. Without the
+  /// id (older replies pre-dating the embed) the chip is static.
   List<Widget> _renderBodyWithQuote(
       String body, bool mine, Color fg, TextTheme text) {
     if (body.isEmpty) return const [];
-    final match = RegExp(r'^>\s*@([^:\n]+):\s*(.+?)\n\n(.+)$', dotAll: true)
+    final match = RegExp(
+            r'^>\s*@([^\[:\n]+?)(?:\s*\[#(\d+)\])?\s*:\s*(.+?)\n\n(.+)$',
+            dotAll: true)
         .firstMatch(body);
     if (match == null) {
       return [Text(body, style: text.bodyMedium?.copyWith(color: fg))];
     }
     final sender = (match.group(1) ?? '').trim();
-    final preview = (match.group(2) ?? '').trim();
-    final reply = (match.group(3) ?? '').trim();
+    final targetIdRaw = match.group(2);
+    final targetId = targetIdRaw != null ? int.tryParse(targetIdRaw) : null;
+    final preview = (match.group(3) ?? '').trim();
+    final reply = (match.group(4) ?? '').trim();
     // Quote-chip palette: on my (orange) bubbles the chip needs to
     // contrast against orange, so we use white-tinted; on theirs the
     // chip uses the standard subtle/stroke neutrals.
@@ -1314,45 +1350,85 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
     final quoteText = mine
         ? Colors.white.withValues(alpha: 0.78)
         : Brand.textMuted;
-    return [
-      Container(
-        margin: const EdgeInsets.only(bottom: 6),
-        padding: const EdgeInsets.fromLTRB(8, 5, 10, 6),
-        decoration: BoxDecoration(
-          color: quoteBg,
-          borderRadius: BorderRadius.circular(6),
-          border: Border(
-              left: BorderSide(color: quoteAccent, width: 2.5)),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              sender,
-              style: TextStyle(
-                fontSize: 11,
-                fontWeight: FontWeight.w700,
-                color: quoteSender,
-                letterSpacing: -0.05,
-              ),
-            ),
-            const SizedBox(height: 1),
-            Text(
-              preview,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontSize: 11.5,
-                color: quoteText,
-                height: 1.35,
-              ),
-            ),
-          ],
-        ),
+    final chip = Container(
+      margin: const EdgeInsets.only(bottom: 6),
+      padding: const EdgeInsets.fromLTRB(8, 5, 10, 6),
+      decoration: BoxDecoration(
+        color: quoteBg,
+        borderRadius: BorderRadius.circular(6),
+        border: Border(left: BorderSide(color: quoteAccent, width: 2.5)),
       ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            sender,
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+              color: quoteSender,
+              letterSpacing: -0.05,
+            ),
+          ),
+          const SizedBox(height: 1),
+          Text(
+            preview,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: 11.5,
+              color: quoteText,
+              height: 1.35,
+            ),
+          ),
+        ],
+      ),
+    );
+    return [
+      if (targetId != null)
+        Material(
+          color: Colors.transparent,
+          child: InkWell(
+            onTap: () => _jumpToMessage(targetId),
+            borderRadius: BorderRadius.circular(6),
+            child: chip,
+          ),
+        )
+      else
+        chip,
       Text(reply, style: text.bodyMedium?.copyWith(color: fg)),
     ];
+  }
+
+  /// Highlights the target message + scrolls it into view when the
+  /// quote chip is tapped. Uses a per-message GlobalKey looked up
+  /// from [_messageKeys] (populated in the list builder) and a
+  /// transient _highlightedMessageId so the bubble flashes briefly.
+  final Map<int, GlobalKey> _messageKeys = {};
+  int? _highlightedMessageId;
+  Timer? _highlightClearTimer;
+
+  Future<void> _jumpToMessage(int messageId) async {
+    final key = _messageKeys[messageId];
+    final ctx = key?.currentContext;
+    if (ctx == null) {
+      _toast('Original message not in view (scroll up to load older history).');
+      return;
+    }
+    await Scrollable.ensureVisible(
+      ctx,
+      duration: const Duration(milliseconds: 350),
+      curve: Curves.easeOutCubic,
+      alignment: 0.35,
+    );
+    if (!mounted) return;
+    setState(() => _highlightedMessageId = messageId);
+    _highlightClearTimer?.cancel();
+    _highlightClearTimer = Timer(const Duration(milliseconds: 1800), () {
+      if (!mounted) return;
+      setState(() => _highlightedMessageId = null);
+    });
   }
 
   /// Centered system badge for a ticket lifecycle event. Visual:
