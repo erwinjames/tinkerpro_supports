@@ -434,55 +434,17 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
         crossAxisAlignment:
             wide ? CrossAxisAlignment.center : CrossAxisAlignment.start,
         children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Container(
-                width: 44,
-                height: 44,
-                decoration: BoxDecoration(
-                  color: Brand.signal.withValues(alpha: 0.12),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                alignment: Alignment.center,
-                child: const Icon(Icons.support_agent_outlined,
-                    color: Brand.signal, size: 22),
-              ),
-              const SizedBox(width: 14),
-              Flexible(
-                child: ConstrainedBox(
-                  constraints: BoxConstraints(maxWidth: wide ? 360 : 600),
-                  child: const Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        "Let's get you sorted",
-                        style: TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.w700,
-                          color: Brand.textPrimary,
-                          letterSpacing: -0.2,
-                          height: 1.2,
-                        ),
-                      ),
-                      SizedBox(height: 6),
-                      Text(
-                        "Tell us what's happening. We'll route the ticket to support and post updates right back into this chat.",
-                        style: TextStyle(
-                          color: Brand.textMuted,
-                          fontSize: 13,
-                          height: 1.5,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ],
-          ),
+          // Title block — must be flex-wrapped on horizontal so the
+          // inner Flexible(text) has a bounded width. On vertical the
+          // raw Row sizes itself to the parent Container's width.
+          if (wide)
+            Expanded(flex: 5, child: _heroTitleRow(wide: wide))
+          else
+            _heroTitleRow(wide: wide),
           if (wide) ...[
             const SizedBox(width: 32),
             const Expanded(
+              flex: 6,
               child: Wrap(
                 spacing: 24,
                 runSpacing: 12,
@@ -516,6 +478,55 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
           ],
         ],
       ),
+    );
+  }
+
+  Widget _heroTitleRow({required bool wide}) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          width: 44,
+          height: 44,
+          decoration: BoxDecoration(
+            color: Brand.signal.withValues(alpha: 0.12),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          alignment: Alignment.center,
+          child: const Icon(Icons.support_agent_outlined,
+              color: Brand.signal, size: 22),
+        ),
+        const SizedBox(width: 14),
+        Expanded(
+          child: ConstrainedBox(
+            constraints: BoxConstraints(maxWidth: wide ? 380 : 600),
+            child: const Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  "Let's get you sorted",
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w700,
+                    color: Brand.textPrimary,
+                    letterSpacing: -0.2,
+                    height: 1.2,
+                  ),
+                ),
+                SizedBox(height: 6),
+                Text(
+                  "Tell us what's happening. We'll route the ticket to support and post updates right back into this chat.",
+                  style: TextStyle(
+                    color: Brand.textMuted,
+                    fontSize: 13,
+                    height: 1.5,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
     );
   }
 
