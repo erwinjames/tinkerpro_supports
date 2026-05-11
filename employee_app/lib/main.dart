@@ -7,8 +7,10 @@ import 'services/call_service.dart';
 import 'services/chat_realtime.dart';
 import 'services/chat_service.dart';
 import 'services/lan_presence.dart';
+import 'services/pos_shop_service.dart';
 import 'services/remote_access_service.dart';
 import 'services/session_store.dart';
+import 'services/ticket_service.dart' show ShopInfo;
 import 'screens/chat_screen.dart';
 import 'screens/store_setup_screen.dart';
 import 'theme.dart';
@@ -76,6 +78,36 @@ class _BootstrapState extends State<_Bootstrap> {
     _chat = ChatService(widget.api);
     if (widget.store.isConfigured) {
       _resumeFromStoredName();
+    }
+    // Warm the POS DB lookup in the background so the /ticket form can
+    // render from cache instantly when the user eventually opens it.
+    // Fire-and-forget: a failure here is silent (the ticket form will
+    // do its own discovery if cache is still empty by then).
+    unawaited(_prewarmShopInfo());
+  }
+
+  Future<void> _prewarmShopInfo() async {
+    try {
+      final svc = PosShopService(store: widget.store);
+      final apiHost = Uri.tryParse(widget.api.baseUrl)?.host;
+      final hints = <String>[if (apiHost != null && apiHost.isNotEmpty) apiHost];
+      final pos = await svc.getShopInfo(hintHosts: hints);
+      if (pos == null) return;
+      final businessName = pos.businessName.isNotEmpty
+          ? pos.businessName
+          : (widget.store.storeName ?? '');
+      await widget.store.saveCachedShop(
+        ShopInfo(
+          businessName: businessName,
+          vatReg: pos.vatReg,
+          vatLabel: pos.vatLabel,
+          tin: pos.tin,
+          email: '',
+          fullName: '',
+        ),
+      );
+    } catch (_) {
+      // Best-effort prewarm — never surface errors here.
     }
   }
 
