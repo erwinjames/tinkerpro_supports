@@ -80,6 +80,12 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
   /// to the body. Cleared on send or by tapping the preview's ✕.
   ChatMessage? _replyContext;
 
+  /// id of the message currently being hovered. Drives the
+  /// fade-in/out of the inline ⋮ action button next to each bubble
+  /// (mouse-only — long-press has been removed in favour of the
+  /// hover-reveal pattern that mirrors the web admin).
+  int? _hoveredMessageId;
+
   /// Most recent `busy` presence from a *different* terminal in our
   /// conversation. While non-null, this terminal's call buttons grey
   /// out and a banner appears so a tech doesn't fire a competing call
@@ -1254,8 +1260,6 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
     final color = mine ? Brand.signal : Brand.canvas;
     final fg = mine ? Brand.canvas : Brand.textPrimary;
     final radius = const Radius.circular(14);
-    // Track tap position so the popup menu opens next to the bubble.
-    Offset menuAnchor = Offset.zero;
     // Per-message GlobalKey so jump-to-reply can ensureVisible() this
     // bubble. Stored across rebuilds in _messageKeys.
     final mid = m.persistedId;
@@ -1264,59 +1268,109 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
         : null;
     final isHighlighted =
         mid != null && _highlightedMessageId == mid;
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
+    final isHovered = mid != null && _hoveredMessageId == mid;
+    final canAct = mid != null;
+
+    final bubble = AnimatedContainer(
+      key: bubbleKey,
+      duration: const Duration(milliseconds: 280),
+      curve: Curves.easeOut,
+      constraints: const BoxConstraints(maxWidth: 460),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: color,
+        borderRadius: BorderRadius.only(
+          topLeft: radius,
+          topRight: radius,
+          bottomLeft: mine ? radius : const Radius.circular(4),
+          bottomRight: mine ? const Radius.circular(4) : radius,
+        ),
+        border: isHighlighted
+            ? Border.all(color: Brand.signal, width: 2)
+            : (mine ? null : Border.all(color: Brand.stroke)),
+        boxShadow: isHighlighted
+            ? [
+                BoxShadow(
+                  color: Brand.signal.withValues(alpha: 0.30),
+                  blurRadius: 14,
+                  spreadRadius: 1,
+                ),
+              ]
+            : null,
+      ),
       child: Column(
         crossAxisAlignment: align,
         children: [
-          GestureDetector(
-            // Capture position for showMenu(). Long-press on mobile,
-            // right-click on desktop. tap-and-hold also works on
-            // touch screens.
-            onTapDown: (d) => menuAnchor = d.globalPosition,
-            onSecondaryTapDown: (d) => menuAnchor = d.globalPosition,
-            onLongPress: () => _showMessageActions(m, menuAnchor),
-            onSecondaryTap: () => _showMessageActions(m, menuAnchor),
-            child: AnimatedContainer(
-              key: bubbleKey,
-              duration: const Duration(milliseconds: 280),
-              curve: Curves.easeOut,
-              constraints: const BoxConstraints(maxWidth: 460),
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-              decoration: BoxDecoration(
-                color: color,
-                borderRadius: BorderRadius.only(
-                  topLeft: radius,
-                  topRight: radius,
-                  bottomLeft: mine ? radius : const Radius.circular(4),
-                  bottomRight: mine ? const Radius.circular(4) : radius,
-                ),
-                border: isHighlighted
-                    ? Border.all(color: Brand.signal, width: 2)
-                    : (mine ? null : Border.all(color: Brand.stroke)),
-                boxShadow: isHighlighted
-                    ? [
-                        BoxShadow(
-                          color: Brand.signal.withValues(alpha: 0.30),
-                          blurRadius: 14,
-                          spreadRadius: 1,
-                        ),
-                      ]
-                    : null,
-              ),
-              child: Column(
-                crossAxisAlignment: align,
-                children: [
-                  ..._renderBodyWithQuote(
-                      m.body, mine, fg, text, m.senderId),
-                  if (m.attachments.isNotEmpty)
-                    ..._renderAttachments(m, mine, text),
-                ],
+          ..._renderBodyWithQuote(m.body, mine, fg, text, m.senderId),
+          if (m.attachments.isNotEmpty)
+            ..._renderAttachments(m, mine, text),
+        ],
+      ),
+    );
+
+    // ⋮ action button — visible on hover, sits just outside the
+    // bubble (left of mine, right of theirs) so it doesn't crowd the
+    // bubble content. Mirrors the web admin pattern.
+    final actionBtn = AnimatedOpacity(
+      duration: const Duration(milliseconds: 150),
+      opacity: isHovered ? 1 : 0,
+      child: IgnorePointer(
+        ignoring: !isHovered,
+        child: Material(
+          color: Colors.transparent,
+          shape: const CircleBorder(),
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+            onTap: canAct
+                ? () {
+                    final renderBox = context.findRenderObject() as RenderBox?;
+                    final overlay =
+                        Overlay.of(context).context.findRenderObject()
+                            as RenderBox?;
+                    if (renderBox == null || overlay == null) return;
+                    // Anchor near the bubble's edge.
+                    final boxOffset = renderBox.localToGlobal(Offset.zero,
+                        ancestor: overlay);
+                    _showMessageActions(
+                        m, boxOffset + const Offset(40, 20));
+                  }
+                : null,
+            child: Container(
+              width: 26,
+              height: 26,
+              alignment: Alignment.center,
+              child: Icon(
+                Icons.more_horiz,
+                size: 16,
+                color: mine ? Brand.textMuted : Brand.textMuted,
               ),
             ),
           ),
-        ],
+        ),
+      ),
+    );
+
+    final children = mine
+        ? <Widget>[actionBtn, const SizedBox(width: 4), Flexible(child: bubble)]
+        : <Widget>[Flexible(child: bubble), const SizedBox(width: 4), actionBtn];
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: MouseRegion(
+        onEnter: canAct ? (_) => setState(() => _hoveredMessageId = mid) : null,
+        onExit: canAct
+            ? (_) {
+                if (_hoveredMessageId == mid) {
+                  setState(() => _hoveredMessageId = null);
+                }
+              }
+            : null,
+        child: Row(
+          mainAxisAlignment:
+              mine ? MainAxisAlignment.end : MainAxisAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: children,
+        ),
       ),
     );
   }
