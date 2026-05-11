@@ -1386,19 +1386,50 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
       ),
     );
     return [
-      if (targetId != null)
-        Material(
-          color: Colors.transparent,
-          child: InkWell(
-            onTap: () => _jumpToMessage(targetId),
-            borderRadius: BorderRadius.circular(6),
-            child: chip,
-          ),
-        )
-      else
-        chip,
+      Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: () => _jumpToQuoteTarget(targetId, sender, preview),
+          borderRadius: BorderRadius.circular(6),
+          child: chip,
+        ),
+      ),
       Text(reply, style: text.bodyMedium?.copyWith(color: fg)),
     ];
+  }
+
+  /// Resolve a quote-chip tap to a specific message id. Prefers the
+  /// `[#id]` embedded in the prefix (new format); for older replies
+  /// without an embedded id, falls back to a sender+preview-prefix
+  /// search through the loaded messages.
+  void _jumpToQuoteTarget(int? embeddedId, String sender, String preview) {
+    if (embeddedId != null) {
+      _jumpToMessage(embeddedId);
+      return;
+    }
+    final senderLower = sender.toLowerCase();
+    final previewNorm =
+        preview.replaceAll(RegExp(r'\s+'), ' ').trim().toLowerCase();
+    for (final m in _messages) {
+      final mid = m.persistedId;
+      if (mid == null) continue;
+      final body = m.body.replaceAll(RegExp(r'\s+'), ' ').trim();
+      if (!body.toLowerCase().startsWith(previewNorm)) continue;
+      // Sender match: "you" → my own messages; otherwise compare
+      // against the participant's display name.
+      if (senderLower == 'you') {
+        if (m.senderId != _meId) continue;
+      } else {
+        final p = widget.info.participants.firstWhere(
+          (p) => p.userId == m.senderId,
+          orElse: () => widget.info.participants.first,
+        );
+        if (p.fullName.toLowerCase() != senderLower) continue;
+      }
+      _jumpToMessage(mid);
+      return;
+    }
+    _toast('Original message not found in this view.');
   }
 
   /// Highlights the target message + scrolls it into view when the
