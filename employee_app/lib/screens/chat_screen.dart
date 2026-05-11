@@ -170,11 +170,49 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
       // Light ping if the message is from someone else.
       if (m.senderId != _meId) {
         unawaited(RingtoneService.instance.ping());
+        _notifyIfReplyToMe(m);
       }
       // /remote messages are rendered as interactive cards inline in
       // the chat (see _buildBubble). No dialog needed — user just
       // taps Allow/Deny on the bubble itself.
     }
+  }
+
+  /// Surface a SnackBar when an incoming message quotes me. The quote
+  /// prefix shape is "> @{name}: …" — we compare against the
+  /// employee's `meName` so the toast only fires for replies actually
+  /// addressed to this account.
+  void _notifyIfReplyToMe(ChatMessage m) {
+    final match = RegExp(r'^>\s*@([^:\n]+):').firstMatch(m.body);
+    if (match == null) return;
+    final target = (match.group(1) ?? '').trim().toLowerCase();
+    if (target.isEmpty) return;
+    final mine = widget.info.meName.trim().toLowerCase();
+    if (target != mine) return;
+    final replierName = widget.info.participants
+            .firstWhere(
+              (p) => p.userId == m.senderId,
+              orElse: () => widget.info.participants.first,
+            )
+            .fullName
+            .trim()
+            .isEmpty
+        ? 'Someone'
+        : widget.info.participants
+            .firstWhere((p) => p.userId == m.senderId)
+            .fullName;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Row(
+        children: [
+          const Icon(Icons.reply, color: Colors.white, size: 16),
+          const SizedBox(width: 8),
+          Expanded(child: Text('$replierName replied to your message')),
+        ],
+      ),
+      duration: const Duration(seconds: 3),
+      backgroundColor: Brand.signal,
+      behavior: SnackBarBehavior.floating,
+    ));
   }
 
   /// True when `m` is an incoming `/remote` request that hasn't been
