@@ -380,25 +380,65 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
         ),
         iconTheme: const IconThemeData(color: Brand.textPrimary),
       ),
-      body: SafeArea(
-        child: LayoutBuilder(
-          builder: (context, constraints) {
-            // Use the full app width on desktop — only the outer
-            // padding scales. The wide breakpoint (≥ 960px) still
-            // controls the inner two-column form layout, but the card
-            // itself now stretches edge-to-edge so a maximized window
-            // doesn't show empty gutters.
-            final wide = constraints.maxWidth >= 960.0;
-            return ListView(
-              padding: EdgeInsets.fromLTRB(
-                  wide ? 32 : 20, wide ? 28 : 24, wide ? 32 : 20, 48),
+      body: LayoutBuilder(
+        builder: (context, constraints) {
+          // Use the full app width on desktop — only the outer
+          // padding scales. The wide breakpoint (≥ 960px) still
+          // controls the inner two-column form layout, but the card
+          // itself stretches edge-to-edge so a maximized window
+          // doesn't show empty gutters.
+          final wide = constraints.maxWidth >= 960.0;
+          return SafeArea(
+            child: Column(
               children: [
-                _buildHero(wide: wide),
-                SizedBox(height: wide ? 24 : 20),
-                _buildFormCard(wide: wide),
+                Expanded(
+                  child: ListView(
+                    padding: EdgeInsets.fromLTRB(
+                        wide ? 32 : 20,
+                        wide ? 28 : 24,
+                        wide ? 32 : 20,
+                        24),
+                    children: [
+                      _buildHero(wide: wide),
+                      SizedBox(height: wide ? 24 : 20),
+                      _buildFormCard(wide: wide),
+                    ],
+                  ),
+                ),
+                _buildStickyFooter(wide: wide),
               ],
-            );
-          },
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  /// Sticky submit footer — pinned to the bottom of the scaffold so
+  /// the CTA stays in view even while the user is mid-way through a
+  /// long description. Top hairline + soft upward shadow separates it
+  /// from the scrolling content above.
+  Widget _buildStickyFooter({required bool wide}) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Brand.canvas,
+        border: Border(
+          top: BorderSide(color: Brand.stroke.withValues(alpha: 0.7)),
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.04),
+            blurRadius: 16,
+            offset: const Offset(0, -4),
+          ),
+        ],
+      ),
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: EdgeInsets.fromLTRB(
+              wide ? 32 : 20, 14, wide ? 32 : 20, 14),
+          child: _buildSubmit(),
         ),
       ),
     );
@@ -653,8 +693,6 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
                   ? 'A description is required.'
                   : null,
             ),
-            const SizedBox(height: 28),
-            _buildSubmit(),
           ],
         ),
       ),
