@@ -1343,7 +1343,11 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
     final sender = (match.group(1) ?? '').trim();
     final targetIdRaw = match.group(2);
     final targetId = targetIdRaw != null ? int.tryParse(targetIdRaw) : null;
-    final preview = (match.group(3) ?? '').trim();
+    // Legacy replies (sent before the preview-strip fix) baked nested
+    // quote prefixes into the chip text. Strip leading "> @sender: "
+    // segments at render time so the chip displays only the actual
+    // content the sender wrote, regardless of how the body was stored.
+    final preview = _stripNestedQuotes((match.group(3) ?? '').trim());
     final reply = (match.group(4) ?? '').trim();
     // Quote-chip palette: on my (orange) bubbles the chip needs to
     // contrast against orange, so we use white-tinted; on theirs the
@@ -1479,6 +1483,21 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
       return mid;
     }
     return null;
+  }
+
+  /// Strips leading `> @sender [#id]?:` segments from a chip's
+  /// preview text. Older replies (sent before the preview was
+  /// cleaned at send time) embedded nested quote prefixes inside
+  /// the chip — applying this at render time hides that gunk so the
+  /// chip shows just the actual content the original sender wrote.
+  String _stripNestedQuotes(String preview) {
+    final re = RegExp(
+        r'^>\s*@[^\[:\n]+?(?:\s*\[#\d+\])?\s*:\s*');
+    var s = preview;
+    for (var i = 0; i < 8 && re.hasMatch(s); i++) {
+      s = s.replaceFirst(re, '').trim();
+    }
+    return s;
   }
 
   /// Highlights the target message + scrolls it into view when the
