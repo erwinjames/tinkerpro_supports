@@ -24,8 +24,21 @@
 .PARAMETER XamppRoot
     Path to the XAMPP install. Defaults to C:\xampp.
 
+.PARAMETER LaunchApp
+    Switch — if set, the script also opens TpSupport.exe after setup
+    finishes. Default OFF so a tech can run setup in isolation,
+    inspect the result, and only launch the app when ready. Flip this
+    on (or pass -LaunchApp) once we're done iterating on the test
+    flow and want a single "unzip → run → done" experience for
+    customer installs.
+
 .EXAMPLE
     PS C:\Users\you\Downloads\TpSupport> .\setup-pos-and-run.ps1
+    Sets up MariaDB only; does not launch the app.
+
+.EXAMPLE
+    PS C:\Users\you\Downloads\TpSupport> .\setup-pos-and-run.ps1 -LaunchApp
+    Sets up MariaDB and launches TpSupport.exe.
 
 .NOTES
     Idempotent: re-running is safe. Inserts skip-name-resolve only if
@@ -35,7 +48,8 @@
 
 [CmdletBinding()]
 param(
-    [string]$XamppRoot = 'C:\xampp'
+    [string]$XamppRoot = 'C:\xampp',
+    [switch]$LaunchApp
 )
 
 $ErrorActionPreference = 'Stop'
@@ -52,12 +66,14 @@ function Write-Bad ($msg) { Write-Host "    $msg" -ForegroundColor Red    }
 $me = [Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not $me.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Warn "Not running as admin — relaunching elevated…"
-    Start-Process powershell -Verb RunAs -ArgumentList @(
+    $relaunchArgs = @(
         '-NoProfile',
         '-ExecutionPolicy', 'Bypass',
         '-File', "`"$PSCommandPath`"",
         '-XamppRoot', "`"$XamppRoot`""
     )
+    if ($LaunchApp) { $relaunchArgs += '-LaunchApp' }
+    Start-Process powershell -Verb RunAs -ArgumentList $relaunchArgs
     exit
 }
 
@@ -174,13 +190,20 @@ if ($needRestart) {
     }
 }
 
-# --- 6. Launch the support app -----------------------------------------
-Write-Step "Launching TpSupport.exe"
-if (-not (Test-Path $AppExe)) {
-    Write-Bad "TpSupport.exe not found next to this script."
-    Write-Bad "Place setup-pos-and-run.ps1 in the same folder as TpSupport.exe (the unzipped build) and re-run."
+# --- 6. Launch the support app (opt-in) --------------------------------
+if ($LaunchApp) {
+    Write-Step "Launching TpSupport.exe"
+    if (-not (Test-Path $AppExe)) {
+        Write-Bad "TpSupport.exe not found next to this script."
+        Write-Bad "Place setup-pos-and-run.ps1 in the same folder as TpSupport.exe (the unzipped build) and re-run."
+        Read-Host "Press Enter to exit"
+        exit 1
+    }
+    Start-Process -FilePath $AppExe -WorkingDirectory $PSScriptRoot
+    Write-Ok "TpSupport launched — you can close this window."
+} else {
+    Write-Step "Setup complete"
+    Write-Ok "Skipping app launch (testing mode). Run TpSupport.exe manually,"
+    Write-Ok "or re-run this script with -LaunchApp once you're done iterating."
     Read-Host "Press Enter to exit"
-    exit 1
 }
-Start-Process -FilePath $AppExe -WorkingDirectory $PSScriptRoot
-Write-Ok "TpSupport launched — you can close this window."
