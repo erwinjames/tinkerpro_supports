@@ -654,17 +654,7 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
                   : null,
             ),
             const SizedBox(height: 28),
-            // Submit doesn't need to stretch the full 1080px on
-            // desktop — that looks like a "DANGER" warning band. Cap
-            // the button width so the page reads as polished.
-            wide
-                ? Row(
-                    children: [
-                      Expanded(child: _buildSubmit()),
-                      const Spacer(),
-                    ],
-                  )
-                : _buildSubmit(),
+            _buildSubmit(),
           ],
         ),
       ),
