@@ -93,6 +93,8 @@ class PosShopService {
     String? tin,
     List<String> hintHosts = const [],
     void Function(String status)? onProgress,
+    String? manualHost,
+    int? manualPort,
   }) async {
     _lastError = null;
     _lastResult = null;
@@ -100,6 +102,8 @@ class PosShopService {
     _resolvedPort = null;
     final cleanTin = (tin ?? '').replaceAll(RegExp(r'[^0-9]'), '');
 
+    // Compile-time pin still wins (used by forced builds where the host
+    // is baked into the .exe via TPS_POS_HOST).
     if (_config.host.isNotEmpty) {
       onProgress?.call(
           'Using configured POS host ${_config.host}:${_config.port}…');
@@ -110,6 +114,21 @@ class PosShopService {
         return pinned;
       }
       return null;
+    }
+
+    // Admin-set manual host from SessionStore: skip the /24 scan and
+    // connect directly. This is the configured-by-an-admin path that
+    // turns /ticket into a single-round-trip read.
+    final mh = (manualHost ?? '').trim();
+    if (mh.isNotEmpty) {
+      final mp = manualPort ?? 3306;
+      onProgress?.call('Connecting to $mh:$mp…');
+      final result = await _readShop(mh, mp, cleanTin);
+      if (result != null) {
+        _resolvedHost = mh;
+        _resolvedPort = mp;
+      }
+      return result;
     }
 
     final winner = await _discovery.findTarget(

@@ -48,6 +48,16 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
   String _shopProgress = '';
   late final PosShopService _posShop = PosShopService(store: widget.store);
 
+  // Manual-setup panel state — shown the very first time /ticket runs
+  // on a fresh install before any admin has pinned a POS host. After a
+  // successful Connect we save the host+port to SessionStore and never
+  // show this panel again.
+  bool _needsSetup = false;
+  final _setupHost = TextEditingController();
+  final _setupPort = TextEditingController(text: '3306');
+  bool _setupBusy = false;
+  String? _setupError;
+
   // Diagnostic panel state — see _buildDiagnosticsCard.
   bool _diagOpen = false;
   bool _diagScanning = false;
@@ -62,12 +72,15 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
     // Default the name field to whatever the employee identifies as in
     // chat. They can overwrite it.
     _name.text = widget.info.meName;
-    // Render any previously-cached ShopInfo immediately so the form is
-    // usable on cold open instead of staring at a spinner for 5–7s
-    // while we re-handshake the POS DB. The refresh still runs (silent
-    // when cached, visible otherwise) and overwrites the cache on a
-    // successful read.
+    // Three-way decision:
+    //   - cached ShopInfo  → render instantly, silently refresh if we
+    //                        have a configured target to talk to
+    //   - manual target set but no cache → load visibly (single-shot
+    //                                       connect, no LAN scan)
+    //   - nothing configured             → show the setup panel so an
+    //                                       admin can pin host+port
     final cached = widget.store.cachedShop;
+    final hasManual = widget.store.hasPosManualTarget;
     if (cached != null) {
       _shop = ShopInfo(
         businessName: cached.businessName.isNotEmpty
@@ -81,9 +94,12 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
       );
       _shopSource = 'cache';
       _loadingShop = false;
-      _loadShop(silent: true);
-    } else {
+      if (hasManual) _loadShop(silent: true);
+    } else if (hasManual) {
       _loadShop();
+    } else {
+      _loadingShop = false;
+      _needsSetup = true;
     }
   }
 
@@ -92,6 +108,8 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
     _name.dispose();
     _subject.dispose();
     _description.dispose();
+    _setupHost.dispose();
+    _setupPort.dispose();
     super.dispose();
   }
 
@@ -111,6 +129,8 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
     final hints = <String>[if (apiHost != null) apiHost];
     final pos = await _posShop.getShopInfo(
       hintHosts: hints,
+      manualHost: widget.store.posManualHost,
+      manualPort: widget.store.posManualPort,
       onProgress: silent
           ? null
           : (s) {
@@ -211,6 +231,82 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
     if (pos != null) {
       await widget.store.saveCachedShop(_shop!);
     }
+  }
+
+  /// Admin-driven setup: connect to the typed host/port, and if it
+  /// works, pin it to SessionStore so we never ask again on this
+  /// install. On failure we leave the manual target unset — the admin
+  /// can correct the values and retry.
+  Future<void> _saveSetupAndConnect() async {
+    final host = _setupHost.text.trim();
+    final portText = _setupPort.text.trim();
+    final port = int.tryParse(portText);
+    if (host.isEmpty) {
+      setState(() => _setupError = 'Enter the POS server host (IP or hostname).');
+      return;
+    }
+    if (port == null || port <= 0 || port > 65535) {
+      setState(() => _setupError = 'Enter a valid port (1–65535). Default is 3306.');
+      return;
+    }
+    setState(() {
+      _setupBusy = true;
+      _setupError = null;
+    });
+    final result = await _posShop.getShopInfo(
+      manualHost: host,
+      manualPort: port,
+    );
+    if (!mounted) return;
+    if (result == null) {
+      setState(() {
+        _setupBusy = false;
+        _setupError = _posShop.lastError ?? 'Connect failed. Check host/port.';
+      });
+      return;
+    }
+    final adopted = ShopInfo(
+      businessName: result.businessName.isNotEmpty
+          ? result.businessName
+          : (widget.store.storeName ?? ''),
+      vatReg: result.vatReg,
+      vatLabel: result.vatLabel,
+      tin: result.tin,
+      email: result.email,
+      fullName: result.fullName,
+    );
+    await widget.store.setPosManualTarget(host, port);
+    await widget.store.saveCachedShop(adopted);
+    if (!mounted) return;
+    setState(() {
+      _setupBusy = false;
+      _needsSetup = false;
+      _shop = adopted;
+      _shopSource = 'pos';
+      _shopError = null;
+    });
+  }
+
+  /// Escape hatch from the setup panel — try the existing LAN
+  /// auto-discovery. Useful when the admin doesn't know the host but is
+  /// on the same network as the POS.
+  void _setupTryAutoDiscover() {
+    setState(() {
+      _needsSetup = false;
+      _setupError = null;
+    });
+    _loadShop();
+  }
+
+  /// Re-open the setup panel to change a previously-pinned host (e.g.,
+  /// the POS box got a new IP). Called from the diagnostic card.
+  void _openSetupPanel() {
+    setState(() {
+      _setupHost.text = widget.store.posManualHost ?? '';
+      _setupPort.text = (widget.store.posManualPort ?? 3306).toString();
+      _setupError = null;
+      _needsSetup = true;
+    });
   }
 
   /// Pull "host" out of an http(s) base URL — the support backend often
@@ -380,8 +476,9 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
             const SizedBox(height: 16),
             _label('🏢 Business Name *'),
             _buildBusinessField(),
-            if (!_loadingShop && _shop != null) _buildSourceCaption(),
-            if (!_loadingShop) _buildDiagnosticsCard(),
+            if (!_loadingShop && !_needsSetup && _shop != null)
+              _buildSourceCaption(),
+            if (!_loadingShop && !_needsSetup) _buildDiagnosticsCard(),
             const SizedBox(height: 16),
             _label('📝 Subject *'),
             TextFormField(
@@ -449,6 +546,7 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
       );
 
   Widget _buildBusinessField() {
+    if (_needsSetup) return _buildSetupPanel();
     if (_loadingShop) {
       return Container(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
@@ -540,6 +638,109 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
           ),
           const SizedBox(width: 10),
           _VatChip(isVat: shop.isVat, label: shop.vatLabel),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSetupPanel() {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 14, 14, 14),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFF8E1),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0xFFFCD34D), width: 1.4),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: const [
+              Icon(Icons.settings_input_antenna_outlined,
+                  size: 18, color: Color(0xFF92400E)),
+              SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'POS server setup needed',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 14,
+                    color: Color(0xFF92400E),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          const Text(
+            'A TinkerPro admin only needs to enter this once — host and '
+            'port for the POS MariaDB. We\'ll save it on this machine so '
+            'future /ticket forms open instantly.',
+            style: TextStyle(fontSize: 12, color: Brand.textMuted),
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                flex: 3,
+                child: TextField(
+                  controller: _setupHost,
+                  enabled: !_setupBusy,
+                  autofocus: true,
+                  decoration: const InputDecoration(
+                    labelText: 'Host (IP or hostname)',
+                    hintText: 'e.g. 192.168.1.40',
+                    isDense: true,
+                    border: OutlineInputBorder(),
+                  ),
+                  textInputAction: TextInputAction.next,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: TextField(
+                  controller: _setupPort,
+                  enabled: !_setupBusy,
+                  decoration: const InputDecoration(
+                    labelText: 'Port',
+                    isDense: true,
+                    border: OutlineInputBorder(),
+                  ),
+                  keyboardType: TextInputType.number,
+                  onSubmitted: (_) => _saveSetupAndConnect(),
+                ),
+              ),
+            ],
+          ),
+          if (_setupError != null) ...[
+            const SizedBox(height: 8),
+            Text(
+              _setupError!,
+              style: const TextStyle(color: Brand.danger, fontSize: 12),
+            ),
+          ],
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              FilledButton.icon(
+                onPressed: _setupBusy ? null : _saveSetupAndConnect,
+                icon: _setupBusy
+                    ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: Colors.white),
+                      )
+                    : const Icon(Icons.link, size: 18),
+                label: Text(_setupBusy ? 'Connecting…' : 'Connect & save'),
+              ),
+              const SizedBox(width: 8),
+              TextButton(
+                onPressed: _setupBusy ? null : _setupTryAutoDiscover,
+                child: const Text('Try auto-discover instead'),
+              ),
+            ],
+          ),
         ],
       ),
     );
@@ -723,7 +924,24 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
                         child: CircularProgressIndicator(
                             strokeWidth: 1.6, color: Brand.signal),
                       )
-                    else if (_diagOpen)
+                    else if (_diagOpen) ...[
+                      InkWell(
+                        onTap: _diagScanning ? null : _openSetupPanel,
+                        borderRadius: BorderRadius.circular(4),
+                        child: const Padding(
+                          padding: EdgeInsets.symmetric(
+                              horizontal: 6, vertical: 2),
+                          child: Text(
+                            'Edit host',
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                              color: Brand.signal,
+                              decoration: TextDecoration.underline,
+                            ),
+                          ),
+                        ),
+                      ),
                       InkWell(
                         onTap: _diagScanning ? null : _runDiagScan,
                         borderRadius: BorderRadius.circular(4),
@@ -741,6 +959,7 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
                           ),
                         ),
                       ),
+                    ],
                   ],
                 ),
               ),

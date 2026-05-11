@@ -22,10 +22,12 @@ class SessionStore {
   static const _kStoreName = 'employee_store_name';
   static const _kUserId    = 'employee_user_id';
   static const _kConvId    = 'employee_conv_id';
-  static const _kPosHost   = 'pos_db_host';
-  static const _kPosPort   = 'pos_db_port';
-  static const _kShopJson  = 'pos_shop_info_json';
-  static const _kShopAt    = 'pos_shop_info_saved_at';
+  static const _kPosHost          = 'pos_db_host';
+  static const _kPosPort          = 'pos_db_port';
+  static const _kPosManualHost    = 'pos_db_manual_host';
+  static const _kPosManualPort    = 'pos_db_manual_port';
+  static const _kShopJson         = 'pos_shop_info_json';
+  static const _kShopAt           = 'pos_shop_info_saved_at';
 
   static Future<SessionStore> open() async {
     final prefs = await SharedPreferences.getInstance();
@@ -66,6 +68,30 @@ class SessionStore {
     } else {
       await _prefs.setInt(_kPosPort, port);
     }
+  }
+
+  /// Admin-supplied POS host/port pinned at install time (or from the
+  /// "Edit POS server" panel later). Distinct from [posHost] — that's the
+  /// last auto-discovered target and gets cleared on failures; this one
+  /// is intentional configuration and only changes when an admin sets or
+  /// unsets it. When present, PosShopService skips discovery entirely
+  /// and connects directly here.
+  String? get posManualHost => _prefs.getString(_kPosManualHost);
+  int? get posManualPort => _prefs.getInt(_kPosManualPort);
+
+  bool get hasPosManualTarget {
+    final h = posManualHost;
+    return h != null && h.trim().isNotEmpty;
+  }
+
+  Future<void> setPosManualTarget(String? host, int? port) async {
+    if (host == null || host.trim().isEmpty) {
+      await _prefs.remove(_kPosManualHost);
+      await _prefs.remove(_kPosManualPort);
+      return;
+    }
+    await _prefs.setString(_kPosManualHost, host.trim());
+    await _prefs.setInt(_kPosManualPort, port ?? 3306);
   }
 
   /// Last ShopInfo we successfully read from the POS MariaDB. Persisted
@@ -111,6 +137,8 @@ class SessionStore {
     await _prefs.remove(_kStoreName);
     await _prefs.remove(_kUserId);
     await _prefs.remove(_kConvId);
+    await _prefs.remove(_kPosManualHost);
+    await _prefs.remove(_kPosManualPort);
     await _prefs.remove(_kShopJson);
     await _prefs.remove(_kShopAt);
   }

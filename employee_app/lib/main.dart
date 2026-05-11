@@ -88,10 +88,19 @@ class _BootstrapState extends State<_Bootstrap> {
 
   Future<void> _prewarmShopInfo() async {
     try {
+      // Only prewarm when an admin has actually configured a target. We
+      // never auto-run the slow /24 LAN sweep at launch — that's the
+      // whole reason for moving to admin-pinned config. If nothing's
+      // configured yet, the ticket form's setup panel handles it.
+      if (!widget.store.hasPosManualTarget) return;
       final svc = PosShopService(store: widget.store);
       final apiHost = Uri.tryParse(widget.api.baseUrl)?.host;
       final hints = <String>[if (apiHost != null && apiHost.isNotEmpty) apiHost];
-      final pos = await svc.getShopInfo(hintHosts: hints);
+      final pos = await svc.getShopInfo(
+        hintHosts: hints,
+        manualHost: widget.store.posManualHost,
+        manualPort: widget.store.posManualPort,
+      );
       if (pos == null) return;
       final businessName = pos.businessName.isNotEmpty
           ? pos.businessName
