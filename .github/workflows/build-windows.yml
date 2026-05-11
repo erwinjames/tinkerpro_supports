@@ -83,19 +83,6 @@ jobs:
             -Destination build\windows\x64\runner\Release\setup-pos-and-run.ps1
         shell: pwsh
 
-      - name: Resolve installer version from pubspec
-        # Pull the semver out of pubspec.yaml (the "1.0.0+1" line),
-        # strip the build-number suffix, and expose it so the Inno
-        # Setup compile uses the same string the app reports.
-        id: appver
-        run: |
-          $line = (Get-Content pubspec.yaml | Where-Object { $_ -match '^version:' })[0]
-          $v = ($line -replace 'version:\s*', '').Trim().Split('+')[0]
-          if ([string]::IsNullOrWhiteSpace($v)) { $v = '1.0.0' }
-          Write-Host "Installer version: $v"
-          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-        shell: pwsh
-
       - name: Zip the Release folder
         # Ship the WHOLE folder — the .exe alone won't run without
         # the DLLs and data\flutter_assets\ next to it.
@@ -107,12 +94,15 @@ jobs:
 
       - name: Build installer with Inno Setup
         # windows-latest images ship Inno Setup 6 pre-installed at
-        # "C:\Program Files (x86)\Inno Setup 6\ISCC.exe". /Q is quiet
-        # mode; /D overrides the version + source path so the same
-        # .iss compiles for any tag.
-        env:
-          APP_VERSION: ${{ steps.appver.outputs.version }}
+        # "C:\Program Files (x86)\Inno Setup 6\ISCC.exe". Version is
+        # parsed inline (avoids the UTF-16 GITHUB_OUTPUT footgun) and
+        # passed via /D AppVersion=...
         run: |
+          $line = (Select-String -Path pubspec.yaml -Pattern '^version:' | Select-Object -First 1).Line
+          $appVer = ($line -replace 'version:\s*', '').Trim().Split('+')[0]
+          if ([string]::IsNullOrWhiteSpace($appVer)) { $appVer = '1.0.0' }
+          Write-Host "Installer version: $appVer"
+
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
           if (-not (Test-Path $iscc)) {
             Write-Host "ISCC not found at expected path; falling back to PATH"
@@ -120,7 +110,7 @@ jobs:
           }
           & $iscc `
             "/Qp" `
-            "/DAppVersion=$env:APP_VERSION" `
+            "/DAppVersion=$appVer" `
             "/DSourceDir=..\build\windows\x64\runner\Release" `
             "/DOutputDir=..\installer-out" `
             installer\tinkerpro-employee.iss
