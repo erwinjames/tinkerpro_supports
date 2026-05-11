@@ -423,8 +423,17 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
                   .firstWhere((p) => p.userId == reply.senderId)
                   .fullName
               : 'them');
+      // If the message being quoted is itself a reply, strip its own
+      // quote prefix so the chip shows just the new content rather
+      // than nested quotes turtles-all-the-way-down.
+      final stripQuote = RegExp(
+              r'^>\s*@[^\[:\n]+?(?:\s*\[#\d+\])?\s*:\s*.+?\n\n(.+)$',
+              dotAll: true)
+          .firstMatch(reply.body);
+      final cleanedBody =
+          stripQuote != null ? (stripQuote.group(1) ?? '').trim() : reply.body;
       final preview =
-          reply.body.replaceAll(RegExp(r'\s+'), ' ').trim();
+          cleanedBody.replaceAll(RegExp(r'\s+'), ' ').trim();
       final shortPreview =
           preview.length > 200 ? '${preview.substring(0, 200)}…' : preview;
       final targetId = reply.persistedId;
@@ -1860,7 +1869,15 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
                 .firstWhere((p) => p.userId == r.senderId)
                 .fullName
             : 'them');
-    final preview = r.body.replaceAll(RegExp(r'\s+'), ' ').trim();
+    // Strip the original's own quote prefix so the bar shows just
+    // what the user actually wrote, not nested quote-of-a-quote text.
+    final stripQuote = RegExp(
+            r'^>\s*@[^\[:\n]+?(?:\s*\[#\d+\])?\s*:\s*.+?\n\n(.+)$',
+            dotAll: true)
+        .firstMatch(r.body);
+    final cleanedBody =
+        stripQuote != null ? (stripQuote.group(1) ?? '').trim() : r.body;
+    final preview = cleanedBody.replaceAll(RegExp(r'\s+'), ' ').trim();
     final shortPreview =
         preview.length > 140 ? '${preview.substring(0, 140)}…' : preview;
     return Container(
