@@ -31,6 +31,7 @@ class TicketService {
     required String subject,
     required String description,
     required String priority,
+    int? conversationId,
   }) async {
     final res = await api.post('create_ticket', body: {
       'customerName': customerName,
@@ -40,6 +41,12 @@ class TicketService {
       'subject': subject,
       'description': description,
       'priority': priority,
+      // Pass the conv we're already chatting in so the server can
+      // link the ticket to it. Without this, admin-side resolve can't
+      // post its "✅ resolved" announcement back to us (the server
+      // gates that on a non-null conversation_id).
+      if (conversationId != null && conversationId > 0)
+        'conversation_id': conversationId.toString(),
     });
     final ok = res['status'] == 'success';
     return TicketSubmitResult(

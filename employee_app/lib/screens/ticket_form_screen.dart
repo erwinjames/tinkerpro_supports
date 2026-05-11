@@ -340,6 +340,11 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
       subject: _subject.text.trim(),
       description: _description.text.trim(),
       priority: _priority,
+      // Link the ticket to this chat conversation so admin-side
+      // resolve/accept actions can post their announcement bubbles
+      // back to the same thread — without this, the server falls back
+      // to email-keyed user creation and never posts the bubble.
+      conversationId: widget.info.conversationId,
     );
     if (!mounted) return;
     setState(() => _submitting = false);
