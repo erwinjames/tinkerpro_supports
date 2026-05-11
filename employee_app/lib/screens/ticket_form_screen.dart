@@ -383,20 +383,22 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
       body: SafeArea(
         child: LayoutBuilder(
           builder: (context, constraints) {
-            // Premium feel needs a measured reading width — full-bleed
-            // forms on a 1920px POS workstation look like a debug page.
-            // 640px max keeps the form line-length in the 50-65ch sweet
-            // spot, with generous gutters on either side.
-            final maxW = constraints.maxWidth > 760.0 ? 640.0 : double.infinity;
+            // Premium desktop sizing — 1080px keeps room for two-column
+            // field rows without stretching to debug-page widths on a
+            // 1920px POS workstation. Falls back to fluid width below
+            // the breakpoint.
+            final wide = constraints.maxWidth >= 960.0;
+            final maxW = wide ? 1080.0 : double.infinity;
             return Center(
               child: ConstrainedBox(
                 constraints: BoxConstraints(maxWidth: maxW),
                 child: ListView(
-                  padding: const EdgeInsets.fromLTRB(20, 24, 20, 48),
+                  padding: EdgeInsets.fromLTRB(
+                      wide ? 32 : 20, wide ? 28 : 24, wide ? 32 : 20, 48),
                   children: [
-                    _buildHero(),
-                    const SizedBox(height: 20),
-                    _buildFormCard(),
+                    _buildHero(wide: wide),
+                    SizedBox(height: wide ? 24 : 20),
+                    _buildFormCard(wide: wide),
                   ],
                 ),
               ),
@@ -407,12 +409,14 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
     );
   }
 
-  /// Premium hero — soft warm gradient, large refined title, and a
-  /// short reassuring subtitle. Replaces the old gradient block that
-  /// duplicated the AppBar title. Sets the tone for the whole flow.
-  Widget _buildHero() {
+  /// Premium hero — soft warm gradient and (on desktop) a row of
+  /// reassurance bullets describing the post-submit experience. The
+  /// hero replaces the old duplicate title block and on wide displays
+  /// uses the horizontal space rather than wasting it.
+  Widget _buildHero({required bool wide}) {
     return Container(
-      padding: const EdgeInsets.fromLTRB(22, 22, 22, 22),
+      padding: EdgeInsets.fromLTRB(
+          wide ? 28 : 22, wide ? 24 : 22, wide ? 28 : 22, wide ? 24 : 22),
       decoration: BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topLeft,
@@ -425,55 +429,122 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
         borderRadius: BorderRadius.circular(20),
         border: Border.all(color: Brand.stroke),
       ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      child: Flex(
+        direction: wide ? Axis.horizontal : Axis.vertical,
+        crossAxisAlignment:
+            wide ? CrossAxisAlignment.center : CrossAxisAlignment.start,
         children: [
-          Container(
-            width: 44,
-            height: 44,
-            decoration: BoxDecoration(
-              color: Brand.signal.withValues(alpha: 0.12),
-              borderRadius: BorderRadius.circular(12),
-            ),
-            alignment: Alignment.center,
-            child: const Icon(Icons.support_agent_outlined,
-                color: Brand.signal, size: 22),
-          ),
-          const SizedBox(width: 14),
-          const Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  "Let's get you sorted",
-                  style: TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.w700,
-                    color: Brand.textPrimary,
-                    letterSpacing: -0.2,
-                    height: 1.2,
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: 44,
+                height: 44,
+                decoration: BoxDecoration(
+                  color: Brand.signal.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                alignment: Alignment.center,
+                child: const Icon(Icons.support_agent_outlined,
+                    color: Brand.signal, size: 22),
+              ),
+              const SizedBox(width: 14),
+              Flexible(
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(maxWidth: wide ? 360 : 600),
+                  child: const Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        "Let's get you sorted",
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.w700,
+                          color: Brand.textPrimary,
+                          letterSpacing: -0.2,
+                          height: 1.2,
+                        ),
+                      ),
+                      SizedBox(height: 6),
+                      Text(
+                        "Tell us what's happening. We'll route the ticket to support and post updates right back into this chat.",
+                        style: TextStyle(
+                          color: Brand.textMuted,
+                          fontSize: 13,
+                          height: 1.5,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
-                SizedBox(height: 6),
-                Text(
-                  "Tell us what's happening. We'll route the ticket to support and post updates right back into this chat.",
-                  style: TextStyle(
-                    color: Brand.textMuted,
-                    fontSize: 13,
-                    height: 1.5,
+              ),
+            ],
+          ),
+          if (wide) ...[
+            const SizedBox(width: 32),
+            const Expanded(
+              child: Wrap(
+                spacing: 24,
+                runSpacing: 12,
+                children: [
+                  _HeroBullet(
+                    icon: Icons.confirmation_number_outlined,
+                    label: 'Ticket # right away',
                   ),
+                  _HeroBullet(
+                    icon: Icons.bolt_outlined,
+                    label: 'Agent picks it up quickly',
+                  ),
+                  _HeroBullet(
+                    icon: Icons.forum_outlined,
+                    label: 'Updates here in chat',
+                  ),
+                ],
+              ),
+            ),
+          ] else ...[
+            const SizedBox(height: 16),
+            Row(
+              children: const [
+                _HeroBullet(
+                  icon: Icons.confirmation_number_outlined,
+                  label: 'Ticket # right away',
+                  compact: true,
                 ),
               ],
             ),
-          ),
+          ],
         ],
       ),
     );
   }
 
-  Widget _buildFormCard() {
+  Widget _buildFormCard({required bool wide}) {
+    final nameField = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _label('Full name', required_: true),
+        TextFormField(
+          controller: _name,
+          decoration: _fieldDecoration('Enter your full name'),
+          validator: (v) =>
+              (v == null || v.trim().isEmpty) ? 'Name is required.' : null,
+        ),
+      ],
+    );
+    final businessField = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _label('Business', required_: true),
+        _buildBusinessField(),
+        if (!_loadingShop && !_needsSetup && _shop != null)
+          _buildSourceCaption(),
+      ],
+    );
+
     return Container(
-      padding: const EdgeInsets.fromLTRB(24, 24, 24, 24),
+      padding: EdgeInsets.fromLTRB(
+          wide ? 32 : 24, wide ? 28 : 24, wide ? 32 : 24, wide ? 28 : 24),
       decoration: BoxDecoration(
         color: Brand.canvas,
         borderRadius: BorderRadius.circular(20),
@@ -492,33 +563,78 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             _sectionHeader(icon: Icons.badge_outlined, text: 'Your details'),
-            _label('Full name', required_: true),
-            TextFormField(
-              controller: _name,
-              decoration: _fieldDecoration('Enter your full name'),
-              validator: (v) =>
-                  (v == null || v.trim().isEmpty) ? 'Name is required.' : null,
-            ),
-            const SizedBox(height: 20),
-            _label('Business', required_: true),
-            _buildBusinessField(),
-            if (!_loadingShop && !_needsSetup && _shop != null)
-              _buildSourceCaption(),
-            const SizedBox(height: 8),
+            // On desktop the two short top-fields share a row instead of
+            // stacking — uses the horizontal real estate naturally and
+            // collapses the visual height of the form.
+            if (wide)
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(child: nameField),
+                  const SizedBox(width: 20),
+                  Expanded(child: businessField),
+                ],
+              )
+            else ...[
+              nameField,
+              const SizedBox(height: 20),
+              businessField,
+            ],
+            const SizedBox(height: 4),
             const _Hairline(),
             _sectionHeader(
                 icon: Icons.report_problem_outlined, text: 'The issue'),
-            _label('Subject', required_: true),
-            TextFormField(
-              controller: _subject,
-              decoration: _fieldDecoration('Brief description of your issue'),
-              validator: (v) => (v == null || v.trim().isEmpty)
-                  ? 'Subject is required.'
-                  : null,
-            ),
-            const SizedBox(height: 20),
-            _label('Priority'),
-            _buildPriority(),
+            // Subject + Priority pair on desktop. Priority is dense
+            // (three tiles); pairing it with the single Subject input
+            // keeps both within an eye-friendly horizontal scan.
+            if (wide)
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    flex: 5,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _label('Subject', required_: true),
+                        TextFormField(
+                          controller: _subject,
+                          decoration: _fieldDecoration(
+                              'Brief description of your issue'),
+                          validator: (v) => (v == null || v.trim().isEmpty)
+                              ? 'Subject is required.'
+                              : null,
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 20),
+                  Expanded(
+                    flex: 6,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _label('Priority'),
+                        _buildPriority(),
+                      ],
+                    ),
+                  ),
+                ],
+              )
+            else ...[
+              _label('Subject', required_: true),
+              TextFormField(
+                controller: _subject,
+                decoration:
+                    _fieldDecoration('Brief description of your issue'),
+                validator: (v) => (v == null || v.trim().isEmpty)
+                    ? 'Subject is required.'
+                    : null,
+              ),
+              const SizedBox(height: 20),
+              _label('Priority'),
+              _buildPriority(),
+            ],
             const SizedBox(height: 20),
             _label('Description', required_: true),
             TextFormField(
@@ -532,7 +648,17 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
                   : null,
             ),
             const SizedBox(height: 28),
-            _buildSubmit(),
+            // Submit doesn't need to stretch the full 1080px on
+            // desktop — that looks like a "DANGER" warning band. Cap
+            // the button width so the page reads as polished.
+            wide
+                ? Row(
+                    children: [
+                      Expanded(child: _buildSubmit()),
+                      const Spacer(),
+                    ],
+                  )
+                : _buildSubmit(),
           ],
         ),
       ),
@@ -1454,6 +1580,50 @@ class _Hairline extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// Reassurance bullet shown on the hero strip — small icon + label,
+/// optionally compact for narrow viewports.
+class _HeroBullet extends StatelessWidget {
+  const _HeroBullet({
+    required this.icon,
+    required this.label,
+    this.compact = false,
+  });
+
+  final IconData icon;
+  final String label;
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: compact ? 22 : 26,
+          height: compact ? 22 : 26,
+          decoration: BoxDecoration(
+            color: Brand.canvas,
+            borderRadius: BorderRadius.circular(7),
+            border: Border.all(color: Brand.stroke),
+          ),
+          alignment: Alignment.center,
+          child: Icon(icon, size: compact ? 12 : 14, color: Brand.signal),
+        ),
+        const SizedBox(width: 8),
+        Text(
+          label,
+          style: TextStyle(
+            color: Brand.textPrimary,
+            fontSize: compact ? 12 : 12.5,
+            fontWeight: FontWeight.w600,
+            letterSpacing: -0.05,
+          ),
+        ),
+      ],
     );
   }
 }
