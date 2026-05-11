@@ -425,9 +425,10 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
               : 'them');
       // If the message being quoted is itself a reply, strip its own
       // quote prefix so the chip shows just the new content rather
-      // than nested quotes turtles-all-the-way-down.
+      // than nested quotes turtles-all-the-way-down. CRLF-aware (web
+      // admin form POSTs store \r\n\r\n separators).
       final stripQuote = RegExp(
-              r'^>\s*@[^\[:\n]+?(?:\s*\[#\d+\])?\s*:\s*.+?\n\n(.+)$',
+              r'^>\s*@[^\[:\n]+?(?:\s*\[#\d+\])?\s*:\s*.+?\r?\n\r?\n(.+)$',
               dotAll: true)
           .firstMatch(reply.body);
       final cleanedBody =
@@ -1333,8 +1334,12 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
   List<Widget> _renderBodyWithQuote(
       String body, bool mine, Color fg, TextTheme text, int bubbleSenderId) {
     if (body.isEmpty) return const [];
+    // The \r?\n\r?\n separator covers both LF and CRLF — HTML form
+    // POSTs (from the web admin) normalize line breaks to CRLF, so
+    // anything stored after a web-side send has \r\n\r\n between the
+    // quote prefix and the reply.
     final match = RegExp(
-            r'^>\s*@([^\[:\n]+?)(?:\s*\[#(\d+)\])?\s*:\s*(.+?)\n\n(.+)$',
+            r'^>\s*@([^\[:\n]+?)(?:\s*\[#(\d+)\])?\s*:\s*(.+?)\r?\n\r?\n(.+)$',
             dotAll: true)
         .firstMatch(body);
     if (match == null) {
@@ -1890,8 +1895,9 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
             : 'them');
     // Strip the original's own quote prefix so the bar shows just
     // what the user actually wrote, not nested quote-of-a-quote text.
+    // CRLF-aware for bodies originating from a web-admin form POST.
     final stripQuote = RegExp(
-            r'^>\s*@[^\[:\n]+?(?:\s*\[#\d+\])?\s*:\s*.+?\n\n(.+)$',
+            r'^>\s*@[^\[:\n]+?(?:\s*\[#\d+\])?\s*:\s*.+?\r?\n\r?\n(.+)$',
             dotAll: true)
         .firstMatch(r.body);
     final cleanedBody =
