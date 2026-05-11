@@ -189,12 +189,13 @@ class PosShopService {
 
       final row = res.rows.first.assoc();
       final vatReg = int.tryParse((row['vat_reg'] ?? '0').toString()) ?? 0;
+      final shopName = (row['shop_name'] ?? '').toString().trim();
       return ShopInfo(
-        // Defer business-name display to the customer record from
-        // the support backend — the POS shop_name is typically the
-        // POS provider's brand ("Tinkerpro") rather than the
-        // merchant's own business.
-        businessName: '',
+        // Pulled directly from `shop.shop_name`. If the installer left
+        // the POS-provider default in place, the ticket form falls
+        // back to SessionStore.storeName so we never display the
+        // empty string to a tech.
+        businessName: shopName,
         vatReg: vatReg,
         vatLabel: vatReg == 1 ? 'VAT' : 'Non-VAT',
         tin: cleanTin,
