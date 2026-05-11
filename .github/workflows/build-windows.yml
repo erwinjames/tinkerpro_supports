@@ -83,6 +83,19 @@ jobs:
             -Destination build\windows\x64\runner\Release\setup-pos-and-run.ps1
         shell: pwsh
 
+      - name: Resolve installer version from pubspec
+        # Pull the semver out of pubspec.yaml (the "1.0.0+1" line),
+        # strip the build-number suffix, and expose it so the Inno
+        # Setup compile uses the same string the app reports.
+        id: appver
+        run: |
+          $line = (Get-Content pubspec.yaml | Where-Object { $_ -match '^version:' })[0]
+          $v = ($line -replace 'version:\s*', '').Trim().Split('+')[0]
+          if ([string]::IsNullOrWhiteSpace($v)) { $v = '1.0.0' }
+          Write-Host "Installer version: $v"
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+        shell: pwsh
+
       - name: Zip the Release folder
         # Ship the WHOLE folder — the .exe alone won't run without
         # the DLLs and data\flutter_assets\ next to it.
@@ -92,9 +105,40 @@ jobs:
             -DestinationPath TpSupport-windows-x64.zip
         shell: pwsh
 
-      - name: Upload artifact
+      - name: Build installer with Inno Setup
+        # windows-latest images ship Inno Setup 6 pre-installed at
+        # "C:\Program Files (x86)\Inno Setup 6\ISCC.exe". /Q is quiet
+        # mode; /D overrides the version + source path so the same
+        # .iss compiles for any tag.
+        env:
+          APP_VERSION: ${{ steps.appver.outputs.version }}
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            Write-Host "ISCC not found at expected path; falling back to PATH"
+            $iscc = "iscc.exe"
+          }
+          & $iscc `
+            "/Qp" `
+            "/DAppVersion=$env:APP_VERSION" `
+            "/DSourceDir=..\build\windows\x64\runner\Release" `
+            "/DOutputDir=..\installer-out" `
+            installer\tinkerpro-employee.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Host "Installer files produced:"
+          Get-ChildItem installer-out
+        shell: pwsh
+
+      - name: Upload zip artifact
         uses: actions/upload-artifact@v4
         with:
           name: TpSupport-windows-x64
           path: employee_app/TpSupport-windows-x64.zip
+          retention-days: 14
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TpSupport-Setup
+          path: employee_app/installer-out/*.exe
           retention-days: 14
