@@ -66,6 +66,19 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
   StreamSubscription<ChatMessage>? _msgSub;
   StreamSubscription<ConversationInvite>? _inviteSub;
   StreamSubscription<CallPresence>? _presenceSub;
+  StreamSubscription<MessageRead>? _readSub;
+  StreamSubscription<int>? _deletedSub;
+
+  /// Per-user `last_read_message_id` populated from realtime read
+  /// events. Drives the "no one else has seen this message yet" gate
+  /// on the Unsend menu item — Unsend disappears once any other
+  /// participant's cursor passes the message id.
+  final Map<int, int> _readCursorsByUser = {};
+
+  /// Active reply target — when non-null the composer shows a
+  /// quote preview above it, and the next send prepends a quoted line
+  /// to the body. Cleared on send or by tapping the preview's ✕.
+  ChatMessage? _replyContext;
 
   /// Most recent `busy` presence from a *different* terminal in our
   /// conversation. While non-null, this terminal's call buttons grey
@@ -102,6 +115,9 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
         widget.realtime.conversationCreatedEvents.listen(_onConversationInvite);
     _presenceSub =
         widget.realtime.callPresenceEvents.listen(_onCallPresence);
+    _readSub = widget.realtime.readEvents.listen(_onMessageRead);
+    _deletedSub =
+        widget.realtime.messageDeletedEvents.listen(_onMessageDeleted);
     widget.calls.addListener(_onCallChange);
   }
 
@@ -110,6 +126,8 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
     _msgSub?.cancel();
     _inviteSub?.cancel();
     _presenceSub?.cancel();
+    _readSub?.cancel();
+    _deletedSub?.cancel();
     _presenceAutoClear?.cancel();
     widget.calls.removeListener(_onCallChange);
     _composer.dispose();
@@ -340,10 +358,37 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
       await _openTicketForm();
       return;
     }
+    // If a reply was queued from the message menu, prepend a quote.
+    // Client-side quoting (no schema change) — the body becomes:
+    //   > @sender: original preview…
+    //   the reply
+    String finalText = text;
+    final reply = _replyContext;
+    if (reply != null) {
+      final senderName = reply.senderId == _meId
+          ? 'you'
+          : (widget.info.participants
+                  .firstWhere(
+                    (p) => p.userId == reply.senderId,
+                    orElse: () => widget.info.participants.first,
+                  )
+                  .fullName
+                  .isNotEmpty
+              ? widget.info.participants
+                  .firstWhere((p) => p.userId == reply.senderId)
+                  .fullName
+              : 'them');
+      final preview =
+          reply.body.replaceAll(RegExp(r'\s+'), ' ').trim();
+      final shortPreview =
+          preview.length > 200 ? '${preview.substring(0, 200)}…' : preview;
+      finalText = '> @$senderName: $shortPreview\n\n$text';
+      setState(() => _replyContext = null);
+    }
     _composer.clear();
     final msg = await widget.chat.send(
       convId: _convId,
-      body: text,
+      body: finalText,
       clientNonce: _newNonce(),
     );
     if (msg != null && mounted) {
@@ -399,6 +444,135 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
     );
     if (!ok && mounted) {
       _toast('Could not start call.');
+    }
+  }
+
+  void _onMessageRead(MessageRead ev) {
+    if (!mounted) return;
+    // Track the latest cursor per user so we can gate Unsend on
+    // "nobody else has seen this yet". Only widen — never lower —
+    // because messages arrive out of order on slow connections.
+    final cur = _readCursorsByUser[ev.userId] ?? 0;
+    if (ev.lastReadMessageId > cur) {
+      setState(() => _readCursorsByUser[ev.userId] = ev.lastReadMessageId);
+    }
+  }
+
+  void _onMessageDeleted(int messageId) {
+    if (!mounted) return;
+    final before = _messages.length;
+    _messages.removeWhere((m) => m.id == messageId);
+    if (_messages.length != before) setState(() {});
+  }
+
+  /// True when any other participant's read cursor has already
+  /// reached [m.id]. Drives the Unsend menu-item gate. Returns false
+  /// for messages that haven't been persisted yet (id is a temp
+  /// string nonce, no persistedId).
+  bool _isSeenByOther(ChatMessage m) {
+    final mid = m.persistedId;
+    if (mid == null) return false;
+    for (final entry in _readCursorsByUser.entries) {
+      if (entry.key == _meId) continue;
+      if (entry.value >= mid) return true;
+    }
+    return false;
+  }
+
+  Future<void> _showMessageActions(ChatMessage m, Offset globalPos) async {
+    // Optimistic / failed messages have a string nonce id, not a
+    // persisted int — they can't be acted on via the server endpoints.
+    final mid = m.persistedId;
+    if (mid == null) return;
+    final mine = m.senderId == _meId;
+    final canUnsend = mine && !_isSeenByOther(m);
+    final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
+    final result = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromLTRB(
+        globalPos.dx,
+        globalPos.dy,
+        overlay.size.width - globalPos.dx,
+        overlay.size.height - globalPos.dy,
+      ),
+      items: [
+        const PopupMenuItem(
+          value: 'reply',
+          height: 38,
+          child: Row(children: [
+            Icon(Icons.reply, size: 16, color: Brand.textPrimary),
+            SizedBox(width: 10),
+            Text('Reply', style: TextStyle(fontSize: 13.5)),
+          ]),
+        ),
+        const PopupMenuItem(
+          value: 'delete',
+          height: 38,
+          child: Row(children: [
+            Icon(Icons.delete_outline, size: 16, color: Brand.textPrimary),
+            SizedBox(width: 10),
+            Text('Delete', style: TextStyle(fontSize: 13.5)),
+          ]),
+        ),
+        if (canUnsend) const PopupMenuDivider(height: 4),
+        if (canUnsend)
+          const PopupMenuItem(
+            value: 'unsend',
+            height: 38,
+            child: Row(children: [
+              Icon(Icons.undo, size: 16, color: Brand.danger),
+              SizedBox(width: 10),
+              Text('Unsend',
+                  style: TextStyle(
+                      fontSize: 13.5,
+                      color: Brand.danger,
+                      fontWeight: FontWeight.w600)),
+            ]),
+          ),
+      ],
+    );
+    if (result == null || !mounted) return;
+    switch (result) {
+      case 'reply':
+        setState(() => _replyContext = m);
+        break;
+      case 'delete':
+        final ok = await widget.chat.hideMessageForMe(mid);
+        if (!mounted) return;
+        if (ok) {
+          setState(() => _messages.removeWhere((x) => x.id == m.id));
+        } else {
+          _toast('Could not hide message.');
+        }
+        break;
+      case 'unsend':
+        final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (_) => AlertDialog(
+            title: const Text('Unsend message?'),
+            content: const Text(
+                'This removes the message for everyone in the chat. You can only unsend before anyone else has read it.'),
+            actions: [
+              TextButton(
+                  onPressed: () => Navigator.pop(context, false),
+                  child: const Text('Cancel')),
+              TextButton(
+                  onPressed: () => Navigator.pop(context, true),
+                  style: TextButton.styleFrom(foregroundColor: Brand.danger),
+                  child: const Text('Unsend')),
+            ],
+          ),
+        );
+        if (confirmed != true || !mounted) return;
+        final res = await widget.chat.deleteMessage(mid);
+        if (!mounted) return;
+        if (res['success'] == true) {
+          setState(() => _messages.removeWhere((x) => x.id == m.id));
+        } else {
+          final msg = (res['message'] ?? 'Could not unsend message.').toString();
+          _toast(msg);
+        }
+        break;
     }
   }
 
@@ -1023,33 +1197,45 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
     final color = mine ? Brand.signal : Brand.canvas;
     final fg = mine ? Brand.canvas : Brand.textPrimary;
     final radius = const Radius.circular(14);
+    // Track tap position so the popup menu opens next to the bubble.
+    Offset menuAnchor = Offset.zero;
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
       child: Column(
         crossAxisAlignment: align,
         children: [
-          Container(
-            constraints: const BoxConstraints(maxWidth: 460),
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-            decoration: BoxDecoration(
-              color: color,
-              borderRadius: BorderRadius.only(
-                topLeft: radius,
-                topRight: radius,
-                bottomLeft: mine ? radius : const Radius.circular(4),
-                bottomRight: mine ? const Radius.circular(4) : radius,
+          GestureDetector(
+            // Capture position for showMenu(). Long-press on mobile,
+            // right-click on desktop. tap-and-hold also works on
+            // touch screens.
+            onTapDown: (d) => menuAnchor = d.globalPosition,
+            onSecondaryTapDown: (d) => menuAnchor = d.globalPosition,
+            onLongPress: () => _showMessageActions(m, menuAnchor),
+            onSecondaryTap: () => _showMessageActions(m, menuAnchor),
+            child: Container(
+              constraints: const BoxConstraints(maxWidth: 460),
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              decoration: BoxDecoration(
+                color: color,
+                borderRadius: BorderRadius.only(
+                  topLeft: radius,
+                  topRight: radius,
+                  bottomLeft: mine ? radius : const Radius.circular(4),
+                  bottomRight: mine ? const Radius.circular(4) : radius,
+                ),
+                border: mine ? null : Border.all(color: Brand.stroke),
               ),
-              border: mine ? null : Border.all(color: Brand.stroke),
-            ),
-            child: Column(
-              crossAxisAlignment: align,
-              children: [
-                if (m.body.isNotEmpty)
-                  Text(m.body,
-                      style: text.bodyMedium?.copyWith(color: fg)),
-                if (m.attachments.isNotEmpty)
-                  ..._renderAttachments(m, mine, text),
-              ],
+              child: Column(
+                crossAxisAlignment: align,
+                children: [
+                  if (m.body.isNotEmpty)
+                    Text(m.body,
+                        style: text.bodyMedium?.copyWith(color: fg)),
+                  if (m.attachments.isNotEmpty)
+                    ..._renderAttachments(m, mine, text),
+                ],
+              ),
             ),
           ),
         ],
@@ -1334,7 +1520,11 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
         border: Border(top: BorderSide(color: Brand.stroke)),
       ),
       padding: const EdgeInsets.fromLTRB(8, 8, 8, 12),
-      child: Row(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (_replyContext != null) _buildReplyBar(),
+          Row(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
           IconButton(
@@ -1360,6 +1550,78 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
             onPressed: _send,
             icon: const Icon(Icons.send, size: 16),
             label: const Text('Send'),
+          ),
+        ],
+      ),
+        ],
+      ),
+    );
+  }
+
+  /// Quote preview shown above the composer while a reply is active.
+  /// The Send handler reads _replyContext and prepends a quoted line
+  /// to the body before posting, then clears the context.
+  Widget _buildReplyBar() {
+    final r = _replyContext!;
+    final senderName = r.senderId == _meId
+        ? 'you'
+        : (widget.info.participants
+                .firstWhere(
+                  (p) => p.userId == r.senderId,
+                  orElse: () => widget.info.participants.first,
+                )
+                .fullName
+                .isNotEmpty
+            ? widget.info.participants
+                .firstWhere((p) => p.userId == r.senderId)
+                .fullName
+            : 'them');
+    final preview = r.body.replaceAll(RegExp(r'\s+'), ' ').trim();
+    final shortPreview =
+        preview.length > 140 ? '${preview.substring(0, 140)}…' : preview;
+    return Container(
+      margin: const EdgeInsets.fromLTRB(4, 0, 4, 6),
+      padding: const EdgeInsets.fromLTRB(10, 8, 6, 8),
+      decoration: BoxDecoration(
+        color: Brand.signal.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(8),
+        border: Border(
+            left: BorderSide(color: Brand.signal, width: 3)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.reply, size: 14, color: Brand.signal),
+          const SizedBox(width: 8),
+          Expanded(
+            child: RichText(
+              overflow: TextOverflow.ellipsis,
+              maxLines: 1,
+              text: TextSpan(
+                style: const TextStyle(fontSize: 12, color: Brand.textPrimary),
+                children: [
+                  TextSpan(
+                    text: senderName,
+                    style: const TextStyle(
+                      color: Brand.signal,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const TextSpan(text: '  '),
+                  TextSpan(
+                    text: shortPreview.isEmpty ? '(empty)' : shortPreview,
+                    style: const TextStyle(color: Brand.textMuted),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          InkWell(
+            onTap: () => setState(() => _replyContext = null),
+            borderRadius: BorderRadius.circular(4),
+            child: const Padding(
+              padding: EdgeInsets.all(4),
+              child: Icon(Icons.close, size: 14, color: Brand.textMuted),
+            ),
           ),
         ],
       ),

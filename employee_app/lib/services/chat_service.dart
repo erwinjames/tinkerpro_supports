@@ -93,11 +93,24 @@ class ChatService {
     return ChatMessage.fromJson(Map<String, dynamic>.from(res['message']));
   }
 
-  /// Server-side delete ("unsend"). Only the original sender can call this
-  /// — server enforces. Soketi broadcasts `message.deleted` on the conv
-  /// channel so peers drop the bubble live.
-  Future<bool> deleteMessage(int messageId) async {
+  /// Server-side unsend (delete for everyone). Only the original
+  /// sender can call this, and only if no one else has read the
+  /// message yet — server enforces both. Soketi broadcasts
+  /// `message.deleted` on the conv channel so peers drop the bubble
+  /// live. Returns the raw response so callers can show the
+  /// "already seen" friendly error.
+  Future<Map<String, dynamic>> deleteMessage(int messageId) async {
     final res = await api.postChat('chat.deleteMessage', body: {
+      'message_id': messageId.toString(),
+    });
+    return res;
+  }
+
+  /// Per-account "Remove for me" — hides this one message on this
+  /// account only. Other participants still see it. Server returns
+  /// `{success: true}` on a successful hide.
+  Future<bool> hideMessageForMe(int messageId) async {
+    final res = await api.postChat('chat.hideMessageForMe', body: {
       'message_id': messageId.toString(),
     });
     return res['success'] == true;
