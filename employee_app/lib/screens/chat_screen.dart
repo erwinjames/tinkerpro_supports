@@ -1481,18 +1481,43 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
   Timer? _highlightClearTimer;
 
   Future<void> _jumpToMessage(int messageId) async {
-    final key = _messageKeys[messageId];
-    final ctx = key?.currentContext;
-    if (ctx == null) {
-      _toast('Original message not in view (scroll up to load older history).');
-      return;
+    // The bubble is rendered via ListView.builder which destroys
+    // off-screen children. If currentContext is null, scroll
+    // approximately to the target's index first so the lazy builder
+    // mounts the row, then call ensureVisible for precise alignment.
+    final ctxQuickAccess = _messageKeys[messageId]?.currentContext;
+    if (ctxQuickAccess == null) {
+      final idx = _messages.indexWhere((m) => m.persistedId == messageId);
+      if (idx < 0) {
+        _toast('Original message not in this view.');
+        return;
+      }
+      // ~80px is a reasonable per-bubble average (text + padding +
+      // bottom margin). Doesn't need to be exact — we follow up with
+      // ensureVisible which centers precisely.
+      const approxItemExtent = 80.0;
+      final target = (idx * approxItemExtent)
+          .clamp(_scroll.position.minScrollExtent,
+                 _scroll.position.maxScrollExtent);
+      await _scroll.animateTo(
+        target,
+        duration: const Duration(milliseconds: 350),
+        curve: Curves.easeOutCubic,
+      );
+      // Let the builder mount the row that just scrolled into view.
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+      if (!mounted) return;
     }
-    await Scrollable.ensureVisible(
-      ctx,
-      duration: const Duration(milliseconds: 350),
-      curve: Curves.easeOutCubic,
-      alignment: 0.35,
-    );
+    final ctx = _messageKeys[messageId]?.currentContext;
+    if (ctx != null && ctx.mounted) {
+      // ignore: use_build_context_synchronously
+      await Scrollable.ensureVisible(
+        ctx,
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOutCubic,
+        alignment: 0.35,
+      );
+    }
     if (!mounted) return;
     setState(() => _highlightedMessageId = messageId);
     _highlightClearTimer?.cancel();
