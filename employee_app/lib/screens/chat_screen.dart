@@ -117,6 +117,17 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
   /// guide screens on top of each other).
   bool _closedFromResolution = false;
 
+  /// True once the scoped ticket has been accepted by an admin. While
+  /// false in scoped mode the composer is replaced with a "Waiting
+  /// for support" card — the cashier shouldn't be peppering an
+  /// unassigned ticket with messages. Flips on a `👋 X has accepted
+  /// ticket #N` event matching [_scopedTicketId] arriving via the
+  /// realtime stream, OR when the same event is found in the loaded
+  /// history (covers the warm-restart case where admin had already
+  /// accepted before this screen opened). Always true outside scoped
+  /// mode so legacy unscoped chat keeps its existing behavior.
+  bool _ticketAccepted = false;
+
   /// id of the message currently being hovered. Drives the
   /// fade-in/out of the inline ⋮ action button next to each bubble
   /// (mouse-only — long-press has been removed in favour of the
@@ -220,6 +231,25 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
         }
       }
     }
+    // Outside scoped mode the chat is always "open" — there's no
+    // ticket to gate on. In scoped mode, check whether the loaded
+    // history already contains a `👋 X has accepted ticket #N`
+    // event matching the scoped ticket id (covers warm restarts
+    // where the admin accepted before this screen opened); if so,
+    // the waiting card never shows.
+    var initiallyAccepted = anchor == null || _scopedTicketId == null;
+    if (!initiallyAccepted && _scopedTicketId != null) {
+      for (final m in scoped) {
+        final ev = _detectTicketEvent(m.body);
+        if (ev != null &&
+            ev.kind == _TicketEventKind.accepted &&
+            ev.id == _scopedTicketId) {
+          initiallyAccepted = true;
+          break;
+        }
+      }
+    }
+    _ticketAccepted = initiallyAccepted;
     setState(() {
       _messages
         ..clear()
@@ -257,6 +287,23 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
       // /remote messages are rendered as interactive cards inline in
       // the chat (see _buildBubble). No dialog needed — user just
       // taps Allow/Deny on the bubble itself.
+
+      // Ticket-accepted unlock. While we're in scoped mode and the
+      // ticket hasn't been accepted yet, the composer is replaced by
+      // a "Waiting for support" card. The moment a matching
+      // accepted event lands, flip the flag so the composer renders
+      // and the employee can chat.
+      if (!_ticketAccepted && _scopedTicketId != null) {
+        final ev = _detectTicketEvent(m.body);
+        if (ev != null &&
+            ev.kind == _TicketEventKind.accepted &&
+            ev.id == _scopedTicketId) {
+          _ticketAccepted = true;
+          // Already inside a setState above; the next build picks up
+          // the new value. No SnackBar — the inline acceptance
+          // badge in the chat itself is the signal.
+        }
+      }
 
       // Ticket-resolved auto-close. When the admin marks the ticket
       // this scoped chat is tracking as resolved, surface a brief
@@ -1349,7 +1396,69 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
                     ? _buildEmptyState(text)
                     : _buildList(text),
           ),
-          _buildComposer(),
+          // Gate the composer while the scoped ticket is still
+          // pending acceptance — show a waiting card in its place so
+          // the cashier can see the ticket bubble but can't pile
+          // messages onto an unassigned ticket.
+          _ticketAccepted ? _buildComposer() : _buildAwaitingAcceptCard(),
+        ],
+      ),
+    );
+  }
+
+  /// Composer-replacement shown in scoped mode until the matching
+  /// admin acceptance event arrives. Matches the composer's vertical
+  /// footprint roughly so the chat list doesn't reflow on unlock.
+  Widget _buildAwaitingAcceptCard() {
+    return Container(
+      decoration: BoxDecoration(
+        color: Brand.canvas,
+        border: Border(top: BorderSide(color: Brand.stroke)),
+      ),
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 36, height: 36,
+            decoration: BoxDecoration(
+              color: Brand.signal.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            alignment: Alignment.center,
+            child: const SizedBox(
+              width: 16, height: 16,
+              child: CircularProgressIndicator(
+                strokeWidth: 2, color: Brand.signal),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Waiting for support to accept your ticket…',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w600,
+                    fontSize: 13.5,
+                    color: Brand.textPrimary,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  _scopedTicketId != null
+                      ? 'Ticket #$_scopedTicketId is in the queue. You can chat once an admin accepts it.'
+                      : 'Your ticket is in the queue. You can chat once an admin accepts it.',
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: Brand.textMuted,
+                    height: 1.4,
+                  ),
+                ),
+              ],
+            ),
+          ),
         ],
       ),
     );
