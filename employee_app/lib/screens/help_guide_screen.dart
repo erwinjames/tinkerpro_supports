@@ -12,19 +12,19 @@ import 'chat_screen.dart';
 import 'ticket_form_screen.dart';
 
 /// First screen the employee sees after the bootstrap has resolved
-/// their store + chat session. The intent is to let employees self-
-/// serve common questions (use the app, file a ticket, request a
-/// remote session, etc.) so support's chat queue stays focused on
-/// genuinely-new problems. The two CTAs at the bottom cover the
-/// escape hatches:
+/// their store + chat session. POS-focused self-serve FAQ — common
+/// register / sales / BIR / inventory questions the cashier hits day
+/// to day. A live search field at the top filters the article list
+/// as the user types (matches title or body, case-insensitive) so
+/// they don't have to scroll through every collapsed tile.
 ///
-/// * Contact Support → pushes the existing TicketFormScreen, posts a
-///   confirmation note into the chat thread once submitted, and then
-///   replaces the route with EmployeeChatScreen so the user lands on
-///   the freshly-created ticket conversation.
-/// * Open Chat → straight pass-through to EmployeeChatScreen for the
-///   power-user who already knows the app and wants the thread.
-class HelpGuideScreen extends StatelessWidget {
+/// "Contact Support" is the only escape hatch: it pushes the existing
+/// TicketFormScreen, posts the same "🎫 Ticket #N submitted…" note as
+/// the /ticket slash-command, then pushReplacement's into
+/// EmployeeChatScreen with the ticket id as the history anchor so the
+/// freshly-opened chat starts at the new ticket bubble (no unrelated
+/// past-ticket chatter).
+class HelpGuideScreen extends StatefulWidget {
   const HelpGuideScreen({
     super.key,
     required this.api,
@@ -44,122 +44,213 @@ class HelpGuideScreen extends StatelessWidget {
   final SessionStore store;
   final EmployeeChatInfo info;
 
+  @override
+  State<HelpGuideScreen> createState() => _HelpGuideScreenState();
+}
+
+class _HelpGuideScreenState extends State<HelpGuideScreen> {
+  final _search = TextEditingController();
+  String _query = '';
+
+  @override
+  void dispose() {
+    _search.dispose();
+    super.dispose();
+  }
+
   /// Article-style content the FAQ list renders. Each entry is a
   /// (title, body) pair; body is plain text so it stays editable
-  /// without hunting through Widget tree changes. Kept compact —
-  /// employees with the patience to read every word probably aren't
-  /// the ones who need to hit Contact Support anyway.
+  /// without hunting through widget-tree changes. Focused on POS
+  /// register operations the cashier actually does at the counter.
   static const _articles = <(String, String)>[
     (
-      'Welcome — what is this app?',
-      'TinkerPro Employee is your direct line to TinkerPro support.\n\n'
-          'Use the chat to talk to support, share screenshots and videos, '
-          'place voice/video calls, request remote access, and file tickets.'
+      'Log in to the POS',
+      'On the POS terminal, enter your cashier username and PIN, then '
+          'press LOG IN.\n\n'
+          'If the screen says "License invalid" or "License expired", call '
+          'your manager before continuing — do not try to re-enter the PIN; '
+          'every wrong attempt is logged.'
     ),
     (
-      'File a support ticket (/ticket)',
-      'In the chat, type /ticket and press Send. A form opens where you '
-          'fill in your name, the issue and a priority. When you submit, a '
-          'ticket bubble appears in chat and support is notified instantly.\n\n'
-          'You can also use the "Contact Support" button below — same form, '
-          'no need to type the command.'
+      'Open a shift / starting cash',
+      'After login, the POS asks for the starting cash in the drawer. '
+          'Count the float, type the exact amount and press CONFIRM. The '
+          'shift is now open and any sale you ring will be tied to your '
+          'cashier ID for the day-end Z-reading.'
     ),
     (
-      'Request a remote session (/request)',
-      'Type /request in the chat to ask an admin to take over your screen. '
-          'Once an admin confirms, you will see an Allow / Deny prompt — '
-          'tap Allow to start. Only you (the requester) see the prompt; '
-          'colleagues on the same conversation just see the request as text.'
+      'Ring up a sale',
+      'Scan the barcode or type the item code in the top search box. '
+          'Use the +/- buttons to adjust quantity. Tap PAY when finished, '
+          'pick the tender (Cash, Card, GCash, etc.), enter the amount '
+          'received and press CONFIRM to print the OR.'
     ),
     (
-      'Send screenshots, files and videos',
-      'Tap the paperclip on the composer to attach files. You can select '
-          'multiple at once. Previews appear above the composer with a per-'
-          'file progress bar while uploading. Up to 200 MB per file.\n\n'
-          'Multiple images in one message collapse into a single stack — tap '
-          'to flip through with arrow keys or the on-screen chevrons.'
+      'Apply a discount (Senior / PWD / Promo)',
+      'Tap the item row, then DISCOUNT. Pick the discount type — Senior '
+          'Citizen and PWD need the ID number entered for the BIR report. '
+          'Custom % or amount discounts require manager approval; the POS '
+          'will prompt for the manager PIN.'
     ),
     (
-      'Call support (voice / video)',
-      'Tap the phone or video icon in the chat header to ring every admin '
-          'on the support team at once. The first admin to answer takes the '
-          'call; the others stop ringing. Your colleagues on the same '
-          'conversation see a "call in progress" banner so they do not '
-          'fire a competing call.'
+      'Process a return / refund',
+      'From the main menu tap RETURN, scan the OR number from the '
+          'customer receipt, select the items being returned and press '
+          'CONFIRM. The drawer opens for the refund cash. A returns slip '
+          'prints — give the white copy to the customer and keep the '
+          'duplicate for end-of-day reconciliation.'
     ),
     (
-      'Reply to a message · Delete · Unsend',
-      'Hover a message and click the ⋮ to open the action menu.\n\n'
-          '• Reply quotes the original above your reply (clickable to jump).\n'
-          '• Delete for me hides the message on your machine only.\n'
-          '• Unsend removes it for everyone — only available before anyone '
-          'else has read the message.'
+      'Void a transaction',
+      'Before the customer pays: tap VOID on the active sale, enter your '
+          'reason, and confirm. After payment, you cannot void — use '
+          'RETURN instead. Both events are logged against your cashier '
+          'ID and appear on the manager dashboard.'
+    ),
+    (
+      'Reprint a receipt (OR)',
+      'Main menu → REPRINT. Search by OR number, customer name or '
+          'date. The reprint is watermarked "DUPLICATE" so it cannot be '
+          'mistaken for an original. Up to 3 reprints per OR; beyond '
+          'that needs manager override.'
+    ),
+    (
+      'Customer accounts & loyalty',
+      'On the sale screen, tap CUSTOMER and search by name, mobile '
+          'number or loyalty card. Points are added automatically once '
+          'the sale is confirmed. To redeem points, tap REDEEM before '
+          'pressing PAY and pick the reward.'
+    ),
+    (
+      'Pricing: item not in system',
+      'If a barcode scan returns "Item not found", do NOT improvise a '
+          'price. Tap MISC and ring it under the matching category with '
+          'manager approval, then file a ticket via Contact Support so '
+          'the item is added to the master list.'
+    ),
+    (
+      'BIR / VAT and Non-VAT receipts',
+      'The POS prints whichever receipt type your store is registered '
+          'for (BIR-approved OR for VAT, sales invoice for Non-VAT). The '
+          'serial range is loaded from your BIR permit. When you hit '
+          '80% of the serial range, the POS shows a yellow banner — file '
+          'a ticket immediately so a new range can be requested.'
+    ),
+    (
+      'Cash drawer: skim / pickup',
+      'Manager-only: tap CASH MGMT → PICKUP. Enter the amount removed '
+          'and the reason (e.g., "bank deposit"). The drawer opens, the '
+          'amount is logged, and the running cash-in-drawer total '
+          'decreases. The pickup appears as a line item in the Z-reading.'
+    ),
+    (
+      'End of shift: X-reading vs Z-reading',
+      'X-reading is a mid-shift snapshot — sales totals so far, no '
+          'reset. Print as many as you want. Z-reading is the day-end '
+          'close-out: it locks the shift, resets counters, and is the '
+          'document the BIR requires. Z-read once per day, after the '
+          'last sale.'
+    ),
+    (
+      'Inventory: check stock on hand',
+      'Main menu → INVENTORY → search the item. The "On Hand" column is '
+          'the live count for your store. If the on-hand looks wrong, '
+          'file a ticket — do not adjust manually; the POS audits every '
+          'manual change against the manager PIN.'
+    ),
+    (
+      'Connection lost / offline mode',
+      'If the top bar shows "OFFLINE" in red, the POS keeps accepting '
+          'sales locally and syncs once the connection comes back. Card '
+          'and e-wallet payments are blocked while offline — only Cash. '
+          'If it stays offline more than 10 minutes, call IT or file a '
+          'ticket.'
+    ),
+    (
+      'Printer not printing receipts',
+      'Check the paper roll first (lift the top cover — there should be '
+          'a green LED and paper sticking out). If the LED is red or '
+          'blinking, power-cycle the printer (off 10 sec, on). If the '
+          'POS still does not print, file a ticket and capture the OR '
+          'number of the missed receipt.'
+    ),
+    (
+      'Barcode scanner not reading',
+      'Aim the scanner at a clean printed barcode about 10 cm away. If '
+          'no beep, unplug-replug the USB cable. If still dead, type the '
+          'item code manually in the search box and file a ticket so '
+          'the scanner can be replaced.'
     ),
     (
       'Still stuck?',
-      'If none of the above answers your question, tap "Contact Support" '
-          'below. We will reach out in chat as soon as we see your ticket.'
+      'If none of the above answers your question, tap "Contact '
+          'Support" below. Fill in the form with the OR number / item '
+          'code / error message and we will reach out in chat as soon '
+          'as we see your ticket.'
     ),
   ];
 
-  Future<void> _contactSupport(BuildContext context) async {
-    final tickets = TicketService(api);
+  /// Case-insensitive substring match on title or body. Empty query
+  /// returns the full list so the first paint shows everything.
+  List<(String, String)> get _visibleArticles {
+    final q = _query.trim().toLowerCase();
+    if (q.isEmpty) return _articles;
+    return _articles
+        .where((a) =>
+            a.$1.toLowerCase().contains(q) || a.$2.toLowerCase().contains(q))
+        .toList(growable: false);
+  }
+
+  Future<void> _contactSupport() async {
+    final tickets = TicketService(widget.api);
     final outcome = await Navigator.of(context).push<TicketSubmitOutcome>(
       MaterialPageRoute(
         builder: (_) => TicketFormScreen(
           tickets: tickets,
-          info: info,
-          store: store,
-          api: api,
+          info: widget.info,
+          store: widget.store,
+          api: widget.api,
         ),
       ),
     );
-    if (outcome == null || !context.mounted) return;
+    if (outcome == null || !mounted) return;
 
-    // Mirror the chat_screen-side /ticket flow: post a ticket-
-    // confirmation bubble so support sees the ticket land live. We
-    // keep the returned message's persisted id so the chat screen
-    // can scope its visible history to "starting at this ticket" —
-    // older, unrelated thread chatter stays hidden.
     final ticketRef = outcome.ticketId != null ? ' #${outcome.ticketId}' : '';
     final note = '🎫 Ticket$ticketRef submitted: "${outcome.subject}"\n'
         'Business: ${outcome.businessName} (${outcome.vatLabel})\n'
         'Priority: ${outcome.priority.toUpperCase()}';
-    final sent = await chat.send(
-      convId: info.conversationId,
+    final sent = await widget.chat.send(
+      convId: widget.info.conversationId,
       body: note,
       clientNonce: 'help-${DateTime.now().microsecondsSinceEpoch}',
     );
     final anchorId = sent?.persistedId;
 
-    if (!context.mounted) return;
-    // Replace (don't push) so a back button doesn't dump the employee
-    // back on the help screen mid-conversation.
+    if (!mounted) return;
     Navigator.of(context).pushReplacement(
       MaterialPageRoute(
-        builder: (_) => _chatScreen(sinceMessageId: anchorId),
+        builder: (_) => EmployeeChatScreen(
+          api: widget.api,
+          chat: widget.chat,
+          realtime: widget.realtime,
+          calls: widget.calls,
+          lan: widget.lan,
+          store: widget.store,
+          info: widget.info,
+          sinceMessageId: anchorId,
+        ),
       ),
     );
   }
 
-  EmployeeChatScreen _chatScreen({int? sinceMessageId}) => EmployeeChatScreen(
-        api: api,
-        chat: chat,
-        realtime: realtime,
-        calls: calls,
-        lan: lan,
-        store: store,
-        info: info,
-        sinceMessageId: sinceMessageId,
-      );
-
   @override
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
+    final visible = _visibleArticles;
     return Scaffold(
       backgroundColor: Brand.surface,
       appBar: AppBar(
-        title: const Text('Help & Guide'),
+        title: const Text('POS Help & Guide'),
         backgroundColor: Brand.canvas,
         foregroundColor: Brand.textPrimary,
         elevation: 0,
@@ -167,15 +258,23 @@ class HelpGuideScreen extends StatelessWidget {
       body: SafeArea(
         child: Column(
           children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
+              child: _buildHero(text),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
+              child: _buildSearchField(),
+            ),
             Expanded(
-              child: ListView(
-                padding: const EdgeInsets.fromLTRB(20, 20, 20, 12),
-                children: [
-                  _buildHero(text),
-                  const SizedBox(height: 20),
-                  ..._articles.map((a) => _buildArticle(a.$1, a.$2, text)),
-                ],
-              ),
+              child: visible.isEmpty
+                  ? _buildEmptyState(text)
+                  : ListView.builder(
+                      padding: const EdgeInsets.fromLTRB(20, 4, 20, 12),
+                      itemCount: visible.length,
+                      itemBuilder: (_, i) =>
+                          _buildArticle(visible[i].$1, visible[i].$2, text),
+                    ),
             ),
             Container(
               padding: const EdgeInsets.fromLTRB(20, 12, 20, 16),
@@ -186,7 +285,7 @@ class HelpGuideScreen extends StatelessWidget {
               child: SizedBox(
                 width: double.infinity,
                 child: FilledButton.icon(
-                  onPressed: () => _contactSupport(context),
+                  onPressed: _contactSupport,
                   icon: const Icon(Icons.support_agent),
                   label: const Text('Contact Support'),
                   style: FilledButton.styleFrom(
@@ -194,6 +293,70 @@ class HelpGuideScreen extends StatelessWidget {
                   ),
                 ),
               ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSearchField() {
+    return TextField(
+      controller: _search,
+      onChanged: (v) => setState(() => _query = v),
+      textInputAction: TextInputAction.search,
+      decoration: InputDecoration(
+        hintText: 'Search the guide… (e.g., "refund", "Z-reading", "printer")',
+        prefixIcon: const Icon(Icons.search, color: Brand.textMuted),
+        suffixIcon: _query.isEmpty
+            ? null
+            : IconButton(
+                icon: const Icon(Icons.close, size: 18),
+                tooltip: 'Clear',
+                onPressed: () {
+                  _search.clear();
+                  setState(() => _query = '');
+                },
+              ),
+        filled: true,
+        fillColor: Brand.canvas,
+        contentPadding:
+            const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(10),
+          borderSide: const BorderSide(color: Brand.stroke),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(10),
+          borderSide: const BorderSide(color: Brand.stroke),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(10),
+          borderSide: const BorderSide(color: Brand.signal, width: 1.4),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildEmptyState(TextTheme text) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.search_off,
+                size: 48, color: Brand.textMuted),
+            const SizedBox(height: 12),
+            Text(
+              'No matching guide entries.',
+              style: text.bodyMedium?.copyWith(color: Brand.textMuted),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Try a different keyword, or tap Contact Support below.',
+              textAlign: TextAlign.center,
+              style: text.bodySmall?.copyWith(color: Brand.textMuted),
             ),
           ],
         ),
@@ -218,7 +381,7 @@ class HelpGuideScreen extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Icon(Icons.lightbulb_outline,
+          const Icon(Icons.point_of_sale,
               color: Colors.white, size: 32),
           const SizedBox(width: 14),
           Expanded(
@@ -226,7 +389,7 @@ class HelpGuideScreen extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'Welcome, ${info.storeName}',
+                  'Welcome, ${widget.info.storeName}',
                   style: text.titleMedium?.copyWith(
                     color: Colors.white,
                     fontWeight: FontWeight.w700,
@@ -234,9 +397,9 @@ class HelpGuideScreen extends StatelessWidget {
                 ),
                 const SizedBox(height: 6),
                 Text(
-                  'Quick answers to the most common questions live below. '
-                  'If something is not covered, tap Contact Support and '
-                  'we will reach out in chat right away.',
+                  'Quick answers to common POS questions live below. '
+                  'Search for a topic, or tap Contact Support if your '
+                  'question is not covered.',
                   style: text.bodySmall?.copyWith(
                     color: Colors.white.withValues(alpha: 0.92),
                     height: 1.4,
@@ -261,6 +424,9 @@ class HelpGuideScreen extends StatelessWidget {
       child: ClipRRect(
         borderRadius: BorderRadius.circular(10),
         child: ExpansionTile(
+          // While a search query is active, auto-expand the tile so
+          // the matching body text is visible without an extra tap.
+          initiallyExpanded: _query.trim().isNotEmpty,
           shape: const Border(),
           collapsedShape: const Border(),
           title: Text(
