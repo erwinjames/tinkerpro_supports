@@ -355,6 +355,34 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
     return trimmed.toLowerCase().startsWith('${command.toLowerCase()} ');
   }
 
+  /// Post a remote-desktop-access request bubble on the employee's
+  /// behalf. The admin sees a recognisably-formatted message they can
+  /// answer by sending /remote back (which triggers the existing
+  /// Allow/Deny card on this side).
+  ///
+  /// Avoids embedding the literal string "/remote" so the message
+  /// doesn't accidentally trip the inline /remote-card renderer on
+  /// other colleagues sharing the same thread.
+  Future<void> _sendRemoteAccessRequest() async {
+    final me = widget.info.meName.isEmpty ? 'A teammate' : widget.info.meName;
+    final body =
+        '🖥️ $me is requesting a remote-desktop session. Please initiate when ready.';
+    final msg = await widget.chat.send(
+      convId: _convId,
+      body: body,
+      clientNonce: _newNonce(),
+    );
+    if (msg != null && mounted && !_messages.any((m) => m.id == msg.id)) {
+      setState(() => _messages.add(msg));
+      _scrollToBottom();
+    }
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Remote access requested — support will start the session shortly.'),
+      ));
+    }
+  }
+
   Future<void> _openTicketForm() async {
     final tickets = TicketService(widget.api);
     final outcome = await Navigator.of(context).push<TicketSubmitOutcome>(
@@ -401,6 +429,16 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
     if (_isSlashCommand(text, '/ticket')) {
       _composer.clear();
       await _openTicketForm();
+      return;
+    }
+    // `/request` (or `@request`) — employee asks an admin to start a
+    // remote-desktop session. Drops a clearly-formatted message into
+    // the thread so the admin sees the ask + can respond with their
+    // existing `/remote` flow.
+    if (_isSlashCommand(text, '/request') ||
+        _isSlashCommand(text, '@request')) {
+      _composer.clear();
+      await _sendRemoteAccessRequest();
       return;
     }
     // If a reply was queued from the message menu, prepend a quote.
