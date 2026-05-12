@@ -2275,6 +2275,55 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
                       ),
                     ),
                   ),
+                // Prev / next arrow buttons. Only shown when there's
+                // more than one image; each is disabled at the
+                // appropriate end so the user can't page past the
+                // bounds. Pages animate so the swipe feel and the
+                // arrow-click feel match.
+                if (images.length > 1) ...[
+                  Positioned(
+                    left: 12, top: 0, bottom: 0,
+                    child: Center(
+                      child: Material(
+                        color: Colors.black.withValues(alpha: 0.55),
+                        shape: const CircleBorder(),
+                        child: IconButton(
+                          tooltip: 'Previous',
+                          icon: const Icon(Icons.chevron_left,
+                              color: Colors.white, size: 28),
+                          onPressed: currentIndex == 0
+                              ? null
+                              : () => pageCtrl.previousPage(
+                                    duration:
+                                        const Duration(milliseconds: 220),
+                                    curve: Curves.easeOut,
+                                  ),
+                        ),
+                      ),
+                    ),
+                  ),
+                  Positioned(
+                    right: 12, top: 0, bottom: 0,
+                    child: Center(
+                      child: Material(
+                        color: Colors.black.withValues(alpha: 0.55),
+                        shape: const CircleBorder(),
+                        child: IconButton(
+                          tooltip: 'Next',
+                          icon: const Icon(Icons.chevron_right,
+                              color: Colors.white, size: 28),
+                          onPressed: currentIndex == images.length - 1
+                              ? null
+                              : () => pageCtrl.nextPage(
+                                    duration:
+                                        const Duration(milliseconds: 220),
+                                    curve: Curves.easeOut,
+                                  ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
                 Positioned(
                   top: 8, right: 8,
                   child: Row(
