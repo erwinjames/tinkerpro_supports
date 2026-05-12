@@ -58,7 +58,7 @@ class _HelpGuideScreenState extends State<HelpGuideScreen> {
   /// before the first network call lands; gets replaced by the
   /// admin-managed list once `help.public` responds (or the cached
   /// JSON from last launch is decoded).
-  List<(String, String)> _articles = _fallbackArticles;
+  List<HelpArticle> _articles = _fallbackArticles;
 
   late final HelpArticleService _helpSvc =
       HelpArticleService(api: widget.api, store: widget.store);
@@ -83,8 +83,7 @@ class _HelpGuideScreenState extends State<HelpGuideScreen> {
     // shows an empty FAQ.
     if (list.isEmpty) return;
     setState(() {
-      _articles =
-          list.map((a) => (a.title, a.body)).toList(growable: false);
+      _articles = List<HelpArticle>.unmodifiable(list);
     });
   }
 
@@ -93,133 +92,38 @@ class _HelpGuideScreenState extends State<HelpGuideScreen> {
   /// intentionally short — the admin web app's Help Center is the
   /// source of truth, this only exists so a brand-new install can
   /// still show something useful before its first network call.
-  static const _fallbackArticles = <(String, String)>[
-    (
-      'Log in to the POS',
-      'On the POS terminal, enter your cashier username and PIN, then '
+  static const _fallbackArticles = <HelpArticle>[
+    HelpArticle(
+      title: 'Log in to the POS',
+      body: 'On the POS terminal, enter your cashier username and PIN, then '
           'press LOG IN.\n\n'
           'If the screen says "License invalid" or "License expired", call '
           'your manager before continuing — do not try to re-enter the PIN; '
           'every wrong attempt is logged.'
     ),
-    (
-      'Open a shift / starting cash',
-      'After login, the POS asks for the starting cash in the drawer. '
+    HelpArticle(
+      title: 'Open a shift / starting cash',
+      body: 'After login, the POS asks for the starting cash in the drawer. '
           'Count the float, type the exact amount and press CONFIRM. The '
           'shift is now open and any sale you ring will be tied to your '
-          'cashier ID for the day-end Z-reading.'
+          'cashier ID for the day-end Z-reading.',
     ),
-    (
-      'Ring up a sale',
-      'Scan the barcode or type the item code in the top search box. '
-          'Use the +/- buttons to adjust quantity. Tap PAY when finished, '
-          'pick the tender (Cash, Card, GCash, etc.), enter the amount '
-          'received and press CONFIRM to print the OR.'
-    ),
-    (
-      'Apply a discount (Senior / PWD / Promo)',
-      'Tap the item row, then DISCOUNT. Pick the discount type — Senior '
-          'Citizen and PWD need the ID number entered for the BIR report. '
-          'Custom % or amount discounts require manager approval; the POS '
-          'will prompt for the manager PIN.'
-    ),
-    (
-      'Process a return / refund',
-      'From the main menu tap RETURN, scan the OR number from the '
-          'customer receipt, select the items being returned and press '
-          'CONFIRM. The drawer opens for the refund cash. A returns slip '
-          'prints — give the white copy to the customer and keep the '
-          'duplicate for end-of-day reconciliation.'
-    ),
-    (
-      'Void a transaction',
-      'Before the customer pays: tap VOID on the active sale, enter your '
-          'reason, and confirm. After payment, you cannot void — use '
-          'RETURN instead. Both events are logged against your cashier '
-          'ID and appear on the manager dashboard.'
-    ),
-    (
-      'Reprint a receipt (OR)',
-      'Main menu → REPRINT. Search by OR number, customer name or '
-          'date. The reprint is watermarked "DUPLICATE" so it cannot be '
-          'mistaken for an original. Up to 3 reprints per OR; beyond '
-          'that needs manager override.'
-    ),
-    (
-      'Customer accounts & loyalty',
-      'On the sale screen, tap CUSTOMER and search by name, mobile '
-          'number or loyalty card. Points are added automatically once '
-          'the sale is confirmed. To redeem points, tap REDEEM before '
-          'pressing PAY and pick the reward.'
-    ),
-    (
-      'Pricing: item not in system',
-      'If a barcode scan returns "Item not found", do NOT improvise a '
-          'price. Tap MISC and ring it under the matching category with '
-          'manager approval, then file a ticket via Contact Support so '
-          'the item is added to the master list.'
-    ),
-    (
-      'BIR / VAT and Non-VAT receipts',
-      'The POS prints whichever receipt type your store is registered '
-          'for (BIR-approved OR for VAT, sales invoice for Non-VAT). The '
-          'serial range is loaded from your BIR permit. When you hit '
-          '80% of the serial range, the POS shows a yellow banner — file '
-          'a ticket immediately so a new range can be requested.'
-    ),
-    (
-      'Cash drawer: skim / pickup',
-      'Manager-only: tap CASH MGMT → PICKUP. Enter the amount removed '
-          'and the reason (e.g., "bank deposit"). The drawer opens, the '
-          'amount is logged, and the running cash-in-drawer total '
-          'decreases. The pickup appears as a line item in the Z-reading.'
-    ),
-    (
-      'End of shift: X-reading vs Z-reading',
-      'X-reading is a mid-shift snapshot — sales totals so far, no '
-          'reset. Print as many as you want. Z-reading is the day-end '
-          'close-out: it locks the shift, resets counters, and is the '
-          'document the BIR requires. Z-read once per day, after the '
-          'last sale.'
-    ),
-    (
-      'Inventory: check stock on hand',
-      'Main menu → INVENTORY → search the item. The "On Hand" column is '
-          'the live count for your store. If the on-hand looks wrong, '
-          'file a ticket — do not adjust manually; the POS audits every '
-          'manual change against the manager PIN.'
-    ),
-    (
-      'Printer not printing receipts',
-      'Check the paper roll first (lift the top cover — there should be '
-          'a green LED and paper sticking out). If the LED is red or '
-          'blinking, power-cycle the printer (off 10 sec, on). If the '
-          'POS still does not print, file a ticket and capture the OR '
-          'number of the missed receipt.'
-    ),
-    (
-      'Barcode scanner not reading',
-      'Aim the scanner at a clean printed barcode about 10 cm away. If '
-          'no beep, unplug-replug the USB cable. If still dead, type the '
-          'item code manually in the search box and file a ticket so '
-          'the scanner can be replaced.'
-    ),
-    (
-      'Still stuck?',
-      'If none of the above answers your question, tap "Contact '
+    HelpArticle(
+      title: 'Still stuck?',
+      body: 'If none of the above answers your question, tap "Contact '
           'Support" below. Fill in the form with the OR number / item '
           'code / error message and we will reach out in chat as soon '
-          'as we see your ticket.'
+          'as we see your ticket.',
     ),
   ];
 
-  
-  List<(String, String)> get _visibleArticles {
+  List<HelpArticle> get _visibleArticles {
     final q = _query.trim().toLowerCase();
     if (q.isEmpty) return _articles;
     return _articles
         .where((a) =>
-            a.$1.toLowerCase().contains(q) || a.$2.toLowerCase().contains(q))
+            a.title.toLowerCase().contains(q) ||
+            a.body.toLowerCase().contains(q))
         .toList(growable: false);
   }
 
@@ -315,7 +219,7 @@ class _HelpGuideScreenState extends State<HelpGuideScreen> {
                       padding: const EdgeInsets.fromLTRB(20, 4, 20, 12),
                       itemCount: visible.length,
                       itemBuilder: (_, i) =>
-                          _buildArticle(visible[i].$1, visible[i].$2, text),
+                          _buildArticle(visible[i], text),
                     ),
             ),
             Container(
@@ -455,7 +359,7 @@ class _HelpGuideScreenState extends State<HelpGuideScreen> {
     );
   }
 
-  Widget _buildArticle(String title, String body, TextTheme text) {
+  Widget _buildArticle(HelpArticle a, TextTheme text) {
     return Container(
       margin: const EdgeInsets.only(bottom: 10),
       decoration: BoxDecoration(
@@ -472,7 +376,7 @@ class _HelpGuideScreenState extends State<HelpGuideScreen> {
           shape: const Border(),
           collapsedShape: const Border(),
           title: Text(
-            title,
+            a.title,
             style: text.bodyMedium?.copyWith(
               fontWeight: FontWeight.w600,
               color: Brand.textPrimary,
@@ -484,16 +388,115 @@ class _HelpGuideScreenState extends State<HelpGuideScreen> {
               const EdgeInsets.fromLTRB(16, 0, 16, 14),
           expandedAlignment: Alignment.centerLeft,
           children: [
-            Text(
-              body,
-              style: text.bodySmall?.copyWith(
-                color: Brand.textMuted,
-                height: 1.55,
+            if (a.body.isNotEmpty)
+              Text(
+                a.body,
+                style: text.bodySmall?.copyWith(
+                  color: Brand.textMuted,
+                  height: 1.55,
+                ),
               ),
-            ),
+            // Inline images attached to the topic (any help_content
+            // row that carried an image_path). Hosted as static files
+            // under /uploads/help/ on the support server — no auth.
+            // Tap to expand into a full-screen viewer.
+            for (final p in a.imagePaths)
+              Padding(
+                padding: const EdgeInsets.only(top: 10),
+                child: _buildHelpImage(p),
+              ),
           ],
         ),
       ),
+    );
+  }
+
+  Widget _buildHelpImage(String path) {
+    final url = '${widget.api.baseUrl}/uploads/help/$path';
+    return GestureDetector(
+      onTap: () => _openImagePreview(url, path),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(8),
+        child: Container(
+          decoration: BoxDecoration(
+            color: Brand.subtle,
+            border: Border.all(color: Brand.stroke),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Image.network(
+            url,
+            fit: BoxFit.contain,
+            loadingBuilder: (_, child, progress) {
+              if (progress == null) return child;
+              return const SizedBox(
+                height: 160,
+                child: Center(
+                  child: SizedBox(
+                    width: 22, height: 22,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                ),
+              );
+            },
+            errorBuilder: (_, __, ___) => Container(
+              height: 80,
+              alignment: Alignment.center,
+              padding: const EdgeInsets.all(12),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: const [
+                  Icon(Icons.broken_image_outlined,
+                      size: 18, color: Brand.textMuted),
+                  SizedBox(width: 6),
+                  Text('Image unavailable',
+                      style: TextStyle(
+                          color: Brand.textMuted, fontSize: 12)),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openImagePreview(String url, String filename) async {
+    await showDialog<void>(
+      context: context,
+      barrierColor: Colors.black.withValues(alpha: 0.85),
+      builder: (ctx) {
+        return Dialog(
+          backgroundColor: Colors.transparent,
+          insetPadding: const EdgeInsets.all(16),
+          child: Stack(
+            children: [
+              GestureDetector(
+                onTap: () => Navigator.of(ctx).pop(),
+                child: const SizedBox.expand(),
+              ),
+              Center(
+                child: InteractiveViewer(
+                  panEnabled: true,
+                  minScale: 0.5,
+                  maxScale: 4.0,
+                  child: Image.network(url, fit: BoxFit.contain),
+                ),
+              ),
+              Positioned(
+                top: 8, right: 8,
+                child: Material(
+                  color: Colors.black.withValues(alpha: 0.55),
+                  shape: const CircleBorder(),
+                  child: IconButton(
+                    icon: const Icon(Icons.close, color: Colors.white),
+                    onPressed: () => Navigator.of(ctx).pop(),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 }

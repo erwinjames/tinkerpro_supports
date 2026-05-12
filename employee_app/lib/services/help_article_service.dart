@@ -5,13 +5,19 @@ import 'session_store.dart';
 
 /// One row of the FAQ list rendered in HelpGuideScreen. Built from
 /// the admin Help Center (`help` + `help_content` tables) via the
-/// `help.public` API action; the screen only needs a flat title +
-/// plain-text body per entry, so we flatten the topic + blocks at
-/// fetch time.
+/// `help.public` API action; we flatten the topic + blocks into a
+/// title, a plain-text body (HTML → text), and an ordered list of
+/// raw image filenames (resolved by the screen against
+/// `${baseUrl}/uploads/help/{path}`).
 class HelpArticle {
-  HelpArticle({required this.title, required this.body});
+  const HelpArticle({
+    required this.title,
+    required this.body,
+    this.imagePaths = const [],
+  });
   final String title;
   final String body;
+  final List<String> imagePaths;
 }
 
 /// Fetches the admin-managed help topics, caches the last good
@@ -67,42 +73,50 @@ class HelpArticleService {
       if (t is! Map) continue;
       final title = (t['title'] ?? '').toString().trim();
       if (title.isEmpty) continue;
-      final body = _composeBody(Map<String, dynamic>.from(t));
-      if (body.isEmpty) continue;
-      out.add(HelpArticle(title: title, body: body));
+      final composed = _compose(Map<String, dynamic>.from(t));
+      if (composed.body.isEmpty && composed.imagePaths.isEmpty) continue;
+      out.add(HelpArticle(
+        title: title,
+        body: composed.body,
+        imagePaths: composed.imagePaths,
+      ));
     }
     return out;
   }
 
-  /// Compose the article body from the topic's `description` (plain
-  /// intro) plus every `help_content` block's `text_content`. Blocks
-  /// store HTML emitted by TinyMCE in the admin — we strip tags down
-  /// to plain text and unescape the common entities the editor adds
-  /// so the FAQ renders as readable paragraphs without depending on
-  /// a heavyweight HTML renderer.
-  static String _composeBody(Map<String, dynamic> topic) {
-    final pieces = <String>[];
+  /// Walk the topic's description + each help_content block, peel
+  /// the HTML down to plain text, and collect any attached image
+  /// filenames as a separate list (so the renderer can show them
+  /// inline beneath the text instead of leaking [image: …]
+  /// placeholders into the body).
+  static ({String body, List<String> imagePaths}) _compose(
+    Map<String, dynamic> topic,
+  ) {
+    final textPieces = <String>[];
+    final images = <String>[];
     final desc = (topic['description'] ?? '').toString().trim();
-    if (desc.isNotEmpty) pieces.add(_stripHtml(desc));
+    if (desc.isNotEmpty) textPieces.add(_stripHtml(desc));
     final blocks = topic['blocks'];
     if (blocks is List) {
       for (final b in blocks) {
         if (b is! Map) continue;
         final raw = (b['text_content'] ?? '').toString();
         final cleaned = _stripHtml(raw);
-        if (cleaned.isNotEmpty) pieces.add(cleaned);
+        if (cleaned.isNotEmpty) textPieces.add(cleaned);
         final img = (b['image_path'] ?? '').toString().trim();
-        if (img.isNotEmpty) pieces.add('[image: $img]');
+        if (img.isNotEmpty) images.add(img);
       }
     }
-    return pieces.join('\n\n').trim();
+    return (body: textPieces.join('\n\n').trim(), imagePaths: images);
   }
 
   /// Cheap HTML → plain-text converter:
   /// * `<br>` and `</p>`/`</div>`/`</li>` become newlines.
   /// * Bullet `<li>` openers get a leading "• ".
   /// * Every remaining tag is dropped.
-  /// * The handful of entities TinyMCE actually emits are unescaped.
+  /// * Named entities TinyMCE emits (`&bull;`, smart-quotes, dashes,
+  ///   ellipsis, etc.) are decoded; numeric refs (`&#160;`, `&#x2019;`)
+  ///   handled via a single regex sweep.
   /// * Multiple blank lines collapse to one to keep the FAQ tidy.
   static String _stripHtml(String s) {
     if (s.isEmpty) return s;
@@ -114,17 +128,52 @@ class HelpArticleService {
         .replaceAll(RegExp(r'</li\s*>', caseSensitive: false), '\n')
         .replaceAllMapped(RegExp(r'<li[^>]*>', caseSensitive: false),
             (_) => '• ')
-        // Now drop every tag.
-        .replaceAll(RegExp(r'<[^>]+>'), '')
-        // Common entities. Order matters: do `&amp;` last so we don't
-        // re-expand entities we just unescaped.
-        .replaceAll('&nbsp;', ' ')
-        .replaceAll('&quot;', '"')
-        .replaceAll('&#39;', "'")
-        .replaceAll('&apos;', "'")
-        .replaceAll('&lt;', '<')
-        .replaceAll('&gt;', '>')
-        .replaceAll('&amp;', '&');
+        // Now drop every remaining tag.
+        .replaceAll(RegExp(r'<[^>]+>'), '');
+    // Numeric entity sweep first (so we don't accidentally pre-decode
+    // an `&amp;#39;` into `&#39;` and miss it). Handles both decimal
+    // (`&#39;`) and hex (`&#x27;`) forms.
+    out = out.replaceAllMapped(
+      RegExp(r'&#(x?[0-9a-fA-F]+);'),
+      (m) {
+        final raw = m.group(1) ?? '';
+        try {
+          final n = raw.startsWith('x') || raw.startsWith('X')
+              ? int.parse(raw.substring(1), radix: 16)
+              : int.parse(raw);
+          if (n > 0 && n < 0x110000) return String.fromCharCode(n);
+        } catch (_) {/* fall through */}
+        return m.group(0)!;
+      },
+    );
+    // Named entities. Includes everything TinyMCE actually emits on
+    // this admin's content (bullet, smart quotes, dashes, ellipsis,
+    // trademark, etc.). Order matters: keep `&amp;` last so we don't
+    // re-decode entities we just unescaped.
+    const named = <String, String>{
+      '&nbsp;': ' ',
+      '&quot;': '"',
+      '&apos;': "'",
+      '&lt;': '<',
+      '&gt;': '>',
+      '&bull;': '•', // •
+      '&middot;': '·', // ·
+      '&rsquo;': '’', // ’
+      '&lsquo;': '‘', // ‘
+      '&rdquo;': '”', // ”
+      '&ldquo;': '“', // “
+      '&laquo;': '«', // «
+      '&raquo;': '»', // »
+      '&ndash;': '–', // –
+      '&mdash;': '—', // —
+      '&hellip;': '…', // …
+      '&trade;': '™', // ™
+      '&reg;': '®', // ®
+      '&copy;': '©', // ©
+      '&deg;': '°', // °
+    };
+    named.forEach((k, v) => out = out.replaceAll(k, v));
+    out = out.replaceAll('&amp;', '&');
     // Collapse 3+ newlines and trim trailing whitespace per line.
     out = out.replaceAll(RegExp(r'\n{3,}'), '\n\n');
     out = out.split('\n').map((l) => l.trimRight()).join('\n').trim();
