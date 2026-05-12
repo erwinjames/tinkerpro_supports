@@ -227,12 +227,13 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
   /// renderer swaps in the interactive Allow/Deny card when this
   /// returns true.
   ///
-  /// Targeting: if the /remote message body contains `@{uid}` (a
-  /// digit-only mention), only the matching user sees the card —
-  /// avoids leaking the Allow/Deny prompt to every colleague in a
-  /// shared thread. Untargeted /remote messages (legacy) still fall
-  /// through as broadcast to everyone, so existing flows don't
-  /// break.
+  /// Targeting is now REQUIRED: the body must include `@{uid}` and
+  /// the uid must equal `_meId`. Untargeted /remote messages don't
+  /// trigger the card on anyone — that prevents the Allow/Deny
+  /// prompt from leaking to every colleague in a shared thread.
+  /// Admins should drive `/remote` through the Confirm button on a
+  /// /request bubble (which always emits the @{uid} target) or type
+  /// `/remote @{uid}` explicitly.
   bool _isPendingRemoteRequest(ChatMessage m) {
     if (m.senderId == _meId) return false;
     final body = m.body.toLowerCase();
@@ -240,10 +241,9 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
     if (_resolvedRemotes.contains(m.id)) return false;
     final mention =
         RegExp(r'/remote\s+@(\d+)\b').firstMatch(body);
-    if (mention != null) {
-      final targetId = int.tryParse(mention.group(1) ?? '');
-      if (targetId == null || targetId != _meId) return false;
-    }
+    if (mention == null) return false;
+    final targetId = int.tryParse(mention.group(1) ?? '');
+    if (targetId == null || targetId != _meId) return false;
     return true;
   }
 
