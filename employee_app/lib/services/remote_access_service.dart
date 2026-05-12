@@ -41,11 +41,29 @@ class RemoteAccessService {
   /// past the store-setup screen). Extracts the bundled binary out of
   /// `assets/rustdesk/...` into a writable runtime location and marks
   /// it executable. Cheap on subsequent calls.
+  ///
+  /// Idempotent at two levels:
+  /// 1. _prepared latches so a single Dart-VM lifetime never re-runs
+  ///    the work.
+  /// 2. If a RustDesk process is already running on the host (from a
+  ///    previous employee-app session, an admin-installed system
+  ///    RustDesk, or just the user leaving it open) we extract the
+  ///    bundled binary path (so other helpers like getRustDeskId
+  ///    still work) but skip the kill + reconfigure + relaunch.
+  ///    The employee asked for "open once and leave it running" —
+  ///    every employee-app open was previously killing RustDesk and
+  ///    spawning a fresh window in the foreground, which was the
+  ///    annoying part.
   Future<void> prepare() async {
     if (_prepared) return;
     _prepared = true;
     try {
       _bundledBinaryPath = await _extractBundled();
+      if (await _rustDeskAlreadyRunning()) {
+        debugPrint('[remote-access] RustDesk already running — '
+            'skipping kill + reconfigure + relaunch.');
+        return;
+      }
       // Stop any pre-existing RustDesk so it picks up our freshly
       // written config on next launch — RustDesk caches the TOML in
       // memory at startup and won't re-read it while running. Without
@@ -66,6 +84,33 @@ class RemoteAccessService {
     } catch (e) {
       debugPrint('[remote-access] prepare() failed: $e');
     }
+  }
+
+  /// Cheap probe for whether a RustDesk process exists on this
+  /// machine. Used by [prepare] to decide whether to leave an
+  /// existing instance alone (the common case after the first
+  /// employee-app launch of the day).
+  Future<bool> _rustDeskAlreadyRunning() async {
+    try {
+      if (Platform.isWindows) {
+        final r = await Process.run(
+          'tasklist',
+          ['/FI', 'IMAGENAME eq rustdesk.exe', '/NH', '/FO', 'CSV'],
+          runInShell: false,
+        ).timeout(const Duration(seconds: 4));
+        final out = '${r.stdout}'.toLowerCase();
+        return out.contains('rustdesk.exe');
+      }
+      if (Platform.isLinux || Platform.isMacOS) {
+        final r = await Process.run(
+          'pgrep',
+          ['-x', 'rustdesk'],
+          runInShell: false,
+        ).timeout(const Duration(seconds: 4));
+        return r.exitCode == 0;
+      }
+    } catch (_) {/* probe failed — assume not running */}
+    return false;
   }
 
   Future<void> _killExistingRustDesk() async {
@@ -195,13 +240,30 @@ class RemoteAccessService {
 
   /// Launch the RustDesk client. Best-effort — we can't reliably wait
   /// for it to be "ready"; the user will see RustDesk's window open
-  /// and the admin's connection request will trigger RustDesk's own
-  /// accept/deny prompt independently of this app. Returns true if
-  /// the process was at least spawned.
+  /// (minimized on Windows) and the admin's connection request will
+  /// trigger RustDesk's own accept/deny prompt independently of this
+  /// app. Returns true if the process was at least spawned.
+  ///
+  /// Windows: spawned via `cmd /c start /min` so RustDesk lands in
+  /// the taskbar/tray without stealing focus from the POS. The
+  /// employee already gets a clear UX signal via the chat header's
+  /// "remote password" icon — we don't need RustDesk fighting for
+  /// the foreground.
   Future<bool> launch() async {
     final binary = await _resolveBinary();
     if (binary == null) return false;
     try {
+      if (Platform.isWindows) {
+        // start.exe consumes its first quoted arg as a window title,
+        // so we pass an empty "" before the binary path.
+        await Process.start(
+          'cmd.exe',
+          ['/c', 'start', '/min', '', binary],
+          mode: ProcessStartMode.detached,
+          runInShell: false,
+        );
+        return true;
+      }
       // Detached so the RustDesk window outlives a brief Flutter
       // foreground/background transition.
       await Process.start(
