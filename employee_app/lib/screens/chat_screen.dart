@@ -44,6 +44,7 @@ class EmployeeChatScreen extends StatefulWidget {
     required this.store,
     required this.info,
     this.sinceMessageId,
+    this.onTicketClosed,
   });
 
   final ApiClient api;
@@ -62,6 +63,14 @@ class EmployeeChatScreen extends StatefulWidget {
   /// past tickets stays hidden. Null means full-history (legacy
   /// behavior).
   final int? sinceMessageId;
+
+  /// Invoked when the chat detects that the scoped ticket has been
+  /// resolved by an admin. The caller (HelpGuideScreen) supplies a
+  /// closure that re-renders the guide screen in place of this chat
+  /// route, so the employee lands back at the FAQ once their issue
+  /// is closed out. Only fires while [sinceMessageId] is non-null
+  /// (scoped mode); legacy unscoped chat keeps its existing behavior.
+  final void Function(BuildContext context)? onTicketClosed;
 
   @override
   State<EmployeeChatScreen> createState() => _EmployeeChatScreenState();
@@ -94,6 +103,19 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
   /// quote preview above it, and the next send prepends a quoted line
   /// to the body. Cleared on send or by tapping the preview's ✕.
   ChatMessage? _replyContext;
+
+  /// Ticket id this chat is scoped to (parsed from the body of the
+  /// message at `widget.sinceMessageId`). Used to recognise the
+  /// matching "✅ … marked ticket #N as resolved" event and trigger
+  /// the back-to-Help-Guide flow. Null while unscoped or until the
+  /// anchor message has been parsed.
+  int? _scopedTicketId;
+
+  /// Latches once we've already navigated away on a resolved event,
+  /// so a duplicate event or a late-arriving second resolved message
+  /// can't fire onTicketClosed twice (which would push two new help
+  /// guide screens on top of each other).
+  bool _closedFromResolution = false;
 
   /// id of the message currently being hovered. Drives the
   /// fade-in/out of the inline ⋮ action button next to each bubble
@@ -180,6 +202,24 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
         : list
             .where((m) => (m.persistedId ?? 0) >= anchor)
             .toList(growable: false);
+    // Pull the ticket id out of the anchor message so we can match
+    // a resolved event later. The anchor is the "🎫 Ticket #N
+    // submitted…" bubble HelpGuideScreen posted on Contact Support.
+    if (anchor != null) {
+      ChatMessage? anchorMsg;
+      for (final m in scoped) {
+        if ((m.persistedId ?? 0) == anchor) {
+          anchorMsg = m;
+          break;
+        }
+      }
+      if (anchorMsg != null) {
+        final ev = _detectTicketEvent(anchorMsg.body);
+        if (ev != null && ev.kind == _TicketEventKind.submitted) {
+          _scopedTicketId = ev.id;
+        }
+      }
+    }
     setState(() {
       _messages
         ..clear()
@@ -217,6 +257,35 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
       // /remote messages are rendered as interactive cards inline in
       // the chat (see _buildBubble). No dialog needed — user just
       // taps Allow/Deny on the bubble itself.
+
+      // Ticket-resolved auto-close. When the admin marks the ticket
+      // this scoped chat is tracking as resolved, surface a brief
+      // confirmation and bounce the employee back to HelpGuideScreen
+      // via the parent-supplied callback. Skip when unscoped (full
+      // history mode), when the ids don't match (a different
+      // ticket's resolution), or when we've already closed once.
+      if (!_closedFromResolution &&
+          _scopedTicketId != null &&
+          widget.onTicketClosed != null) {
+        final ev = _detectTicketEvent(m.body);
+        if (ev != null &&
+            ev.kind == _TicketEventKind.resolved &&
+            ev.id == _scopedTicketId) {
+          _closedFromResolution = true;
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(
+              'Ticket #${ev.id} resolved by ${ev.agentName.isNotEmpty ? ev.agentName : "support"}.',
+            ),
+            duration: const Duration(seconds: 2),
+          ));
+          // Give the snackbar a beat to register before we tear the
+          // route down.
+          Future<void>.delayed(const Duration(milliseconds: 900), () {
+            if (!mounted) return;
+            widget.onTicketClosed!(context);
+          });
+        }
+      }
     }
   }
 

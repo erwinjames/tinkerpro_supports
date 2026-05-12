@@ -238,6 +238,26 @@ class _HelpGuideScreenState extends State<HelpGuideScreen> {
           store: widget.store,
           info: widget.info,
           sinceMessageId: anchorId,
+          // When the admin resolves this ticket, chat hands control
+          // back to a fresh HelpGuideScreen so the employee starts a
+          // new self-serve flow (search the FAQ or file another
+          // ticket). Using pushReplacement again so the closed chat
+          // route is gone from the stack.
+          onTicketClosed: (ctx) {
+            Navigator.of(ctx).pushReplacement(
+              MaterialPageRoute(
+                builder: (_) => HelpGuideScreen(
+                  api: widget.api,
+                  chat: widget.chat,
+                  realtime: widget.realtime,
+                  calls: widget.calls,
+                  lan: widget.lan,
+                  store: widget.store,
+                  info: widget.info,
+                ),
+              ),
+            );
+          },
         ),
       ),
     );
