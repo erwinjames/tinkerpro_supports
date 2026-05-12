@@ -120,6 +120,7 @@ class ApiClient {
     required Map<String, dynamic> fields,
     required MultipartFile file,
     String fileField = 'file',
+    void Function(int sent, int total)? onProgress,
   }) async {
     final fd = FormData.fromMap({
       'as_guest': '1',
@@ -130,6 +131,7 @@ class ApiClient {
       '/api.php',
       queryParameters: {'action': action},
       data: fd,
+      onSendProgress: onProgress,
     );
     return _decode(res);
   }

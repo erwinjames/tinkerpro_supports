@@ -140,7 +140,11 @@ class ChatService {
   /// Upload + claim. Returns the attachment id ready to be cited by
   /// the next [send] call. Throws [UploadException] with the server's
   /// human-readable message on failure so the UI can show it.
-  Future<ChatAttachment> uploadAttachment(int convId, File file) async {
+  Future<ChatAttachment> uploadAttachment(
+    int convId,
+    File file, {
+    void Function(int sent, int total)? onProgress,
+  }) async {
     if (!await file.exists()) {
       throw UploadException('File no longer exists on disk');
     }
@@ -157,7 +161,9 @@ class ChatService {
 
     final mp = await dio.MultipartFile.fromFile(file.path, filename: filename);
     final res = await api.uploadChat('chat.uploadAttachment',
-        fields: {'conversation_id': convId.toString()}, file: mp);
+        fields: {'conversation_id': convId.toString()},
+        file: mp,
+        onProgress: onProgress);
     if (res['success'] != true || res['attachment'] is! Map) {
       throw UploadException(
           (res['message'] as String?)?.trim().isNotEmpty == true

@@ -86,6 +86,20 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
   /// hover-reveal pattern that mirrors the web admin).
   int? _hoveredMessageId;
 
+  /// Files the user has picked but not yet sent. Rendered as a strip
+  /// of preview tiles above the composer — each tile shows the file
+  /// icon/thumbnail + name and (during upload) a per-file progress
+  /// bar. The tiles persist across composer changes; pressing Send
+  /// uploads them all in sequence, then posts a single message with
+  /// every resulting attachment id bound to it. Pressing ✕ on a tile
+  /// removes it from the queue (disabled mid-upload).
+  final List<_PendingAttachment> _pendingAttachments = [];
+
+  /// True while [_send] is mid-flight uploading the pending queue.
+  /// Disables the picker, the remove buttons and the Send button so a
+  /// stray tap can't kick off a duplicate batch.
+  bool _isSending = false;
+
   /// Most recent `busy` presence from a *different* terminal in our
   /// conversation. While non-null, this terminal's call buttons grey
   /// out and a banner appears so a tech doesn't fire a competing call
@@ -437,8 +451,12 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
   }
 
   Future<void> _send() async {
+    if (_isSending) return;
     final text = _composer.text.trim();
-    if (text.isEmpty) return;
+    // With pending attachments we allow an empty body — that just
+    // sends a message with the files and no caption. Plain text-only
+    // sends still require something to type.
+    if (text.isEmpty && _pendingAttachments.isEmpty) return;
     // Slash-commands hijack the send action so they never hit the wire
     // as a chat message. `/ticket` opens the ticket form; on submit
     // it returns an outcome which we then post back into the chat as
@@ -504,11 +522,79 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
       setState(() => _replyContext = null);
     }
     _composer.clear();
+
+    // Upload phase: walk the pending queue, surfacing per-file progress
+    // on each tile via setState. We upload sequentially (not in parallel)
+    // so the user's network isn't fan-saturated by a 10-file batch — a
+    // single bad mobile-hotspot connection would otherwise stall every
+    // upload at once. Any failure aborts the batch: we keep the failed
+    // tile + any not-yet-uploaded tiles visible (with their error) so the
+    // user can retry without re-picking everything.
+    final attachmentIds = <int>[];
+    if (_pendingAttachments.isNotEmpty) {
+      setState(() => _isSending = true);
+      for (final p in List<_PendingAttachment>.from(_pendingAttachments)) {
+        try {
+          final att = await widget.chat.uploadAttachment(
+            _convId,
+            p.file,
+            onProgress: (sent, total) {
+              if (!mounted) return;
+              if (total <= 0) return;
+              setState(() {
+                p.progress = sent / total;
+                p.uploading = true;
+              });
+            },
+          );
+          attachmentIds.add(att.id);
+          if (mounted) {
+            setState(() {
+              p.progress = 1.0;
+              p.uploading = false;
+              p.uploaded = true;
+            });
+          }
+        } on UploadException catch (e) {
+          if (mounted) {
+            setState(() {
+              p.uploading = false;
+              p.errorMsg = e.message;
+              _isSending = false;
+            });
+            _toast('Upload failed: ${e.message}');
+          }
+          // Put the typed text back so the user can retry without
+          // losing what they wrote.
+          if (text.isNotEmpty) _composer.text = text;
+          return;
+        } catch (e) {
+          if (mounted) {
+            setState(() {
+              p.uploading = false;
+              p.errorMsg = e.toString();
+              _isSending = false;
+            });
+            _toast('Upload failed: $e');
+          }
+          if (text.isNotEmpty) _composer.text = text;
+          return;
+        }
+      }
+    }
+
     final msg = await widget.chat.send(
       convId: _convId,
       body: finalText,
       clientNonce: _newNonce(),
+      attachmentIds: attachmentIds,
     );
+    if (mounted) {
+      setState(() {
+        _pendingAttachments.clear();
+        _isSending = false;
+      });
+    }
     if (msg != null && mounted) {
       // Optimistic-ish: server returned the canonical message; insert
       // unless the realtime stream already delivered it.
@@ -519,36 +605,36 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
     }
   }
 
+  /// File picker: multi-select. Files just go onto the [_pendingAttachments]
+  /// queue — actual upload happens when the user clicks Send. Picking
+  /// is disabled mid-send so a stray click can't append a file into a
+  /// batch that's already uploading.
   Future<void> _attach() async {
-    final result = await FilePicker.platform.pickFiles(withData: false);
-    if (result == null || result.files.isEmpty) return;
-    final path = result.files.first.path;
-    if (path == null) {
-      _toast('Could not access that file (no path).');
-      return;
-    }
-
-    final ChatAttachment att;
-    try {
-      att = await widget.chat.uploadAttachment(_convId, File(path));
-    } on UploadException catch (e) {
-      if (mounted) _toast('Upload failed: ${e.message}');
-      return;
-    } catch (e) {
-      if (mounted) _toast('Upload failed: $e');
-      return;
-    }
-
-    final msg = await widget.chat.send(
-      convId: _convId,
-      body: '',
-      clientNonce: _newNonce(),
-      attachmentIds: [att.id],
+    if (_isSending) return;
+    final result = await FilePicker.platform.pickFiles(
+      withData: false,
+      allowMultiple: true,
     );
-    if (msg != null && mounted && !_messages.any((m) => m.id == msg.id)) {
-      setState(() => _messages.add(msg));
-      _scrollToBottom();
+    if (result == null || result.files.isEmpty) return;
+    final added = <_PendingAttachment>[];
+    for (final pf in result.files) {
+      final p = pf.path;
+      if (p == null || p.isEmpty) continue;
+      added.add(_PendingAttachment(File(p), pf.size));
     }
+    if (added.isEmpty) {
+      _toast('Could not access the selected file(s).');
+      return;
+    }
+    setState(() => _pendingAttachments.addAll(added));
+  }
+
+  /// Remove a single pending tile from the queue. Disabled while a
+  /// send is in flight (the tile is rendering its own progress bar
+  /// and removing mid-upload would orphan the request).
+  void _removePending(_PendingAttachment p) {
+    if (_isSending) return;
+    setState(() => _pendingAttachments.remove(p));
   }
 
   Future<void> _placeCall(CallMedia media) async {
@@ -1959,38 +2045,175 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
         mainAxisSize: MainAxisSize.min,
         children: [
           if (_replyContext != null) _buildReplyBar(),
+          if (_pendingAttachments.isNotEmpty) _buildPendingAttachmentsStrip(),
           Row(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
           IconButton(
             icon: const Icon(Icons.attach_file),
-            tooltip: 'Attach a file',
-            onPressed: _attach,
+            tooltip: _isSending ? 'Uploading…' : 'Attach a file',
+            onPressed: _isSending ? null : _attach,
           ),
           Expanded(
             child: TextField(
               controller: _composer,
               minLines: 1,
               maxLines: 5,
+              enabled: !_isSending,
               textInputAction: TextInputAction.send,
               onSubmitted: (_) => _send(),
-              decoration: const InputDecoration(
-                hintText: 'Type a message',
+              decoration: InputDecoration(
+                hintText: _isSending ? 'Uploading…' : 'Type a message',
                 border: InputBorder.none,
               ),
             ),
           ),
           const SizedBox(width: 4),
           FilledButton.icon(
-            onPressed: _send,
-            icon: const Icon(Icons.send, size: 16),
-            label: const Text('Send'),
+            onPressed: _isSending ? null : _send,
+            icon: _isSending
+                ? const SizedBox(
+                    width: 14, height: 14,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2, color: Colors.white))
+                : const Icon(Icons.send, size: 16),
+            label: Text(_isSending ? 'Sending' : 'Send'),
           ),
         ],
       ),
         ],
       ),
     );
+  }
+
+  /// Horizontally-scrollable strip of preview tiles for every file
+  /// the user has queued but not yet sent. Sits between the reply
+  /// bar (if any) and the composer row.
+  Widget _buildPendingAttachmentsStrip() {
+    return Container(
+      height: 78,
+      margin: const EdgeInsets.fromLTRB(4, 0, 4, 8),
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 4),
+        itemCount: _pendingAttachments.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 8),
+        itemBuilder: (_, i) => _buildPendingTile(_pendingAttachments[i]),
+      ),
+    );
+  }
+
+  Widget _buildPendingTile(_PendingAttachment p) {
+    final name = p.file.path.split(Platform.pathSeparator).last;
+    final isImage = _looksLikeImage(name);
+    final sizeLabel = _formatBytes(p.sizeBytes);
+    return Container(
+      width: 180,
+      decoration: BoxDecoration(
+        color: Brand.surface,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: Brand.stroke),
+      ),
+      padding: const EdgeInsets.fromLTRB(8, 6, 4, 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(6),
+            child: SizedBox(
+              width: 40, height: 40,
+              child: isImage
+                  ? Image.file(p.file, fit: BoxFit.cover,
+                      errorBuilder: (_, __, ___) => _genericFileIcon())
+                  : _genericFileIcon(),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text(
+                  name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                      fontSize: 12, fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(height: 3),
+                if (p.errorMsg != null)
+                  Text('Failed: ${p.errorMsg}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                          fontSize: 10, color: Colors.redAccent))
+                else if (p.uploading || p.progress > 0)
+                  Row(
+                    children: [
+                      Expanded(
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(2),
+                          child: LinearProgressIndicator(
+                            value: p.progress.clamp(0.0, 1.0),
+                            minHeight: 4,
+                            backgroundColor: Brand.stroke,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      Text('${(p.progress * 100).clamp(0, 100).toInt()}%',
+                          style: const TextStyle(
+                              fontSize: 10, color: Brand.textMuted)),
+                    ],
+                  )
+                else
+                  Text(sizeLabel,
+                      style: const TextStyle(
+                          fontSize: 10, color: Brand.textMuted)),
+              ],
+            ),
+          ),
+          IconButton(
+            visualDensity: VisualDensity.compact,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 22, minHeight: 22),
+            icon: const Icon(Icons.close, size: 14),
+            tooltip: 'Remove',
+            onPressed: _isSending ? null : () => _removePending(p),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _genericFileIcon() => Container(
+        color: Brand.canvas,
+        alignment: Alignment.center,
+        child: const Icon(Icons.insert_drive_file_outlined,
+            size: 22, color: Brand.textMuted),
+      );
+
+  static bool _looksLikeImage(String filename) {
+    final lower = filename.toLowerCase();
+    return lower.endsWith('.png') ||
+        lower.endsWith('.jpg') ||
+        lower.endsWith('.jpeg') ||
+        lower.endsWith('.gif') ||
+        lower.endsWith('.webp') ||
+        lower.endsWith('.bmp');
+  }
+
+  static String _formatBytes(int bytes) {
+    if (bytes <= 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB'];
+    var i = 0;
+    var n = bytes.toDouble();
+    while (n >= 1024 && i < units.length - 1) {
+      n /= 1024;
+      i++;
+    }
+    return '${n.toStringAsFixed(n < 10 && i > 0 ? 1 : 0)} ${units[i]}';
   }
 
   /// Quote preview shown above the composer while a reply is active.
@@ -2501,6 +2724,21 @@ class _MetaTile extends StatelessWidget {
       ],
     );
   }
+}
+
+/// A file the user has picked but not yet sent. Lives in
+/// `_EmployeeChatScreenState._pendingAttachments` while the preview
+/// tile is on screen, and during the [_send] upload phase its
+/// progress/uploading/errorMsg fields are mutated in-place to drive
+/// the tile's per-file LinearProgressIndicator.
+class _PendingAttachment {
+  _PendingAttachment(this.file, this.sizeBytes);
+  final File file;
+  final int sizeBytes;
+  double progress = 0.0;
+  bool uploading = false;
+  bool uploaded = false;
+  String? errorMsg;
 }
 
 enum _TicketEventKind { submitted, accepted, resolved }
