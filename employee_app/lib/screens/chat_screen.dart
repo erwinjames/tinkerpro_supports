@@ -2,10 +2,14 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math';
 
+import 'dart:typed_data';
+
+import 'package:dio/dio.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:open_filex/open_filex.dart';
+import 'package:path_provider/path_provider.dart';
 
 import '../api_client.dart';
 import '../models/chat_models.dart';
@@ -1990,10 +1994,37 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
 
   List<Widget> _renderAttachments(ChatMessage m, bool mine, TextTheme text) {
     return m.attachments.map((att) {
+      if (att.isImage) {
+        // Image attachments render as a 220px-wide thumbnail bound to
+        // the bubble. The image is fetched through Dio (cookie-auth'd)
+        // so the PHP attachment endpoint accepts the request.
+        return Padding(
+          padding: const EdgeInsets.only(top: 6),
+          child: InkWell(
+            onTap: () => _showImageViewer(att),
+            borderRadius: BorderRadius.circular(10),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(10),
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(
+                    maxWidth: 240, maxHeight: 240, minWidth: 120),
+                child: _AuthImage(
+                  dio: widget.api.rawDio,
+                  url: widget.chat.attachmentUrl(att.id),
+                  fit: BoxFit.cover,
+                  // Tile size hint lets the loader skip allocating the
+                  // full-res bitmap for a tiny chat thumbnail.
+                  cacheWidth: 480,
+                ),
+              ),
+            ),
+          ),
+        );
+      }
       return Padding(
         padding: const EdgeInsets.only(top: 6),
         child: InkWell(
-          onTap: () => _openAttachment(att),
+          onTap: () => _showAttachmentOptions(att),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -2018,6 +2049,138 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
     }).toList();
   }
 
+  /// Tap on a non-image attachment — bottom sheet offering Open
+  /// (download → temp → OS handler) or Save to Downloads. Useful
+  /// because the file might be a zip / installer / spreadsheet and we
+  /// can't preview it; either let the OS open it or let the user
+  /// stash it in their Downloads for later.
+  Future<void> _showAttachmentOptions(ChatAttachment att) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.description_outlined),
+                title: Text(att.originalName,
+                    maxLines: 1, overflow: TextOverflow.ellipsis),
+                subtitle: Text(
+                    '${att.mimeType.isEmpty ? "file" : att.mimeType} · ${_formatBytes(att.byteSize)}'),
+              ),
+              const Divider(height: 1),
+              ListTile(
+                leading: const Icon(Icons.open_in_new),
+                title: const Text('Open'),
+                subtitle: const Text('Hand off to the OS default app'),
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  _openAttachment(att);
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.download_outlined),
+                title: const Text('Save to Downloads'),
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  _saveAttachmentToDownloads(att);
+                },
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  /// Full-screen image preview with a Download button. The image is
+  /// fetched through the same auth'd Dio used inline; tap outside or
+  /// the close icon to dismiss.
+  Future<void> _showImageViewer(ChatAttachment att) async {
+    await showDialog<void>(
+      context: context,
+      barrierColor: Colors.black.withValues(alpha: 0.85),
+      builder: (ctx) {
+        return Dialog(
+          backgroundColor: Colors.transparent,
+          insetPadding: const EdgeInsets.all(16),
+          child: Stack(
+            children: [
+              // Tap the backdrop area to dismiss — InteractiveViewer
+              // captures pointer events on the image itself, so a
+              // background gesture detector handles the rest.
+              GestureDetector(
+                onTap: () => Navigator.of(ctx).pop(),
+                child: const SizedBox.expand(),
+              ),
+              Center(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(
+                      maxWidth: 1100, maxHeight: 800),
+                  child: InteractiveViewer(
+                    panEnabled: true,
+                    minScale: 0.5,
+                    maxScale: 4.0,
+                    child: _AuthImage(
+                      dio: widget.api.rawDio,
+                      url: widget.chat.attachmentUrl(att.id),
+                      fit: BoxFit.contain,
+                      // No cacheWidth here — viewer wants full res.
+                    ),
+                  ),
+                ),
+              ),
+              Positioned(
+                top: 8, right: 8,
+                child: Row(
+                  children: [
+                    Material(
+                      color: Colors.black.withValues(alpha: 0.55),
+                      shape: const CircleBorder(),
+                      child: IconButton(
+                        tooltip: 'Save to Downloads',
+                        icon: const Icon(Icons.download_outlined,
+                            color: Colors.white),
+                        onPressed: () => _saveAttachmentToDownloads(att),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Material(
+                      color: Colors.black.withValues(alpha: 0.55),
+                      shape: const CircleBorder(),
+                      child: IconButton(
+                        tooltip: 'Close',
+                        icon: const Icon(Icons.close, color: Colors.white),
+                        onPressed: () => Navigator.of(ctx).pop(),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Positioned(
+                left: 12, bottom: 12,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 10, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.55),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Text(
+                    '${att.originalName} · ${_formatBytes(att.byteSize)}',
+                    style: const TextStyle(
+                        color: Colors.white, fontSize: 12),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
   Future<void> _openAttachment(ChatAttachment att) async {
     // Stream to a temp file so the OS handler can open it.
     try {
@@ -2031,6 +2194,33 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
       }
     } catch (_) {
       if (mounted) _toast('Could not open attachment.');
+    }
+  }
+
+  /// Copy the attachment to the user's Downloads folder under its
+  /// original filename, de-duplicating with `(1)`, `(2)`, … if the
+  /// name is taken. Cookie auth carries via the shared Dio instance.
+  Future<void> _saveAttachmentToDownloads(ChatAttachment att) async {
+    try {
+      final downloads = await getDownloadsDirectory();
+      final dirPath = downloads?.path ?? Directory.systemTemp.path;
+      var target = File('$dirPath${Platform.pathSeparator}${att.originalName}');
+      if (await target.exists()) {
+        final dot = att.originalName.lastIndexOf('.');
+        final base =
+            dot > 0 ? att.originalName.substring(0, dot) : att.originalName;
+        final ext = dot > 0 ? att.originalName.substring(dot) : '';
+        var i = 1;
+        while (await target.exists()) {
+          target = File('$dirPath${Platform.pathSeparator}$base ($i)$ext');
+          i++;
+        }
+      }
+      final url = widget.chat.attachmentUrl(att.id);
+      await widget.api.rawDio.download(url, target.path);
+      if (mounted) _toast('Saved to ${target.path}');
+    } catch (e) {
+      if (mounted) _toast('Save failed: $e');
     }
   }
 
@@ -2722,6 +2912,90 @@ class _MetaTile extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// Network image fetched through Dio so the PHPSESSID cookie carries
+/// — Flutter's stock NetworkImage uses HttpClient (no cookies) and
+/// the `chat.downloadAttachment` endpoint would 401. Bytes are cached
+/// in widget state for the lifetime of this widget; the chat list
+/// recycling re-instantiates `_AuthImage` per visible bubble which is
+/// fine for current message volumes.
+class _AuthImage extends StatefulWidget {
+  const _AuthImage({
+    required this.dio,
+    required this.url,
+    this.fit = BoxFit.cover,
+    this.cacheWidth,
+  });
+  final Dio dio;
+  final String url;
+  final BoxFit fit;
+  final int? cacheWidth;
+
+  @override
+  State<_AuthImage> createState() => _AuthImageState();
+}
+
+class _AuthImageState extends State<_AuthImage> {
+  Uint8List? _bytes;
+  bool _failed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _fetch();
+  }
+
+  Future<void> _fetch() async {
+    try {
+      final res = await widget.dio.get<List<int>>(
+        widget.url,
+        options: Options(
+          responseType: ResponseType.bytes,
+          // Don't blow up on non-2xx — surface them as failed state.
+          validateStatus: (s) => s != null && s < 500,
+        ),
+      );
+      if (!mounted) return;
+      if (res.statusCode == 200 && res.data != null) {
+        setState(() => _bytes = Uint8List.fromList(res.data!));
+      } else {
+        setState(() => _failed = true);
+      }
+    } catch (_) {
+      if (mounted) setState(() => _failed = true);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_failed) {
+      return Container(
+        color: Brand.subtle,
+        alignment: Alignment.center,
+        padding: const EdgeInsets.all(16),
+        child: const Icon(Icons.broken_image_outlined,
+            color: Brand.textMuted),
+      );
+    }
+    if (_bytes == null) {
+      return Container(
+        color: Brand.subtle,
+        alignment: Alignment.center,
+        padding: const EdgeInsets.all(16),
+        child: const SizedBox(
+          width: 18, height: 18,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+      );
+    }
+    return Image.memory(
+      _bytes!,
+      fit: widget.fit,
+      cacheWidth: widget.cacheWidth,
+      gaplessPlayback: true,
     );
   }
 }
