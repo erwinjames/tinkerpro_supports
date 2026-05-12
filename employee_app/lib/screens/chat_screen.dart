@@ -250,12 +250,32 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
       }
     }
     _ticketAccepted = initiallyAccepted;
-    // If we entered scoped mode but the loaded history already shows
-    // the ticket was accepted (or resolved earlier), our persisted
-    // "still waiting" pointer is stale — wipe it so the next launch
-    // doesn't re-pin the user to a chat that's no longer pending.
-    if (anchor != null && initiallyAccepted) {
-      unawaited(widget.store.clearPendingTicket());
+    // Warm-restart resolution check. If the ticket was resolved
+    // while the app was closed, the loaded history will contain a
+    // matching `✅ … as resolved` event; treat it the same way we
+    // would a live resolved event so the screen bounces back to
+    // Help Guide instead of stranding the user in a closed chat.
+    // The waiting-card pointer is wiped here too — closed tickets
+    // are no longer pending.
+    if (anchor != null && _scopedTicketId != null) {
+      for (final m in scoped) {
+        final ev = _detectTicketEvent(m.body);
+        if (ev != null &&
+            ev.kind == _TicketEventKind.resolved &&
+            ev.id == _scopedTicketId) {
+          _closedFromResolution = true;
+          unawaited(widget.store.clearPendingTicket());
+          // Defer the navigation until after the first frame so we
+          // don't pop a route mid-build. The user sees the chat
+          // briefly before the bounce; that's fine — it's the same
+          // visual sequence as the live resolved path.
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (!mounted) return;
+            widget.onTicketClosed?.call(context);
+          });
+          break;
+        }
+      }
     }
     setState(() {
       _messages
@@ -309,8 +329,10 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
           // Already inside a setState above; the next build picks up
           // the new value. No SnackBar — the inline acceptance
           // badge in the chat itself is the signal.
-          // Persisted "still waiting" pointer is now stale.
-          unawaited(widget.store.clearPendingTicket());
+          //
+          // We intentionally keep the persisted pending pointer so an
+          // accidental close after acceptance still resumes on the
+          // same scoped chat. It only gets wiped on resolution.
         }
       }
 
