@@ -11,7 +11,7 @@ import 'services/pos_shop_service.dart';
 import 'services/remote_access_service.dart';
 import 'services/session_store.dart';
 import 'services/ticket_service.dart' show ShopInfo;
-import 'screens/chat_screen.dart';
+import 'screens/help_guide_screen.dart';
 import 'screens/store_setup_screen.dart';
 import 'theme.dart';
 
@@ -226,7 +226,9 @@ class _BootstrapState extends State<_Bootstrap> {
       );
     }
 
-    return EmployeeChatScreen(
+    // Land on the self-serve help guide first; "Contact Support" and
+    // "Open Chat" from there route into EmployeeChatScreen.
+    return HelpGuideScreen(
       api: widget.api,
       chat: _chat,
       realtime: _realtime!,
