@@ -4,6 +4,7 @@ import '../api_client.dart';
 import '../services/call_service.dart';
 import '../services/chat_realtime.dart';
 import '../services/chat_service.dart';
+import '../services/help_article_service.dart';
 import '../services/lan_presence.dart';
 import '../services/session_store.dart';
 import '../services/ticket_service.dart';
@@ -52,17 +53,47 @@ class _HelpGuideScreenState extends State<HelpGuideScreen> {
   final _search = TextEditingController();
   String _query = '';
 
+  /// Articles currently driving the list. Starts as the baked-in
+  /// fallback so the screen has something to show on a fresh install
+  /// before the first network call lands; gets replaced by the
+  /// admin-managed list once `help.public` responds (or the cached
+  /// JSON from last launch is decoded).
+  List<(String, String)> _articles = _fallbackArticles;
+
+  late final HelpArticleService _helpSvc =
+      HelpArticleService(api: widget.api, store: widget.store);
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchFromServer();
+  }
+
   @override
   void dispose() {
     _search.dispose();
     super.dispose();
   }
 
-  /// Article-style content the FAQ list renders. Each entry is a
-  /// (title, body) pair; body is plain text so it stays editable
-  /// without hunting through widget-tree changes. Focused on POS
-  /// register operations the cashier actually does at the counter.
-  static const _articles = <(String, String)>[
+  Future<void> _fetchFromServer() async {
+    final list = await _helpSvc.load();
+    if (!mounted) return;
+    // Only swap in when the server (or cache) returned something —
+    // otherwise stay on the baked-in fallback so the screen never
+    // shows an empty FAQ.
+    if (list.isEmpty) return;
+    setState(() {
+      _articles =
+          list.map((a) => (a.title, a.body)).toList(growable: false);
+    });
+  }
+
+  /// Offline-bootstrap defaults. Used until the server response (or
+  /// the cached JSON from a prior session) supersedes them. Kept
+  /// intentionally short — the admin web app's Help Center is the
+  /// source of truth, this only exists so a brand-new install can
+  /// still show something useful before its first network call.
+  static const _fallbackArticles = <(String, String)>[
     (
       'Log in to the POS',
       'On the POS terminal, enter your cashier username and PIN, then '
@@ -159,14 +190,6 @@ class _HelpGuideScreenState extends State<HelpGuideScreen> {
           'manual change against the manager PIN.'
     ),
     (
-      'Connection lost / offline mode',
-      'If the top bar shows "OFFLINE" in red, the POS keeps accepting '
-          'sales locally and syncs once the connection comes back. Card '
-          'and e-wallet payments are blocked while offline — only Cash. '
-          'If it stays offline more than 10 minutes, call IT or file a '
-          'ticket.'
-    ),
-    (
       'Printer not printing receipts',
       'Check the paper roll first (lift the top cover — there should be '
           'a green LED and paper sticking out). If the LED is red or '
@@ -190,8 +213,7 @@ class _HelpGuideScreenState extends State<HelpGuideScreen> {
     ),
   ];
 
-  /// Case-insensitive substring match on title or body. Empty query
-  /// returns the full list so the first paint shows everything.
+  
   List<(String, String)> get _visibleArticles {
     final q = _query.trim().toLowerCase();
     if (q.isEmpty) return _articles;

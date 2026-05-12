@@ -28,6 +28,8 @@ class SessionStore {
   static const _kPosManualPort    = 'pos_db_manual_port';
   static const _kShopJson         = 'pos_shop_info_json';
   static const _kShopAt           = 'pos_shop_info_saved_at';
+  static const _kHelpJson         = 'help_topics_json';
+  static const _kHelpAt           = 'help_topics_saved_at';
 
   static Future<SessionStore> open() async {
     final prefs = await SharedPreferences.getInstance();
@@ -128,6 +130,17 @@ class SessionStore {
   Future<void> clearCachedShop() async {
     await _prefs.remove(_kShopJson);
     await _prefs.remove(_kShopAt);
+  }
+
+  /// Raw JSON string of the last successful `help.public` response.
+  /// HelpGuideScreen falls back to this on a cold launch with no
+  /// network so the FAQ stays usable offline. Null when nothing has
+  /// ever been fetched (fresh install before first connection).
+  String? get cachedHelpJson => _prefs.getString(_kHelpJson);
+
+  Future<void> saveCachedHelpJson(String raw) async {
+    await _prefs.setString(_kHelpJson, raw);
+    await _prefs.setInt(_kHelpAt, DateTime.now().millisecondsSinceEpoch);
   }
 
   /// Wipe everything — used by the "reset store" path if you ever want to
