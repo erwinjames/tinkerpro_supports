@@ -223,12 +223,27 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
   }
 
   /// True when `m` is an incoming `/remote` request that hasn't been
-  /// resolved yet. Used by the bubble renderer to swap in the
-  /// interactive Allow/Deny card.
+  /// resolved yet AND is addressed to this employee. The bubble
+  /// renderer swaps in the interactive Allow/Deny card when this
+  /// returns true.
+  ///
+  /// Targeting: if the /remote message body contains `@{uid}` (a
+  /// digit-only mention), only the matching user sees the card —
+  /// avoids leaking the Allow/Deny prompt to every colleague in a
+  /// shared thread. Untargeted /remote messages (legacy) still fall
+  /// through as broadcast to everyone, so existing flows don't
+  /// break.
   bool _isPendingRemoteRequest(ChatMessage m) {
     if (m.senderId == _meId) return false;
-    if (!m.body.toLowerCase().contains('/remote')) return false;
+    final body = m.body.toLowerCase();
+    if (!body.contains('/remote')) return false;
     if (_resolvedRemotes.contains(m.id)) return false;
+    final mention =
+        RegExp(r'/remote\s+@(\d+)\b').firstMatch(body);
+    if (mention != null) {
+      final targetId = int.tryParse(mention.group(1) ?? '');
+      if (targetId == null || targetId != _meId) return false;
+    }
     return true;
   }
 
@@ -356,9 +371,10 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
   }
 
   /// Post a remote-desktop-access request bubble on the employee's
-  /// behalf. The admin sees a recognisably-formatted message they can
-  /// answer by sending /remote back (which triggers the existing
-  /// Allow/Deny card on this side).
+  /// behalf. The body embeds `[uid:{meId}]` so the admin's Confirm
+  /// button can send a /remote targeted at this exact employee —
+  /// without that, /remote broadcasts to every colleague in the
+  /// conversation and ALL of them see the Allow/Deny card.
   ///
   /// Avoids embedding the literal string "/remote" so the message
   /// doesn't accidentally trip the inline /remote-card renderer on
@@ -366,7 +382,8 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
   Future<void> _sendRemoteAccessRequest() async {
     final me = widget.info.meName.isEmpty ? 'A teammate' : widget.info.meName;
     final body =
-        '🖥️ $me is requesting a remote-desktop session. Please initiate when ready.';
+        '🖥️ $me [uid:$_meId] is requesting a remote-desktop session. '
+        'Admin: tap Confirm in your chat to start the handoff.';
     final msg = await widget.chat.send(
       convId: _convId,
       body: body,
