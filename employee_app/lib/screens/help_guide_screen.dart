@@ -138,14 +138,6 @@ class HelpGuideScreen extends StatelessWidget {
     );
   }
 
-  void _openChat(BuildContext context) {
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => _chatScreen(),
-      ),
-    );
-  }
-
   EmployeeChatScreen _chatScreen() => EmployeeChatScreen(
         api: api,
         chat: chat,
@@ -166,16 +158,6 @@ class HelpGuideScreen extends StatelessWidget {
         backgroundColor: Brand.canvas,
         foregroundColor: Brand.textPrimary,
         elevation: 0,
-        actions: [
-          // Power-user escape hatch in the app bar too, so the chat
-          // is always one tap away regardless of scroll position.
-          TextButton.icon(
-            onPressed: () => _openChat(context),
-            icon: const Icon(Icons.chat_bubble_outline, size: 18),
-            label: const Text('Open Chat'),
-          ),
-          const SizedBox(width: 4),
-        ],
       ),
       body: SafeArea(
         child: Column(
@@ -196,33 +178,16 @@ class HelpGuideScreen extends StatelessWidget {
                 color: Brand.canvas,
                 border: Border(top: BorderSide(color: Brand.stroke)),
               ),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: () => _openChat(context),
-                      icon: const Icon(Icons.chat_bubble_outline),
-                      label: const Text('I got it — Open Chat'),
-                      style: OutlinedButton.styleFrom(
-                        padding:
-                            const EdgeInsets.symmetric(vertical: 14),
-                      ),
-                    ),
+              child: SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  onPressed: () => _contactSupport(context),
+                  icon: const Icon(Icons.support_agent),
+                  label: const Text('Contact Support'),
+                  style: FilledButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 14),
                   ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    flex: 2,
-                    child: FilledButton.icon(
-                      onPressed: () => _contactSupport(context),
-                      icon: const Icon(Icons.support_agent),
-                      label: const Text('Contact Support'),
-                      style: FilledButton.styleFrom(
-                        padding:
-                            const EdgeInsets.symmetric(vertical: 14),
-                      ),
-                    ),
-                  ),
-                ],
+                ),
               ),
             ),
           ],
