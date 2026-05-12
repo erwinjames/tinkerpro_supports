@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
+import 'package:window_manager/window_manager.dart';
 
 import 'api_client.dart';
 import 'services/call_service.dart';
@@ -18,6 +20,14 @@ import 'theme.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // window_manager is desktop-only; guard so the same source still
+  // builds on mobile if we ever target it. On Windows the chat
+  // screen later toggles setAlwaysOnTop / setPreventClose around
+  // the "waiting for ticket acceptance" state — initializing here
+  // is the prerequisite for those calls to take effect.
+  if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
+    await windowManager.ensureInitialized();
+  }
   final api = await ApiClient.create();
   final store = await SessionStore.open();
   runApp(EmployeeApp(api: api, store: store));

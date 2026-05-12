@@ -41,6 +41,12 @@ dependencies:
   open_filex: ^4.5.0
   cached_network_image: ^3.4.1
 
+  # Desktop window control — used by HelpGuide → scoped chat to force
+  # the "waiting for ticket acceptance" screen on top of the POS UI
+  # and intercept the X button so the cashier can't accidentally
+  # dismiss the screen while their ticket is still in the queue.
+  window_manager: ^0.4.3
+
   # POS shop info read direct from MariaDB on the LAN — fully automatic,
   # no PHP shim required. Vendored fork of mysql_client (third_party/
   # mysql_client_patched/) that fixes the empty-password handshake bug

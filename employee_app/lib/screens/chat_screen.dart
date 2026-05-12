@@ -11,6 +11,7 @@ import 'package:flutter/services.dart'
     show Clipboard, ClipboardData, KeyDownEvent, LogicalKeyboardKey;
 import 'package:open_filex/open_filex.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:window_manager/window_manager.dart';
 
 import '../api_client.dart';
 import '../models/chat_models.dart';
@@ -76,7 +77,8 @@ class EmployeeChatScreen extends StatefulWidget {
   State<EmployeeChatScreen> createState() => _EmployeeChatScreenState();
 }
 
-class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
+class _EmployeeChatScreenState extends State<EmployeeChatScreen>
+    with WindowListener {
   final _composer = TextEditingController();
   final _scroll = ScrollController();
   final List<ChatMessage> _messages = [];
@@ -187,10 +189,28 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
     _deletedSub =
         widget.realtime.messageDeletedEvents.listen(_onMessageDeleted);
     widget.calls.addListener(_onCallChange);
+    // Desktop-only window lock during the waiting-for-acceptance
+    // phase. Apply the initial state on the next frame, after
+    // _loadHistory has settled _ticketAccepted from any cached
+    // backlog; otherwise we'd briefly lock then immediately unlock
+    // for a chat the admin already accepted.
+    if (_isDesktop) {
+      windowManager.addListener(this);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _applyWindowLock(_shouldLockWindow);
+      });
+    }
   }
 
   @override
   void dispose() {
+    if (_isDesktop) {
+      windowManager.removeListener(this);
+      // Always release on tear-down — a parent route (HelpGuide /
+      // call screen) shouldn't inherit our locked window state.
+      unawaited(_applyWindowLock(false));
+    }
     _msgSub?.cancel();
     _inviteSub?.cancel();
     _presenceSub?.cancel();
@@ -202,6 +222,72 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
     _composer.dispose();
     _scroll.dispose();
     super.dispose();
+  }
+
+  /// True on desktop platforms only — window_manager APIs are noop
+  /// (and missing plugin registrants) on mobile.
+  bool get _isDesktop =>
+      Platform.isWindows || Platform.isLinux || Platform.isMacOS;
+
+  /// True when the chat should commandeer the foreground: scoped
+  /// mode AND ticket not yet accepted AND not yet resolved-routed.
+  bool get _shouldLockWindow =>
+      widget.sinceMessageId != null &&
+      !_ticketAccepted &&
+      !_closedFromResolution;
+
+  /// Currently-applied window-lock state. Used to short-circuit
+  /// repeated setAlwaysOnTop / setPreventClose calls — the
+  /// underlying Win32 API is fine being called repeatedly, but it
+  /// flickers the title bar in some Windows builds.
+  bool _windowLockApplied = false;
+
+  Future<void> _applyWindowLock(bool lock) async {
+    if (!_isDesktop) return;
+    if (_windowLockApplied == lock) return;
+    _windowLockApplied = lock;
+    try {
+      await windowManager.setAlwaysOnTop(lock);
+      await windowManager.setPreventClose(lock);
+      if (lock) {
+        // Pull focus the moment the lock engages so a cashier who
+        // had another app focused doesn't have to alt-tab back.
+        await windowManager.show();
+        await windowManager.focus();
+      }
+    } catch (e) {
+      // Plugin can transiently fail on engine-restart / hot-reload —
+      // not actionable, just log.
+      debugPrint('[chat] window lock $lock failed: $e');
+    }
+  }
+
+  /// WindowListener override — fires when the user clicks the X
+  /// button (or Alt+F4). While the lock is engaged we refuse to
+  /// close: the window comes back to the foreground instead so the
+  /// waiting card stays visible. preventClose=true + this callback
+  /// is what makes "force open" work for a deliberate close attempt.
+  @override
+  void onWindowClose() async {
+    if (!_isDesktop) return;
+    if (!_shouldLockWindow) {
+      // Outside the locked phase, honour the close — the cashier
+      // explicitly asked to quit.
+      await windowManager.setPreventClose(false);
+      await windowManager.destroy();
+      return;
+    }
+    // Locked: just re-focus.
+    await windowManager.show();
+    await windowManager.focus();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text(
+          'Please stay on this screen until support accepts your ticket.',
+        ),
+        duration: Duration(seconds: 2),
+      ));
+    }
   }
 
   Future<void> _loadHistory() async {
@@ -271,6 +357,7 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
           // visual sequence as the live resolved path.
           WidgetsBinding.instance.addPostFrameCallback((_) {
             if (!mounted) return;
+            unawaited(_applyWindowLock(false));
             widget.onTicketClosed?.call(context);
           });
           break;
@@ -333,6 +420,10 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
           // We intentionally keep the persisted pending pointer so an
           // accidental close after acceptance still resumes on the
           // same scoped chat. It only gets wiped on resolution.
+          //
+          // Release the desktop window lock — the chat is now fully
+          // interactive and the cashier can switch between apps.
+          unawaited(_applyWindowLock(false));
         }
       }
 
@@ -353,6 +444,9 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
           // Resolved → no longer pending; wipe the persisted pointer
           // so the next launch lands on a fresh Help Guide.
           unawaited(widget.store.clearPendingTicket());
+          // Also release the window lock if it's still engaged (the
+          // pathological "resolved before accepted" path).
+          unawaited(_applyWindowLock(false));
           ScaffoldMessenger.of(context).showSnackBar(SnackBar(
             content: Text(
               'Ticket #${ev.id} resolved by ${ev.agentName.isNotEmpty ? ev.agentName : "support"}.',
