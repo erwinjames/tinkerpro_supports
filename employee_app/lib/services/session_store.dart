@@ -30,6 +30,8 @@ class SessionStore {
   static const _kShopAt           = 'pos_shop_info_saved_at';
   static const _kHelpJson         = 'help_topics_json';
   static const _kHelpAt           = 'help_topics_saved_at';
+  static const _kPendingAnchor    = 'pending_ticket_anchor_msg_id';
+  static const _kPendingTicketId  = 'pending_ticket_id';
 
   static Future<SessionStore> open() async {
     final prefs = await SharedPreferences.getInstance();
@@ -141,6 +143,34 @@ class SessionStore {
   Future<void> saveCachedHelpJson(String raw) async {
     await _prefs.setString(_kHelpJson, raw);
     await _prefs.setInt(_kHelpAt, DateTime.now().millisecondsSinceEpoch);
+  }
+
+  /// Persisted reference to the most recently filed ticket that has
+  /// not yet been accepted (or has been resolved). Drives the
+  /// "resume waiting screen" behavior on app restart: if the user
+  /// accidentally closes the employee app while sitting on the
+  /// waiting card, the next launch jumps straight back into the
+  /// scoped chat for that ticket instead of dumping them on the
+  /// Help Guide. Cleared as soon as the chat screen detects the
+  /// matching `accepted` event OR a `resolved` event for the same
+  /// ticket id.
+  int? get pendingTicketAnchorMessageId => _prefs.getInt(_kPendingAnchor);
+  int? get pendingTicketId => _prefs.getInt(_kPendingTicketId);
+
+  bool get hasPendingTicket =>
+      pendingTicketAnchorMessageId != null && pendingTicketId != null;
+
+  Future<void> savePendingTicket({
+    required int anchorMessageId,
+    required int ticketId,
+  }) async {
+    await _prefs.setInt(_kPendingAnchor, anchorMessageId);
+    await _prefs.setInt(_kPendingTicketId, ticketId);
+  }
+
+  Future<void> clearPendingTicket() async {
+    await _prefs.remove(_kPendingAnchor);
+    await _prefs.remove(_kPendingTicketId);
   }
 
   /// Wipe everything — used by the "reset store" path if you ever want to

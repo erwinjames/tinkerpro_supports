@@ -11,6 +11,7 @@ import 'services/pos_shop_service.dart';
 import 'services/remote_access_service.dart';
 import 'services/session_store.dart';
 import 'services/ticket_service.dart' show ShopInfo;
+import 'screens/chat_screen.dart';
 import 'screens/help_guide_screen.dart';
 import 'screens/store_setup_screen.dart';
 import 'theme.dart';
@@ -226,8 +227,46 @@ class _BootstrapState extends State<_Bootstrap> {
       );
     }
 
-    // Land on the self-serve help guide first; "Contact Support" and
-    // "Open Chat" from there route into EmployeeChatScreen.
+    // Resume-on-restart: if the user closed the app while sitting on
+    // the "Waiting for support to accept your ticket" card, the
+    // pending pointer in SessionStore re-pins them to the same
+    // scoped chat instead of dumping them on the Help Guide.
+    // EmployeeChatScreen reads its sinceMessageId, parses the
+    // matching ticket id and accepted/resolved state from history,
+    // and clears the pending pointer the moment the ticket actually
+    // moves forward.
+    if (widget.store.hasPendingTicket) {
+      return EmployeeChatScreen(
+        api: widget.api,
+        chat: _chat,
+        realtime: _realtime!,
+        calls: _calls!,
+        lan: _lan!,
+        store: widget.store,
+        info: _info!,
+        sinceMessageId: widget.store.pendingTicketAnchorMessageId,
+        onTicketClosed: (ctx) {
+          // Same callback shape HelpGuideScreen uses — on resolution
+          // we replace the chat route with a fresh Help Guide.
+          Navigator.of(ctx).pushReplacement(
+            MaterialPageRoute(
+              builder: (_) => HelpGuideScreen(
+                api: widget.api,
+                chat: _chat,
+                realtime: _realtime!,
+                calls: _calls!,
+                lan: _lan!,
+                store: widget.store,
+                info: _info!,
+              ),
+            ),
+          );
+        },
+      );
+    }
+
+    // No pending ticket — land on the self-serve help guide.
+    // "Contact Support" from there routes into EmployeeChatScreen.
     return HelpGuideScreen(
       api: widget.api,
       chat: _chat,

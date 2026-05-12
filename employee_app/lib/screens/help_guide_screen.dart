@@ -152,6 +152,18 @@ class _HelpGuideScreenState extends State<HelpGuideScreen> {
     );
     final anchorId = sent?.persistedId;
 
+    // Persist the pending-ticket pointer so an accidental app close
+    // mid-wait resumes on the same scoped chat instead of dumping
+    // the cashier back on the Help Guide. _Bootstrap reads this on
+    // launch; EmployeeChatScreen clears it once the ticket is
+    // accepted or resolved.
+    if (anchorId != null && outcome.ticketId != null) {
+      await widget.store.savePendingTicket(
+        anchorMessageId: anchorId,
+        ticketId: outcome.ticketId!,
+      );
+    }
+
     if (!mounted) return;
     Navigator.of(context).pushReplacement(
       MaterialPageRoute(

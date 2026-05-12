@@ -250,6 +250,13 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
       }
     }
     _ticketAccepted = initiallyAccepted;
+    // If we entered scoped mode but the loaded history already shows
+    // the ticket was accepted (or resolved earlier), our persisted
+    // "still waiting" pointer is stale — wipe it so the next launch
+    // doesn't re-pin the user to a chat that's no longer pending.
+    if (anchor != null && initiallyAccepted) {
+      unawaited(widget.store.clearPendingTicket());
+    }
     setState(() {
       _messages
         ..clear()
@@ -302,6 +309,8 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
           // Already inside a setState above; the next build picks up
           // the new value. No SnackBar — the inline acceptance
           // badge in the chat itself is the signal.
+          // Persisted "still waiting" pointer is now stale.
+          unawaited(widget.store.clearPendingTicket());
         }
       }
 
@@ -319,6 +328,9 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
             ev.kind == _TicketEventKind.resolved &&
             ev.id == _scopedTicketId) {
           _closedFromResolution = true;
+          // Resolved → no longer pending; wipe the persisted pointer
+          // so the next launch lands on a fresh Help Guide.
+          unawaited(widget.store.clearPendingTicket());
           ScaffoldMessenger.of(context).showSnackBar(SnackBar(
             content: Text(
               'Ticket #${ev.id} resolved by ${ev.agentName.isNotEmpty ? ev.agentName : "support"}.',
