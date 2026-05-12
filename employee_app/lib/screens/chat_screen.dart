@@ -7,7 +7,8 @@ import 'dart:typed_data';
 import 'package:dio/dio.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart' show Clipboard, ClipboardData;
+import 'package:flutter/services.dart'
+    show Clipboard, ClipboardData, KeyDownEvent, LogicalKeyboardKey;
 import 'package:open_filex/open_filex.dart';
 import 'package:path_provider/path_provider.dart';
 
@@ -2214,6 +2215,28 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
     if (images.isEmpty) return;
     final pageCtrl = PageController(initialPage: initialIndex);
     var currentIndex = initialIndex;
+    // Keyboard nav: ← / → page between images, Esc closes. Wrapping
+    // in a Focus with autofocus puts key events on the gallery while
+    // the dialog is up; the InteractiveViewer/PageView don't claim
+    // arrow keys so this stays free.
+    void prev() {
+      if (pageCtrl.page != null && pageCtrl.page! > 0) {
+        pageCtrl.previousPage(
+          duration: const Duration(milliseconds: 220),
+          curve: Curves.easeOut,
+        );
+      }
+    }
+
+    void next() {
+      if (pageCtrl.page != null && pageCtrl.page! < images.length - 1) {
+        pageCtrl.nextPage(
+          duration: const Duration(milliseconds: 220),
+          curve: Curves.easeOut,
+        );
+      }
+    }
+
     await showDialog<void>(
       context: context,
       barrierColor: Colors.black.withValues(alpha: 0.85),
@@ -2222,7 +2245,25 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
           return Dialog(
             backgroundColor: Colors.transparent,
             insetPadding: const EdgeInsets.all(16),
-            child: Stack(
+            child: Focus(
+              autofocus: true,
+              onKeyEvent: (node, event) {
+                if (event is! KeyDownEvent) return KeyEventResult.ignored;
+                if (event.logicalKey == LogicalKeyboardKey.arrowLeft) {
+                  prev();
+                  return KeyEventResult.handled;
+                }
+                if (event.logicalKey == LogicalKeyboardKey.arrowRight) {
+                  next();
+                  return KeyEventResult.handled;
+                }
+                if (event.logicalKey == LogicalKeyboardKey.escape) {
+                  Navigator.of(ctx).pop();
+                  return KeyEventResult.handled;
+                }
+                return KeyEventResult.ignored;
+              },
+              child: Stack(
               children: [
                 GestureDetector(
                   onTap: () => Navigator.of(ctx).pop(),
@@ -2370,6 +2411,7 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
                   ),
                 ),
               ],
+            ),
             ),
           );
         });
