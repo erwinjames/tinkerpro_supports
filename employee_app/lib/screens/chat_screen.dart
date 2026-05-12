@@ -2057,70 +2057,76 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
     return widgets;
   }
 
-  /// Stacked-card preview for multi-image attachments. The top card
-  /// is the first image at full thumbnail size; behind it we offset
-  /// up-to-2 peek slivers (slightly inset on each side + raised) to
-  /// hint at "there are more in here". A count badge in the bottom-
-  /// right shows the total. Tapping anywhere opens the gallery on
-  /// the first image.
+  /// Polaroid-style stacked-card preview for multi-image attachments.
+  /// The top card sits straight; up-to-2 peek cards behind it are
+  /// rotated at opposing angles (±0.08 rad ≈ ±4.5°) so the back
+  /// images poke out from underneath the top card and the user can
+  /// see they're real images, not just blank rectangles. Each peek
+  /// shows the matching image from [images] so a 3-photo message
+  /// previews all 3. A count badge in the bottom-right shows the
+  /// total; tapping anywhere opens the gallery.
   Widget _buildImageStack(List<ChatAttachment> images) {
     const tile = 220.0;
-    // Build the peek layers behind the top card. Two visible peeks is
-    // plenty visual signal — more layers just adds noise.
-    final peekCount = (images.length - 1).clamp(0, 2);
+    // Cap visible layers at 3 (top + 2 peeks). Beyond that, the count
+    // badge does the heavy lifting and stacking more cards just makes
+    // the bubble taller for no extra information.
+    final visible = images.take(3).toList();
+    // Rotation angles for the peek cards: index 0 is the top (no
+    // rotation), 1 tilts right, 2 tilts left — mirrors the natural
+    // "scattered photo" look from the user's reference image.
+    const angles = [0.0, 0.08, -0.08];
+    // Outer canvas needs slack for the rotation overflow + downward
+    // peek so the rotated corners don't clip.
     return InkWell(
       onTap: () => _showImageGallery(images, 0),
       borderRadius: BorderRadius.circular(12),
       child: SizedBox(
-        width: tile + 16,
-        height: tile + 16,
+        width: tile + 36,
+        height: tile + 36,
         child: Stack(
+          alignment: Alignment.center,
           clipBehavior: Clip.none,
           children: [
-            // Peek cards rendered behind, in reverse depth order.
-            for (int i = peekCount; i >= 1; i--)
-              Positioned(
-                top: 0,
-                left: i * 6.0,
-                right: i * 6.0,
+            // Render back-to-front: last visible card is deepest, so
+            // we iterate from the end and let the natural Stack z-order
+            // bring the first image to the top.
+            for (int i = visible.length - 1; i >= 0; i--)
+              Transform.rotate(
+                angle: angles[i],
                 child: Container(
-                  height: tile + 16 - (i * 6.0),
+                  width: tile,
+                  height: tile,
                   decoration: BoxDecoration(
                     color: Brand.canvas,
                     borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: Brand.stroke),
+                    border: Border.all(color: Brand.stroke, width: 1),
                     boxShadow: [
                       BoxShadow(
-                        color: Colors.black.withValues(alpha: 0.06),
-                        blurRadius: 4,
-                        offset: const Offset(0, 2),
+                        color: Colors.black.withValues(alpha: 0.12),
+                        blurRadius: 6,
+                        offset: const Offset(0, 3),
                       ),
                     ],
                   ),
-                ),
-              ),
-            // Top card — the first image, full-size.
-            Positioned(
-              top: peekCount * 6.0,
-              left: 0,
-              right: 0,
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(12),
-                child: SizedBox(
-                  height: tile,
-                  child: _AuthImage(
-                    dio: widget.api.rawDio,
-                    url: widget.chat.attachmentUrl(images.first.id),
-                    fit: BoxFit.cover,
-                    cacheWidth: 480,
+                  // Inner padding gives the polaroid-like white border
+                  // around each photo — also stops a fully-black image
+                  // from visually merging with its neighbour.
+                  padding: const EdgeInsets.all(3),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(10),
+                    child: _AuthImage(
+                      dio: widget.api.rawDio,
+                      url: widget.chat.attachmentUrl(visible[i].id),
+                      fit: BoxFit.cover,
+                      cacheWidth: 480,
+                    ),
                   ),
                 ),
               ),
-            ),
-            // Count badge — bottom-right of the top card.
+            // Count badge sits on top of the un-rotated top card.
             Positioned(
-              right: 8,
-              bottom: 8,
+              right: 14,
+              bottom: 14,
               child: Container(
                 padding: const EdgeInsets.symmetric(
                     horizontal: 10, vertical: 4),
