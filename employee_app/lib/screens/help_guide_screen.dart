@@ -117,28 +117,32 @@ class HelpGuideScreen extends StatelessWidget {
     if (outcome == null || !context.mounted) return;
 
     // Mirror the chat_screen-side /ticket flow: post a ticket-
-    // confirmation bubble so support sees the ticket land live.
+    // confirmation bubble so support sees the ticket land live. We
+    // keep the returned message's persisted id so the chat screen
+    // can scope its visible history to "starting at this ticket" —
+    // older, unrelated thread chatter stays hidden.
     final ticketRef = outcome.ticketId != null ? ' #${outcome.ticketId}' : '';
     final note = '🎫 Ticket$ticketRef submitted: "${outcome.subject}"\n'
         'Business: ${outcome.businessName} (${outcome.vatLabel})\n'
         'Priority: ${outcome.priority.toUpperCase()}';
-    await chat.send(
+    final sent = await chat.send(
       convId: info.conversationId,
       body: note,
       clientNonce: 'help-${DateTime.now().microsecondsSinceEpoch}',
     );
+    final anchorId = sent?.persistedId;
 
     if (!context.mounted) return;
     // Replace (don't push) so a back button doesn't dump the employee
     // back on the help screen mid-conversation.
     Navigator.of(context).pushReplacement(
       MaterialPageRoute(
-        builder: (_) => _chatScreen(),
+        builder: (_) => _chatScreen(sinceMessageId: anchorId),
       ),
     );
   }
 
-  EmployeeChatScreen _chatScreen() => EmployeeChatScreen(
+  EmployeeChatScreen _chatScreen({int? sinceMessageId}) => EmployeeChatScreen(
         api: api,
         chat: chat,
         realtime: realtime,
@@ -146,6 +150,7 @@ class HelpGuideScreen extends StatelessWidget {
         lan: lan,
         store: store,
         info: info,
+        sinceMessageId: sinceMessageId,
       );
 
   @override

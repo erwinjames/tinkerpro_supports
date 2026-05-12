@@ -43,6 +43,7 @@ class EmployeeChatScreen extends StatefulWidget {
     required this.lan,
     required this.store,
     required this.info,
+    this.sinceMessageId,
   });
 
   final ApiClient api;
@@ -52,6 +53,15 @@ class EmployeeChatScreen extends StatefulWidget {
   final LanPresence lan;
   final SessionStore store;
   final EmployeeChatInfo info;
+
+  /// When non-null, only messages with `persistedId >= sinceMessageId`
+  /// render — older history is filtered out of the loaded list and
+  /// "load older" stops at the anchor. Set when the user enters the
+  /// chat by filing a ticket from HelpGuideScreen so the thread
+  /// starts at the ticket bubble and unrelated prior chatter from
+  /// past tickets stays hidden. Null means full-history (legacy
+  /// behavior).
+  final int? sinceMessageId;
 
   @override
   State<EmployeeChatScreen> createState() => _EmployeeChatScreenState();
@@ -164,6 +174,12 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
   Future<void> _loadHistory() async {
     final list = await widget.chat.history(_convId);
     if (!mounted) return;
+    final anchor = widget.sinceMessageId;
+    final scoped = anchor == null
+        ? list
+        : list
+            .where((m) => (m.persistedId ?? 0) >= anchor)
+            .toList(growable: false);
     setState(() {
       _messages
         ..clear()
@@ -172,7 +188,7 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
         // ListView where new messages from _onIncoming also land.
         // (Reversing here is what flipped the badges so #22 appeared
         // above #17 in the chat.)
-        ..addAll(list);
+        ..addAll(scoped);
       // Suppress the inline /remote card for everything that's
       // already in the chat backlog. Only NEW /remote messages
       // arriving via _onIncoming after this point will render the
@@ -1647,11 +1663,21 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
           .whereType<int>()
           .fold<int?>(null, (acc, id) => acc == null || id < acc ? id : acc);
       if (oldestId == null) break;
+      // Don't page past the ticket anchor — pre-anchor history is
+      // intentionally hidden in scoped mode.
+      final anchor = widget.sinceMessageId;
+      if (anchor != null && oldestId <= anchor) break;
       final older = await widget.chat.history(_convId, beforeId: oldestId);
       if (!mounted) return;
       if (older.isEmpty) break;
+      final scopedOlder = anchor == null
+          ? older
+          : older
+              .where((m) => (m.persistedId ?? 0) >= anchor)
+              .toList(growable: false);
+      if (scopedOlder.isEmpty) break;
       setState(() {
-        _messages.insertAll(0, older);
+        _messages.insertAll(0, scopedOlder);
       });
       final retry =
           _findQuoteTarget(embeddedId, sender, preview, bubbleSenderId);
