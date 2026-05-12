@@ -1356,30 +1356,38 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
         ),
         actions: [
           IconButton(
-            tooltip: 'Show remote-desktop password (for first-time setup)',
+            tooltip: _ticketAccepted
+                ? 'Show remote-desktop password (for first-time setup)'
+                : 'Waiting for support to accept your ticket',
             icon: const Icon(Icons.vpn_key_outlined),
-            onPressed: _showRemotePasswordSheet,
+            onPressed: _ticketAccepted ? _showRemotePasswordSheet : null,
           ),
           IconButton(
-            tooltip: 'Add a colleague from this Wi-Fi',
+            tooltip: _ticketAccepted
+                ? 'Add a colleague from this Wi-Fi'
+                : 'Waiting for support to accept your ticket',
             icon: const Icon(Icons.person_add_alt_1),
-            onPressed: _openAddParticipantSheet,
+            onPressed: _ticketAccepted ? _openAddParticipantSheet : null,
           ),
           IconButton(
-            tooltip: _colleagueInCall != null
-                ? '${_colleagueInCall!.fromName} is on a call — please wait'
-                : 'Voice call',
+            tooltip: !_ticketAccepted
+                ? 'Waiting for support to accept your ticket'
+                : (_colleagueInCall != null
+                    ? '${_colleagueInCall!.fromName} is on a call — please wait'
+                    : 'Voice call'),
             icon: const Icon(Icons.call),
-            onPressed: _colleagueInCall != null
+            onPressed: (!_ticketAccepted || _colleagueInCall != null)
                 ? null
                 : () => _placeCall(CallMedia.voice),
           ),
           IconButton(
-            tooltip: _colleagueInCall != null
-                ? '${_colleagueInCall!.fromName} is on a call — please wait'
-                : 'Video call',
+            tooltip: !_ticketAccepted
+                ? 'Waiting for support to accept your ticket'
+                : (_colleagueInCall != null
+                    ? '${_colleagueInCall!.fromName} is on a call — please wait'
+                    : 'Video call'),
             icon: const Icon(Icons.videocam),
-            onPressed: _colleagueInCall != null
+            onPressed: (!_ticketAccepted || _colleagueInCall != null)
                 ? null
                 : () => _placeCall(CallMedia.video),
           ),
@@ -1390,76 +1398,112 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
         children: [
           if (_colleagueInCall != null) _buildColleagueCallBanner(),
           Expanded(
-            child: _loading
-                ? const Center(child: CircularProgressIndicator(strokeWidth: 2))
-                : _messages.isEmpty
-                    ? _buildEmptyState(text)
-                    : _buildList(text),
+            // While the scoped ticket is still pending acceptance,
+            // overlay a centered "waiting" card on top of the chat
+            // list. The ticket bubble at the top stays visible, the
+            // composer below stays mounted but disabled — the card
+            // is purely a visual block, not a layout replacement,
+            // so nothing reflows when the ticket gets accepted.
+            child: Stack(
+              children: [
+                Positioned.fill(
+                  child: _loading
+                      ? const Center(
+                          child: CircularProgressIndicator(strokeWidth: 2))
+                      : _messages.isEmpty
+                          ? _buildEmptyState(text)
+                          : _buildList(text),
+                ),
+                if (!_ticketAccepted)
+                  Positioned.fill(
+                    child: AbsorbPointer(
+                      child: Container(
+                        // Soft scrim so the ticket bubble and any
+                        // future admin messages are still legible
+                        // behind the card, but inert.
+                        color: Brand.surface.withValues(alpha: 0.72),
+                        alignment: Alignment.center,
+                        child: _buildAwaitingAcceptCard(),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
           ),
-          // Gate the composer while the scoped ticket is still
-          // pending acceptance — show a waiting card in its place so
-          // the cashier can see the ticket bubble but can't pile
-          // messages onto an unassigned ticket.
-          _ticketAccepted ? _buildComposer() : _buildAwaitingAcceptCard(),
+          // Composer stays mounted so its layout footprint never
+          // changes — inputs disable themselves when !_ticketAccepted.
+          _buildComposer(),
         ],
       ),
     );
   }
 
-  /// Composer-replacement shown in scoped mode until the matching
-  /// admin acceptance event arrives. Matches the composer's vertical
-  /// footprint roughly so the chat list doesn't reflow on unlock.
+  /// Centered overlay shown over the message list while the scoped
+  /// ticket is still pending acceptance. The composer stays mounted
+  /// below (but disabled) and the ticket bubble at the top stays
+  /// visible — this card is purely an attention-getter that explains
+  /// what the cashier is waiting on.
   Widget _buildAwaitingAcceptCard() {
-    return Container(
-      decoration: BoxDecoration(
-        color: Brand.canvas,
-        border: Border(top: BorderSide(color: Brand.stroke)),
-      ),
-      padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            width: 36, height: 36,
-            decoration: BoxDecoration(
-              color: Brand.signal.withValues(alpha: 0.12),
-              borderRadius: BorderRadius.circular(8),
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 420),
+      child: Container(
+        margin: const EdgeInsets.symmetric(horizontal: 24),
+        padding: const EdgeInsets.fromLTRB(28, 28, 28, 24),
+        decoration: BoxDecoration(
+          color: Brand.canvas,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: Brand.stroke),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.06),
+              blurRadius: 24,
+              offset: const Offset(0, 8),
             ),
-            alignment: Alignment.center,
-            child: const SizedBox(
-              width: 16, height: 16,
-              child: CircularProgressIndicator(
-                strokeWidth: 2, color: Brand.signal),
+          ],
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 64, height: 64,
+              decoration: BoxDecoration(
+                color: Brand.signal.withValues(alpha: 0.12),
+                shape: BoxShape.circle,
+              ),
+              alignment: Alignment.center,
+              child: const SizedBox(
+                width: 28, height: 28,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2.6, color: Brand.signal),
+              ),
             ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'Waiting for support to accept your ticket…',
-                  style: TextStyle(
-                    fontWeight: FontWeight.w600,
-                    fontSize: 13.5,
-                    color: Brand.textPrimary,
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  _scopedTicketId != null
-                      ? 'Ticket #$_scopedTicketId is in the queue. You can chat once an admin accepts it.'
-                      : 'Your ticket is in the queue. You can chat once an admin accepts it.',
-                  style: const TextStyle(
-                    fontSize: 12,
-                    color: Brand.textMuted,
-                    height: 1.4,
-                  ),
-                ),
-              ],
+            const SizedBox(height: 18),
+            const Text(
+              'Waiting for support to accept your ticket…',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontWeight: FontWeight.w700,
+                fontSize: 15,
+                color: Brand.textPrimary,
+              ),
             ),
-          ),
-        ],
+            const SizedBox(height: 8),
+            Text(
+              _scopedTicketId != null
+                  ? 'Ticket #$_scopedTicketId is in the support queue. '
+                      'Chat and call options will unlock as soon as an '
+                      'admin accepts it.'
+                  : 'Your ticket is in the support queue. Chat and call '
+                      'options will unlock as soon as an admin accepts it.',
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                fontSize: 12.5,
+                color: Brand.textMuted,
+                height: 1.45,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -2668,6 +2712,16 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
   }
 
   Widget _buildComposer() {
+    // Disabled in two scenarios that share the same UX: mid-upload
+    // (existing) and pre-acceptance (new). Both grey out the row so
+    // a stray click can't desync state. We keep them separate
+    // because the hints differ — uploading says "Uploading…", waiting
+    // says "Waiting for support to accept your ticket".
+    final waiting = !_ticketAccepted;
+    final disabled = _isSending || waiting;
+    final hint = waiting
+        ? 'Waiting for support to accept your ticket…'
+        : (_isSending ? 'Uploading…' : 'Type a message');
     return Container(
       decoration: BoxDecoration(
         color: Brand.canvas,
@@ -2684,26 +2738,28 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
         children: [
           IconButton(
             icon: const Icon(Icons.attach_file),
-            tooltip: _isSending ? 'Uploading…' : 'Attach a file',
-            onPressed: _isSending ? null : _attach,
+            tooltip: waiting
+                ? 'Waiting for support to accept your ticket'
+                : (_isSending ? 'Uploading…' : 'Attach a file'),
+            onPressed: disabled ? null : _attach,
           ),
           Expanded(
             child: TextField(
               controller: _composer,
               minLines: 1,
               maxLines: 5,
-              enabled: !_isSending,
+              enabled: !disabled,
               textInputAction: TextInputAction.send,
               onSubmitted: (_) => _send(),
               decoration: InputDecoration(
-                hintText: _isSending ? 'Uploading…' : 'Type a message',
+                hintText: hint,
                 border: InputBorder.none,
               ),
             ),
           ),
           const SizedBox(width: 4),
           FilledButton.icon(
-            onPressed: _isSending ? null : _send,
+            onPressed: disabled ? null : _send,
             icon: _isSending
                 ? const SizedBox(
                     width: 14, height: 14,
