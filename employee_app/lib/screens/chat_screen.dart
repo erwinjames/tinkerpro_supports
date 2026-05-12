@@ -1993,35 +1993,42 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
   }
 
   List<Widget> _renderAttachments(ChatMessage m, bool mine, TextTheme text) {
-    return m.attachments.map((att) {
-      if (att.isImage) {
-        // Image attachments render as a 220px-wide thumbnail bound to
-        // the bubble. The image is fetched through Dio (cookie-auth'd)
-        // so the PHP attachment endpoint accepts the request.
-        return Padding(
-          padding: const EdgeInsets.only(top: 6),
-          child: InkWell(
-            onTap: () => _showImageViewer(att),
+    final images = m.attachments.where((a) => a.isImage).toList();
+    final files = m.attachments.where((a) => !a.isImage).toList();
+    final widgets = <Widget>[];
+    if (images.length >= 2) {
+      // Collapse 2+ images into a single stacked-card preview so a
+      // 5-attachment message doesn't take up the entire chat pane.
+      // Tapping the stack opens a swipeable gallery showing all of
+      // them.
+      widgets.add(Padding(
+        padding: const EdgeInsets.only(top: 6),
+        child: _buildImageStack(images),
+      ));
+    } else if (images.length == 1) {
+      widgets.add(Padding(
+        padding: const EdgeInsets.only(top: 6),
+        child: InkWell(
+          onTap: () => _showImageGallery(images, 0),
+          borderRadius: BorderRadius.circular(10),
+          child: ClipRRect(
             borderRadius: BorderRadius.circular(10),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(10),
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(
-                    maxWidth: 240, maxHeight: 240, minWidth: 120),
-                child: _AuthImage(
-                  dio: widget.api.rawDio,
-                  url: widget.chat.attachmentUrl(att.id),
-                  fit: BoxFit.cover,
-                  // Tile size hint lets the loader skip allocating the
-                  // full-res bitmap for a tiny chat thumbnail.
-                  cacheWidth: 480,
-                ),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(
+                  maxWidth: 240, maxHeight: 240, minWidth: 120),
+              child: _AuthImage(
+                dio: widget.api.rawDio,
+                url: widget.chat.attachmentUrl(images.first.id),
+                fit: BoxFit.cover,
+                cacheWidth: 480,
               ),
             ),
           ),
-        );
-      }
-      return Padding(
+        ),
+      ));
+    }
+    for (final att in files) {
+      widgets.add(Padding(
         padding: const EdgeInsets.only(top: 6),
         child: InkWell(
           onTap: () => _showAttachmentOptions(att),
@@ -2045,8 +2052,104 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
             ],
           ),
         ),
-      );
-    }).toList();
+      ));
+    }
+    return widgets;
+  }
+
+  /// Stacked-card preview for multi-image attachments. The top card
+  /// is the first image at full thumbnail size; behind it we offset
+  /// up-to-2 peek slivers (slightly inset on each side + raised) to
+  /// hint at "there are more in here". A count badge in the bottom-
+  /// right shows the total. Tapping anywhere opens the gallery on
+  /// the first image.
+  Widget _buildImageStack(List<ChatAttachment> images) {
+    const tile = 220.0;
+    // Build the peek layers behind the top card. Two visible peeks is
+    // plenty visual signal — more layers just adds noise.
+    final peekCount = (images.length - 1).clamp(0, 2);
+    return InkWell(
+      onTap: () => _showImageGallery(images, 0),
+      borderRadius: BorderRadius.circular(12),
+      child: SizedBox(
+        width: tile + 16,
+        height: tile + 16,
+        child: Stack(
+          clipBehavior: Clip.none,
+          children: [
+            // Peek cards rendered behind, in reverse depth order.
+            for (int i = peekCount; i >= 1; i--)
+              Positioned(
+                top: 0,
+                left: i * 6.0,
+                right: i * 6.0,
+                child: Container(
+                  height: tile + 16 - (i * 6.0),
+                  decoration: BoxDecoration(
+                    color: Brand.canvas,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: Brand.stroke),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.06),
+                        blurRadius: 4,
+                        offset: const Offset(0, 2),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            // Top card — the first image, full-size.
+            Positioned(
+              top: peekCount * 6.0,
+              left: 0,
+              right: 0,
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(12),
+                child: SizedBox(
+                  height: tile,
+                  child: _AuthImage(
+                    dio: widget.api.rawDio,
+                    url: widget.chat.attachmentUrl(images.first.id),
+                    fit: BoxFit.cover,
+                    cacheWidth: 480,
+                  ),
+                ),
+              ),
+            ),
+            // Count badge — bottom-right of the top card.
+            Positioned(
+              right: 8,
+              bottom: 8,
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 10, vertical: 4),
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.65),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.photo_library_outlined,
+                        size: 13, color: Colors.white),
+                    const SizedBox(width: 4),
+                    Text(
+                      '${images.length}',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   /// Tap on a non-image attachment — bottom sheet offering Open
@@ -2094,91 +2197,130 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen> {
     );
   }
 
-  /// Full-screen image preview with a Download button. The image is
-  /// fetched through the same auth'd Dio used inline; tap outside or
-  /// the close icon to dismiss.
-  Future<void> _showImageViewer(ChatAttachment att) async {
+  /// Swipeable full-screen gallery for one or more image attachments
+  /// from the same message. The PageView lets the user flick left/
+  /// right between images; the Save button targets whichever image
+  /// is on screen, and the filename badge updates live with the page.
+  Future<void> _showImageGallery(
+    List<ChatAttachment> images,
+    int initialIndex,
+  ) async {
+    if (images.isEmpty) return;
+    final pageCtrl = PageController(initialPage: initialIndex);
+    var currentIndex = initialIndex;
     await showDialog<void>(
       context: context,
       barrierColor: Colors.black.withValues(alpha: 0.85),
       builder: (ctx) {
-        return Dialog(
-          backgroundColor: Colors.transparent,
-          insetPadding: const EdgeInsets.all(16),
-          child: Stack(
-            children: [
-              // Tap the backdrop area to dismiss — InteractiveViewer
-              // captures pointer events on the image itself, so a
-              // background gesture detector handles the rest.
-              GestureDetector(
-                onTap: () => Navigator.of(ctx).pop(),
-                child: const SizedBox.expand(),
-              ),
-              Center(
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(
-                      maxWidth: 1100, maxHeight: 800),
-                  child: InteractiveViewer(
-                    panEnabled: true,
-                    minScale: 0.5,
-                    maxScale: 4.0,
-                    child: _AuthImage(
-                      dio: widget.api.rawDio,
-                      url: widget.chat.attachmentUrl(att.id),
-                      fit: BoxFit.contain,
-                      // No cacheWidth here — viewer wants full res.
+        return StatefulBuilder(builder: (ctx, setLocal) {
+          return Dialog(
+            backgroundColor: Colors.transparent,
+            insetPadding: const EdgeInsets.all(16),
+            child: Stack(
+              children: [
+                GestureDetector(
+                  onTap: () => Navigator.of(ctx).pop(),
+                  child: const SizedBox.expand(),
+                ),
+                Center(
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(
+                        maxWidth: 1100, maxHeight: 800),
+                    child: PageView.builder(
+                      controller: pageCtrl,
+                      itemCount: images.length,
+                      onPageChanged: (i) =>
+                          setLocal(() => currentIndex = i),
+                      itemBuilder: (_, i) {
+                        return InteractiveViewer(
+                          panEnabled: true,
+                          minScale: 0.5,
+                          maxScale: 4.0,
+                          child: _AuthImage(
+                            dio: widget.api.rawDio,
+                            url: widget.chat.attachmentUrl(images[i].id),
+                            fit: BoxFit.contain,
+                          ),
+                        );
+                      },
                     ),
                   ),
                 ),
-              ),
-              Positioned(
-                top: 8, right: 8,
-                child: Row(
-                  children: [
-                    Material(
-                      color: Colors.black.withValues(alpha: 0.55),
-                      shape: const CircleBorder(),
-                      child: IconButton(
-                        tooltip: 'Save to Downloads',
-                        icon: const Icon(Icons.download_outlined,
-                            color: Colors.white),
-                        onPressed: () => _saveAttachmentToDownloads(att),
+                // Page indicator — pill in the top-center showing
+                // "2 / 5" when there's more than one image.
+                if (images.length > 1)
+                  Positioned(
+                    top: 12, left: 0, right: 0,
+                    child: Center(
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 5),
+                        decoration: BoxDecoration(
+                          color: Colors.black.withValues(alpha: 0.55),
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                        child: Text(
+                          '${currentIndex + 1} / ${images.length}',
+                          style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600),
+                        ),
                       ),
                     ),
-                    const SizedBox(width: 6),
-                    Material(
-                      color: Colors.black.withValues(alpha: 0.55),
-                      shape: const CircleBorder(),
-                      child: IconButton(
-                        tooltip: 'Close',
-                        icon: const Icon(Icons.close, color: Colors.white),
-                        onPressed: () => Navigator.of(ctx).pop(),
+                  ),
+                Positioned(
+                  top: 8, right: 8,
+                  child: Row(
+                    children: [
+                      Material(
+                        color: Colors.black.withValues(alpha: 0.55),
+                        shape: const CircleBorder(),
+                        child: IconButton(
+                          tooltip: 'Save to Downloads',
+                          icon: const Icon(Icons.download_outlined,
+                              color: Colors.white),
+                          onPressed: () =>
+                              _saveAttachmentToDownloads(images[currentIndex]),
+                        ),
                       ),
+                      const SizedBox(width: 6),
+                      Material(
+                        color: Colors.black.withValues(alpha: 0.55),
+                        shape: const CircleBorder(),
+                        child: IconButton(
+                          tooltip: 'Close',
+                          icon: const Icon(Icons.close, color: Colors.white),
+                          onPressed: () => Navigator.of(ctx).pop(),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Positioned(
+                  left: 12, bottom: 12,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.55),
+                      borderRadius: BorderRadius.circular(20),
                     ),
-                  ],
-                ),
-              ),
-              Positioned(
-                left: 12, bottom: 12,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 10, vertical: 6),
-                  decoration: BoxDecoration(
-                    color: Colors.black.withValues(alpha: 0.55),
-                    borderRadius: BorderRadius.circular(20),
-                  ),
-                  child: Text(
-                    '${att.originalName} · ${_formatBytes(att.byteSize)}',
-                    style: const TextStyle(
-                        color: Colors.white, fontSize: 12),
+                    child: Text(
+                      '${images[currentIndex].originalName} · '
+                      '${_formatBytes(images[currentIndex].byteSize)}',
+                      style: const TextStyle(
+                          color: Colors.white, fontSize: 12),
+                    ),
                   ),
                 ),
-              ),
-            ],
-          ),
-        );
+              ],
+            ),
+          );
+        });
       },
     );
+    pageCtrl.dispose();
   }
 
   Future<void> _openAttachment(ChatAttachment att) async {
