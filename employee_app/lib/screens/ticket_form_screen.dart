@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../api_client.dart';
@@ -66,6 +68,14 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
   String? _diagBusyKey; // "host:port" currently being validated by tap-to-connect
   String? _diagConnectError;
 
+  /// Periodic silent retry while we're sitting on cached / fallback data.
+  /// Heals a transient LAN / DB hiccup without forcing the user to tap
+  /// Retry. Cancelled the moment we hit live POS data or the screen is
+  /// disposed. 15s cadence keeps the noise low — handshake itself is
+  /// already capped at 8s.
+  Timer? _silentRetryTimer;
+  static const _silentRetryInterval = Duration(seconds: 15);
+
   @override
   void initState() {
     super.initState();
@@ -94,7 +104,10 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
       );
       _shopSource = 'cache';
       _loadingShop = false;
-      if (hasManual) _loadShop(silent: true);
+      if (hasManual) {
+        _loadShop(silent: true);
+        _startSilentRetryTimer();
+      }
     } else if (hasManual) {
       _loadShop();
     } else {
@@ -105,12 +118,31 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
 
   @override
   void dispose() {
+    _silentRetryTimer?.cancel();
     _name.dispose();
     _subject.dispose();
     _description.dispose();
     _setupHost.dispose();
     _setupPort.dispose();
     super.dispose();
+  }
+
+  /// Kick off (or restart) the periodic silent refresh. Idempotent.
+  /// Stops itself once we hit live POS data — see _stopSilentRetryTimer
+  /// at the end of _loadShop().
+  void _startSilentRetryTimer() {
+    _silentRetryTimer?.cancel();
+    _silentRetryTimer = Timer.periodic(_silentRetryInterval, (_) {
+      if (!mounted) return;
+      if (_shopSource == 'pos') return; // already live
+      if (!widget.store.hasPosManualTarget) return;
+      _loadShop(silent: true);
+    });
+  }
+
+  void _stopSilentRetryTimer() {
+    _silentRetryTimer?.cancel();
+    _silentRetryTimer = null;
   }
 
   Future<void> _loadShop({bool silent = false}) async {
@@ -176,7 +208,14 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
           _shopSource = 'pos';
           _shopError = null;
         });
+      } else {
+        // Values unchanged but we just confirmed liveness — flip the
+        // source so the caption (and timer) stops claiming "cache".
+        if (_shopSource != 'pos') {
+          setState(() => _shopSource = 'pos');
+        }
       }
+      _stopSilentRetryTimer();
       return;
     }
 
@@ -205,6 +244,9 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
         );
         _shopSource = 'fallback';
         _shopError = null;
+        // Background-retry the POS so a transient outage upgrades to
+        // live data automatically once it heals.
+        _startSilentRetryTimer();
         return;
       }
 
@@ -230,6 +272,7 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
     // Persist successful POS reads so the next /ticket open is instant.
     if (pos != null) {
       await widget.store.saveCachedShop(_shop!);
+      _stopSilentRetryTimer();
     }
   }
 
@@ -1059,25 +1102,28 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
   }
 
   Widget _buildSourceCaption() {
-    final cfg = _posShop.config;
-    final host = _posShop.resolvedHost ??
-        (cfg.host.isNotEmpty ? cfg.host : 'unknown');
-    final port = _posShop.resolvedPort ?? cfg.port;
+    // The only states the user needs to see a caption for are:
+    //   - 'pending' → still loading on first paint
+    //   - 'none'    → genuinely no shop info (form can't proceed)
+    // Cached / fallback / live POS data all render silently with no
+    // banner — the form is filled, the user doesn't need to know
+    // which source it came from. A background timer keeps retrying
+    // the live read until it succeeds, so cache→live upgrades happen
+    // without a Retry button anyway.
+    if (_shopSource != 'pending' && _shopSource != 'none') {
+      return const SizedBox.shrink();
+    }
     final err = _posShop.lastError;
-    final (dotColor, text) = switch (_shopSource) {
-      'pos' => (Brand.success, 'Live from POS · $host:$port'),
-      'cache' => (Brand.textMuted, 'Showing saved POS info · $host:$port'),
-      'fallback' => (
-        Brand.warning,
-        'POS unreachable — using backend shop profile',
-      ),
-      _ => (
-        Brand.warning,
-        err == null
-            ? 'POS not reachable'
-            : 'POS unreachable ($err)',
-      ),
-    };
+    final (dotColor, text) = _shopSource == 'pending'
+        ? (Brand.textMuted, _shopProgress.isNotEmpty
+            ? _shopProgress
+            : 'Looking up shop info…')
+        : (
+            Brand.warning,
+            err == null
+                ? 'Could not read shop info.'
+                : 'Could not read shop info ($err).',
+          );
     return Padding(
       padding: const EdgeInsets.only(top: 8, left: 4),
       child: Row(
@@ -1101,7 +1147,7 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
               ),
             ),
           ),
-          if (_shopSource != 'pos')
+          if (_shopSource == 'none')
             InkWell(
               onTap: _loadShop,
               borderRadius: BorderRadius.circular(6),
