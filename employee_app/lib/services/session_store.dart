@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -35,7 +36,44 @@ class SessionStore {
 
   static Future<SessionStore> open() async {
     final prefs = await SharedPreferences.getInstance();
-    return SessionStore._(prefs);
+    final s = SessionStore._(prefs);
+    // Seed the manual POS target from the installer-written hint
+    // (Windows-only, Terminal-mode installs). One-shot: only fires
+    // when SharedPreferences has nothing yet, so a cashier who later
+    // changes the target via in-app config keeps their choice on
+    // subsequent launches.
+    await s._seedFromInstallerHint();
+    return s;
+  }
+
+  /// Look for `%PROGRAMDATA%\TinkerPro\pos_target.json` (written by
+  /// the Inno installer when the admin picks "Terminal" mode) and
+  /// copy `{host, port}` into the manual-target prefs if we don't
+  /// already have one. The installer runs elevated so it can write
+  /// to ProgramData; the app runs as the cashier and only needs
+  /// read access. Failure here is silent — discovery still works
+  /// as a fallback.
+  Future<void> _seedFromInstallerHint() async {
+    if (!Platform.isWindows) return;
+    if (hasPosManualTarget) return;
+    final programData =
+        Platform.environment['PROGRAMDATA'] ?? r'C:\ProgramData';
+    final hintFile =
+        File('$programData${Platform.pathSeparator}TinkerPro'
+            '${Platform.pathSeparator}pos_target.json');
+    try {
+      if (!await hintFile.exists()) return;
+      final raw = await hintFile.readAsString();
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return;
+      final host = (decoded['host'] ?? '').toString().trim();
+      if (host.isEmpty) return;
+      final port = int.tryParse((decoded['port'] ?? '3306').toString());
+      await setPosManualTarget(host, port);
+    } catch (_) {
+      // Malformed hint, permission denied, etc. — just fall back to
+      // discovery on first ticket open.
+    }
   }
 
   String? get storeName => _prefs.getString(_kStoreName);

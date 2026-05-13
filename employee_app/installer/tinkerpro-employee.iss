@@ -118,19 +118,77 @@ Type: filesandordirs; Name: "{app}\data"
 
 [Code]
 {
-  Detect a local XAMPP install (= this PC is the POS DB host) and,
-  if present, run setup-pos-and-run.ps1 silently in unattended mode
-  to provision the tps_reader user + skip-name-resolve. On a
-  cashier-only PC (no XAMPP) the probe returns false and the post-
-  install step is a no-op, so the installer behaves the same way
-  it always did for non-POS boxes.
+  Two-mode setup wizard:
 
-  Why detect this way: TinkerPro POS ships on XAMPP, so the presence
-  of C:\xampp\mysql\bin\mysql.exe (or D:\, E:\) is a high-precision
-  signal that this is a POS box. Cheaper than a TCP probe of
-  localhost:3306 and doesn't false-positive on unrelated MariaDB
-  installs.
+  - "Server" mode: this PC hosts the POS MariaDB. Installer detects
+    XAMPP and runs setup-pos-and-run.ps1 silently to provision the
+    tps_reader user + skip-name-resolve.
+
+  - "Terminal" mode: this PC is a cashier register. Installer asks
+    for the server's LAN address and writes a hint file at
+    %PROGRAMDATA%\TinkerPro\pos_target.json. The .exe reads that
+    on first launch and seeds SessionStore.posManualHost — so the
+    ticket form skips LAN discovery entirely and goes straight to
+    the configured server with the build's tps_reader credentials.
+
+  Default is Server (matches the single-terminal install case, which
+  is the most common). On a silent install (/SILENT) the wizard pages
+  aren't shown but their defaults still apply — Server-mode auto-
+  detect XAMPP, no-op if absent. So existing silent installs keep
+  working without changes.
 }
+
+var
+  SetupModePage: TInputOptionWizardPage;
+  TerminalServerPage: TInputQueryWizardPage;
+
+procedure InitializeWizard();
+begin
+  SetupModePage := CreateInputOptionPage(
+    wpWelcome,
+    'Setup mode',
+    'Is this PC the POS server or a cashier terminal?',
+    'Pick "Server" if this PC hosts the TinkerPro POS database (XAMPP).' + #13#10 +
+    'Pick "Terminal" if this is a cashier register that connects to a separate POS server over the LAN.',
+    True, False);
+  SetupModePage.Add('Server  — this PC hosts the POS database');
+  SetupModePage.Add('Terminal — cashier register, connects to a server on the LAN');
+  SetupModePage.SelectedValueIndex := 0;
+
+  TerminalServerPage := CreateInputQueryPage(
+    SetupModePage.ID,
+    'POS server location',
+    'Where is the POS database?',
+    'Enter the LAN address of the POS server. Usually a 192.168.x.x address. ' +
+    'This is saved on the machine so the ticket form skips LAN discovery and ' +
+    'connects directly.');
+  TerminalServerPage.Add('Server IP or hostname:', False);
+  TerminalServerPage.Add('Port (default 3306):', False);
+  TerminalServerPage.Values[1] := '3306';
+end;
+
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  Result := False;
+  if PageID = TerminalServerPage.ID then begin
+    // Only show the server-IP page when "Terminal" is selected.
+    if SetupModePage.SelectedValueIndex <> 1 then Result := True;
+  end;
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+var
+  HostVal: String;
+begin
+  Result := True;
+  if CurPageID = TerminalServerPage.ID then begin
+    HostVal := Trim(TerminalServerPage.Values[0]);
+    if HostVal = '' then begin
+      MsgBox('Please enter the POS server IP or hostname.', mbError, MB_OK);
+      Result := False;
+    end;
+  end;
+end;
 
 function FindXamppRoot(): String;
 var
@@ -153,17 +211,7 @@ begin
   end;
 end;
 
-function HasXampp(): Boolean;
-begin
-  Result := FindXamppRoot() <> '';
-end;
-
-function NotHasXampp(): Boolean;
-begin
-  Result := not HasXampp();
-end;
-
-procedure ConfigurePosIfLocal();
+procedure ConfigurePosAsServer();
 var
   XamppRoot: String;
   Ps1Path: String;
@@ -172,7 +220,9 @@ var
 begin
   XamppRoot := FindXamppRoot();
   if XamppRoot = '' then begin
-    Log('No local XAMPP detected — skipping POS-side auto-config.');
+    Log('Server mode chosen but no XAMPP detected on local drives — ' +
+        'skipping PS1. The cashier can re-run "Configure POS server" ' +
+        'from the Start menu after installing XAMPP.');
     Exit;
   end;
   Ps1Path := ExpandConstant('{app}\setup-pos-and-run.ps1');
@@ -180,7 +230,7 @@ begin
     Log('setup-pos-and-run.ps1 missing from install — skipping.');
     Exit;
   end;
-  Log('Local XAMPP at ' + XamppRoot + ' — running POS auto-config…');
+  Log('Server mode: local XAMPP at ' + XamppRoot + ' — running PS1…');
   Cmd := '-NoProfile -ExecutionPolicy Bypass -File "' + Ps1Path + '"' +
          ' -XamppRoot "' + XamppRoot + '"' +
          ' -Unattended' +
@@ -191,11 +241,57 @@ begin
     Exit;
   end;
   if ResultCode <> 0 then begin
-    Log('POS auto-config exited with code ' + IntToStr(ResultCode) +
-        '. The cashier can re-run "Configure POS server" from the ' +
-        'Start menu if needed.');
+    Log('POS auto-config exited with code ' + IntToStr(ResultCode));
   end else begin
     Log('POS auto-config completed successfully.');
+  end;
+end;
+
+procedure WritePosTargetHint();
+var
+  TargetDir, TargetFile, Json: String;
+  Host, Port: String;
+  PortInt: Integer;
+begin
+  Host := Trim(TerminalServerPage.Values[0]);
+  Port := Trim(TerminalServerPage.Values[1]);
+  if Host = '' then begin
+    Log('Terminal mode: host blank — skipping hint write.');
+    Exit;
+  end;
+  PortInt := StrToIntDef(Port, 3306);
+  if (PortInt <= 0) or (PortInt > 65535) then PortInt := 3306;
+
+  TargetDir := ExpandConstant('{commonappdata}\TinkerPro');
+  if not DirExists(TargetDir) then begin
+    if not CreateDir(TargetDir) then begin
+      Log('Failed to create ' + TargetDir);
+      Exit;
+    end;
+  end;
+
+  TargetFile := TargetDir + '\pos_target.json';
+  // Minimal JSON — Flutter side parses {host: String, port: int}.
+  // No quoting of the host because we trim + the cashier can only
+  // enter a hostname or IP via the wizard (no embedded quotes).
+  Json := '{"host":"' + Host + '","port":' + IntToStr(PortInt) + '}';
+  if not SaveStringToFile(TargetFile, Json, False) then begin
+    Log('Failed to write ' + TargetFile);
+    Exit;
+  end;
+  Log('Terminal mode: wrote POS target ' + Host + ':' + IntToStr(PortInt) +
+      ' to ' + TargetFile);
+end;
+
+procedure ApplyPosSetup();
+var
+  Mode: Integer;
+begin
+  Mode := SetupModePage.SelectedValueIndex;
+  if Mode = 0 then begin
+    ConfigurePosAsServer();
+  end else begin
+    WritePosTargetHint();
   end;
 end;
 
@@ -207,6 +303,6 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then begin
-    ConfigurePosIfLocal();
+    ApplyPosSetup();
   end;
 end;
