@@ -77,10 +77,31 @@
 [CmdletBinding()]
 param(
     [string]$XamppRoot = 'C:\xampp',
-    [switch]$LaunchApp
+    [switch]$LaunchApp,
+    # When invoked from the Inno installer's [Code] section we don't
+    # have a console for Read-Host prompts and we don't want to fail
+    # the install on a cashier-only PC that just doesn't have XAMPP.
+    # In unattended mode: no prompts, missing XAMPP exits 0 with a
+    # logged note instead of a hard error, and stdout is the only
+    # output channel.
+    [switch]$Unattended,
+    # Password the .exe was compiled with for tps_reader — must match
+    # TPS_POS_PASS at build time. Empty preserves legacy behavior
+    # (XAMPP default no-password).
+    [string]$Password = ''
 )
 
 $ErrorActionPreference = 'Stop'
+
+# Single source of truth for "either pause for user input or just
+# exit cleanly". Used everywhere instead of bare Read-Host so the
+# Inno-driven path never hangs the installer.
+function Pause-OrExit($code) {
+    if (-not $Unattended) {
+        Read-Host "Press Enter to exit"
+    }
+    exit $code
+}
 
 function Write-Step($msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
 function Write-Ok  ($msg) { Write-Host "    $msg" -ForegroundColor Green }
@@ -112,7 +133,9 @@ if (-not $me.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
         '-File', "`"$PSCommandPath`"",
         '-XamppRoot', "`"$XamppRoot`""
     )
-    if ($LaunchApp) { $relaunchArgs += '-LaunchApp' }
+    if ($LaunchApp)   { $relaunchArgs += '-LaunchApp' }
+    if ($Unattended)  { $relaunchArgs += '-Unattended' }
+    if ($Password)    { $relaunchArgs += @('-Password', "`"$Password`"") }
     Start-Process powershell -Verb RunAs -ArgumentList $relaunchArgs
     exit
 }
@@ -125,13 +148,22 @@ $MysqlStart = Join-Path $XamppRoot 'mysql_start.bat'
 $AppExe     = Join-Path $PSScriptRoot 'TpSupport.exe'
 
 Write-Step "Checking XAMPP at $XamppRoot"
+$xamppMissing = $false
 foreach ($p in @($MyIni, $MysqlExe, $MysqlAdmin)) {
     if (-not (Test-Path $p)) {
-        Write-Bad "Missing: $p"
-        Write-Bad "Pass -XamppRoot pointing to your XAMPP folder (e.g. -XamppRoot 'D:\xampp')."
-        Read-Host "Press Enter to exit"
-        exit 1
+        Write-Warn "Missing: $p"
+        $xamppMissing = $true
+        break
     }
+}
+if ($xamppMissing) {
+    if ($Unattended) {
+        Write-Ok "No XAMPP on this machine — skipping POS-side setup (cashier-only PC)."
+        $summary.SkipNameResolve = 'skipped-no-xampp'
+        exit 0
+    }
+    Write-Bad "Pass -XamppRoot pointing to your XAMPP folder (e.g. -XamppRoot 'D:\xampp')."
+    Pause-OrExit 1
 }
 Write-Ok "XAMPP found"
 
@@ -144,8 +176,7 @@ function Test-MysqlUp {
 Write-Step "Checking MySQL is running"
 if (-not (Test-MysqlUp)) {
     Write-Warn "MySQL is not running — start it from XAMPP control panel, then re-run this script."
-    Read-Host "Press Enter to exit"
-    exit 1
+    Pause-OrExit 1
 }
 Write-Ok "MySQL is up"
 
@@ -206,9 +237,20 @@ if ($ini -match '(?m)^\s*skip-name-resolve\b') {
 # XAMPP install is misconfigured to listen on the WAN.
 $hosts = @('localhost', '127.0.0.1', '192.168.%.%', '10.%.%.%')
 Write-Step "Granting tps_reader SELECT on tinkerpro.shop"
+
+# Escape the password for SQL single-quoted string context. The only
+# meta we have to worry about is `'` itself — everything else (spaces,
+# special chars like @ ! #) is safe inside the quoted literal.
+$pwSqlEscaped = $Password -replace "'", "''"
+$idClause = "IDENTIFIED BY '$pwSqlEscaped'"
+
+# DROP USER IF EXISTS first so re-running with a different password
+# actually changes it (CREATE USER IF NOT EXISTS would silently
+# preserve the old credentials, leaving the .exe locked out).
 $stmts = New-Object System.Collections.Generic.List[string]
 foreach ($h in $hosts) {
-    $stmts.Add("CREATE USER IF NOT EXISTS 'tps_reader'@'$h' IDENTIFIED BY '';")
+    $stmts.Add("DROP USER IF EXISTS 'tps_reader'@'$h';")
+    $stmts.Add("CREATE USER 'tps_reader'@'$h' $idClause;")
     $stmts.Add("GRANT SELECT ON tinkerpro.shop TO 'tps_reader'@'$h';")
 }
 $stmts.Add('FLUSH PRIVILEGES;')
@@ -219,8 +261,7 @@ if ($LASTEXITCODE -ne 0) {
     Write-Bad "mysql refused the grant. Possible causes:"
     Write-Bad "  - root has a password (XAMPP default is empty)"
     Write-Bad "  - tinkerpro database doesn't exist yet on this POS install"
-    Read-Host "Press Enter to exit"
-    exit 1
+    Pause-OrExit 1
 }
 $summary.UsersGranted = $hosts
 Write-Ok ("tps_reader created/refreshed for: " + ($hosts -join ', '))
@@ -243,8 +284,7 @@ if ($needRestart) {
         if (-not (Test-Path $MysqlStart)) {
             Write-Bad "mysql_start.bat not found at $MysqlStart"
             Write-Bad "Open XAMPP control panel and start MySQL manually, then re-run this script."
-            Read-Host "Press Enter to exit"
-            exit 1
+            Pause-OrExit 1
         }
         Start-Process -FilePath $MysqlStart -WorkingDirectory $XamppRoot -WindowStyle Hidden
         Write-Host -NoNewline "    Waiting for MySQL"
@@ -260,8 +300,7 @@ if ($needRestart) {
             $summary.MySQLRestarted = 'mysql_start.bat'
         } else {
             Write-Bad "MySQL didn't come back up in 25s — start it manually from XAMPP control panel."
-            Read-Host "Press Enter to exit"
-            exit 1
+            Pause-OrExit 1
         }
     }
 }
@@ -271,15 +310,27 @@ if ($needRestart) {
 # user and SELECT. Catches: missing tinkerpro DB, missing shop table,
 # unexpected ACL rejection, MySQL still rebooting, etc.
 Write-Step "Verifying tps_reader can read tinkerpro.shop"
-$probeOut = & $MysqlExe -u tps_reader -h 127.0.0.1 --batch --skip-column-names `
-    -e 'SELECT shop_name, vat_reg FROM tinkerpro.shop ORDER BY id ASC LIMIT 1' 2>&1
+# mysql.exe takes the password via -p<pw> (no space) or MYSQL_PWD env
+# var. We use the env-var form to keep the password off process
+# listings. Empty-password legacy: drop -p entirely.
+$verifyArgs = @('-u', 'tps_reader', '-h', '127.0.0.1', '--batch', '--skip-column-names',
+                '-e', 'SELECT shop_name, vat_reg FROM tinkerpro.shop ORDER BY id ASC LIMIT 1')
+if ([string]::IsNullOrEmpty($Password)) {
+    $probeOut = & $MysqlExe @verifyArgs 2>&1
+} else {
+    $env:MYSQL_PWD = $Password
+    try {
+        $probeOut = & $MysqlExe @verifyArgs 2>&1
+    } finally {
+        Remove-Item Env:MYSQL_PWD -ErrorAction SilentlyContinue
+    }
+}
 if ($LASTEXITCODE -ne 0) {
     Write-Bad "Verification SELECT failed:"
     Write-Bad "  $probeOut"
     Write-Bad "Setup applied but the .exe will not be able to read shop info."
     $summary.VerifyShopRead = 'failed'
-    Read-Host "Press Enter to exit"
-    exit 1
+    Pause-OrExit 1
 }
 $probeText = ($probeOut | Out-String).Trim()
 if ([string]::IsNullOrWhiteSpace($probeText)) {
@@ -298,8 +349,7 @@ if ($LaunchApp) {
     if (-not (Test-Path $AppExe)) {
         Write-Bad "TpSupport.exe not found next to this script."
         Write-Bad "Place setup-pos-and-run.ps1 in the same folder as TpSupport.exe (the unzipped build) and re-run."
-        Read-Host "Press Enter to exit"
-        exit 1
+        Pause-OrExit 1
     }
     Start-Process -FilePath $AppExe -WorkingDirectory $PSScriptRoot
     Write-Ok "TpSupport launched"
@@ -318,4 +368,6 @@ Write-Host ""
 if (-not $LaunchApp) {
     Write-Ok "Setup-only mode. Run TpSupport.exe manually, or re-run with -LaunchApp."
 }
-Read-Host "Press Enter to exit"
+if (-not $Unattended) {
+    Read-Host "Press Enter to exit"
+}

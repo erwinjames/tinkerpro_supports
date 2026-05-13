@@ -97,6 +97,8 @@ jobs:
         # "C:\Program Files (x86)\Inno Setup 6\ISCC.exe". Version is
         # parsed inline (avoids the UTF-16 GITHUB_OUTPUT footgun) and
         # passed via /D AppVersion=...
+        env:
+          POS_PASS: ${{ github.event.inputs.pos_pass || '' }}
         run: |
           $line = (Select-String -Path pubspec.yaml -Pattern '^version:' | Select-Object -First 1).Line
           $appVer = ($line -replace 'version:\s*', '').Trim().Split('+')[0]
@@ -108,11 +110,16 @@ jobs:
             Write-Host "ISCC not found at expected path; falling back to PATH"
             $iscc = "iscc.exe"
           }
+          # Pass POS_PASS into iscc as /DPosPass=... so the installer's
+          # [Code] hook can run setup-pos-and-run.ps1 with the same
+          # password the .exe was compiled to send. Quoted-literal so
+          # symbols (@ ! # etc.) survive intact through cmd parsing.
           & $iscc `
             "/Qp" `
             "/DAppVersion=$appVer" `
             "/DSourceDir=..\build\windows\x64\runner\Release" `
             "/DOutputDir=..\installer-out" `
+            "/DPosPass=$env:POS_PASS" `
             installer\tinkerpro-employee.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Write-Host "Installer files produced:"

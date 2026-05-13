@@ -32,6 +32,14 @@
 #ifndef OutputDir
   #define OutputDir "out"
 #endif
+; Password the bundled TpSupport.exe was compiled to send for the
+; tps_reader DB user. Passed through to setup-pos-and-run.ps1 in the
+; [Code] post-install hook so the grant it creates matches what the
+; .exe will actually present. Empty preserves XAMPP's default
+; no-password behavior.
+#ifndef PosPass
+  #define PosPass ""
+#endif
 
 #define AppName        "TinkerPro Support"
 #define AppPublisher   "TinkerPro"
@@ -110,14 +118,95 @@ Type: filesandordirs; Name: "{app}\data"
 
 [Code]
 {
-  Best-effort guard: bail out if the app is already running so we
-  don't try to overwrite locked DLLs. Inno's built-in CloseApplications
-  handles this for the most part, but a friendly upfront message
-  beats a half-applied install if AV/locks make the auto-close fail.
+  Detect a local XAMPP install (= this PC is the POS DB host) and,
+  if present, run setup-pos-and-run.ps1 silently in unattended mode
+  to provision the tps_reader user + skip-name-resolve. On a
+  cashier-only PC (no XAMPP) the probe returns false and the post-
+  install step is a no-op, so the installer behaves the same way
+  it always did for non-POS boxes.
+
+  Why detect this way: TinkerPro POS ships on XAMPP, so the presence
+  of C:\xampp\mysql\bin\mysql.exe (or D:\, E:\) is a high-precision
+  signal that this is a POS box. Cheaper than a TCP probe of
+  localhost:3306 and doesn't false-positive on unrelated MariaDB
+  installs.
 }
-function InitializeSetup(): Boolean;
+
+function FindXamppRoot(): String;
 var
+  Drive: String;
+  Drives: TArrayOfString;
+  I: Integer;
+begin
+  Result := '';
+  SetArrayLength(Drives, 4);
+  Drives[0] := 'C:\xampp';
+  Drives[1] := 'D:\xampp';
+  Drives[2] := 'E:\xampp';
+  Drives[3] := 'F:\xampp';
+  for I := 0 to GetArrayLength(Drives) - 1 do begin
+    Drive := Drives[I];
+    if FileExists(Drive + '\mysql\bin\mysql.exe') then begin
+      Result := Drive;
+      Exit;
+    end;
+  end;
+end;
+
+function HasXampp(): Boolean;
+begin
+  Result := FindXamppRoot() <> '';
+end;
+
+function NotHasXampp(): Boolean;
+begin
+  Result := not HasXampp();
+end;
+
+procedure ConfigurePosIfLocal();
+var
+  XamppRoot: String;
+  Ps1Path: String;
+  Cmd: String;
   ResultCode: Integer;
 begin
+  XamppRoot := FindXamppRoot();
+  if XamppRoot = '' then begin
+    Log('No local XAMPP detected — skipping POS-side auto-config.');
+    Exit;
+  end;
+  Ps1Path := ExpandConstant('{app}\setup-pos-and-run.ps1');
+  if not FileExists(Ps1Path) then begin
+    Log('setup-pos-and-run.ps1 missing from install — skipping.');
+    Exit;
+  end;
+  Log('Local XAMPP at ' + XamppRoot + ' — running POS auto-config…');
+  Cmd := '-NoProfile -ExecutionPolicy Bypass -File "' + Ps1Path + '"' +
+         ' -XamppRoot "' + XamppRoot + '"' +
+         ' -Unattended' +
+         ' -Password "{#PosPass}"';
+  if not Exec('powershell.exe', Cmd, '', SW_HIDE, ewWaitUntilTerminated,
+              ResultCode) then begin
+    Log('Failed to launch setup-pos-and-run.ps1.');
+    Exit;
+  end;
+  if ResultCode <> 0 then begin
+    Log('POS auto-config exited with code ' + IntToStr(ResultCode) +
+        '. The cashier can re-run "Configure POS server" from the ' +
+        'Start menu if needed.');
+  end else begin
+    Log('POS auto-config completed successfully.');
+  end;
+end;
+
+function InitializeSetup(): Boolean;
+begin
   Result := True;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then begin
+    ConfigurePosIfLocal();
+  end;
 end;
