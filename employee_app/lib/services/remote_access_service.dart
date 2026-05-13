@@ -62,6 +62,11 @@ class RemoteAccessService {
       if (await _rustDeskAlreadyRunning()) {
         debugPrint('[remote-access] RustDesk already running — '
             'skipping kill + reconfigure + relaunch.');
+        // Existing RustDesk window may currently be in the foreground
+        // (e.g. the user just clicked it). Fire the background
+        // window-minimizer either way so reopening the employee app
+        // never leaves RustDesk visually on top.
+        unawaited(_minimizeRustDeskWindow());
         return;
       }
       // Stop any pre-existing RustDesk so it picks up our freshly
@@ -83,6 +88,61 @@ class RemoteAccessService {
       await launch();
     } catch (e) {
       debugPrint('[remote-access] prepare() failed: $e');
+    }
+  }
+
+  /// Find RustDesk's main window via Win32 `FindWindow("RustDesk")`
+  /// and minimize it to the taskbar so it stops covering the
+  /// employee app. Polls up to 8s after the launch call returns
+  /// (RustDesk's splash → main-window transition takes 1–3s on
+  /// most boxes). Idempotent and forgiving — if the window can't
+  /// be found in time, we just give up; the user can minimize
+  /// manually. Detached so the employee-app process doesn't wait.
+  ///
+  /// SW_MINIMIZE (6) is preferred over SW_HIDE (0) because we want
+  /// RustDesk's taskbar entry to stay visible — that's how the
+  /// cashier finds it when an admin actually starts a remote
+  /// session and they need to click Accept.
+  Future<void> _minimizeRustDeskWindow() async {
+    if (!Platform.isWindows) return;
+    const psScript = r'''
+Add-Type @"
+  using System;
+  using System.Runtime.InteropServices;
+  public class WUtil {
+    [DllImport("user32.dll", SetLastError=true, CharSet=CharSet.Auto)]
+    public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+  }
+"@
+$deadline = (Get-Date).AddSeconds(8)
+$titles = @("RustDesk", "RustDesk - ID")
+while ((Get-Date) -lt $deadline) {
+  foreach ($t in $titles) {
+    $h = [WUtil]::FindWindow($null, $t)
+    if ($h -ne [IntPtr]::Zero -and [WUtil]::IsWindowVisible($h)) {
+      [WUtil]::ShowWindow($h, 6) | Out-Null  # SW_MINIMIZE
+      exit 0
+    }
+  }
+  Start-Sleep -Milliseconds 250
+}
+''';
+    try {
+      await Process.start(
+        'powershell.exe',
+        [
+          '-NoProfile',
+          '-ExecutionPolicy', 'Bypass',
+          '-WindowStyle', 'Hidden',
+          '-Command', psScript,
+        ],
+        mode: ProcessStartMode.detached,
+        runInShell: false,
+      );
+    } catch (e) {
+      debugPrint('[remote-access] window-minimizer launch failed: $e');
     }
   }
 
@@ -255,13 +315,19 @@ class RemoteAccessService {
     try {
       if (Platform.isWindows) {
         // start.exe consumes its first quoted arg as a window title,
-        // so we pass an empty "" before the binary path.
+        // so we pass an empty "" before the binary path. `/min` is
+        // mostly cosmetic for RustDesk specifically (it's a GUI
+        // subsystem app that ShowWindow(SW_NORMAL)s on startup,
+        // overriding the hint), so we follow up with the
+        // _minimizeRustDeskWindow watcher which polls for the
+        // RustDesk window and forces it to the taskbar.
         await Process.start(
           'cmd.exe',
           ['/c', 'start', '/min', '', binary],
           mode: ProcessStartMode.detached,
           runInShell: false,
         );
+        unawaited(_minimizeRustDeskWindow());
         return true;
       }
       // Detached so the RustDesk window outlives a brief Flutter
