@@ -23,7 +23,7 @@ Five `--dart-define` flags. They're baked into the binary at compile time — to
 | `CHAT_SOKETI_TLS` | When connecting via `wss://` (anything HTTPS). | Matches API URL scheme |
 | `CHAT_SOKETI_KEY` | If you rotated the public Soketi key off the dev default. | `tinkerpro-chat-key` |
 
-**Three URL recipes covering every realistic deployment:**
+**Three URL recipes covering every realistic deployment:** 
 
 ```bash
 # 1. Local XAMPP, same machine — Linux desktop dev

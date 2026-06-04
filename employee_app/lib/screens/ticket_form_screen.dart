@@ -1,22 +1,28 @@
 import 'dart:async';
+import 'dart:io';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
 import '../api_client.dart';
 import '../services/chat_service.dart' show EmployeeChatInfo;
-import '../services/pos_discovery_service.dart';
 import '../services/pos_shop_service.dart';
 import '../services/session_store.dart';
 import '../services/ticket_service.dart';
 import '../theme.dart';
 
-/// Pushed when the employee types `/ticket` in the chat composer.
+/// "Submit a ticket" screen — opened from the AI chat / Help guide /
+/// `/ticket` chat command. Mirrors the marketing-site mock: a flat
+/// header bar, two-up Subject/Category, four-tile Priority strip, large
+/// description, optional screenshot attachment, and a read-only
+/// "Included with this ticket" card showing the metadata that gets
+/// stamped on the ticket automatically (tenant, branch, terminal IP,
+/// user, app version, OS).
 ///
-/// Mirrors the layout of the web portal's customer-ticket.php form, but
-/// auto-fills business name from the saved store name and pulls VAT/
-/// Non-VAT status live from the local POS `tinkerpro.shop` table over
-/// the LAN (single-terminal: localhost; multi-terminal: /24 sweep with
-/// credential check). The employee enters their own name + the issue.
+/// All the existing POS shop-info loading + manual setup logic is
+/// preserved — it's just no longer the dominant UI element. Business
+/// name and VAT label flow into the metadata card; the cashier never
+/// types them.
 class TicketFormScreen extends StatefulWidget {
   const TicketFormScreen({
     super.key,
@@ -36,12 +42,31 @@ class TicketFormScreen extends StatefulWidget {
 }
 
 class _TicketFormScreenState extends State<TicketFormScreen> {
+  // App version is shown in the "Included with this ticket" card.
+  // Hardcoded to dodge a `package_info_plus` dependency for one string;
+  // bump it when pubspec.yaml's version bumps.
+  static const String _appVersion = '1.0.0';
+
+  // Static category list — no backend column yet, the selected value is
+  // prepended into the description so agents still see which bucket the
+  // cashier picked. Order mirrors how often we see them in real tickets.
+  static const List<String> _categories = [
+    'Reports and reading',
+    'Payments and refunds',
+    'Hardware (printer, scanner, terminal)',
+    'Inventory and products',
+    'Sync and connectivity',
+    'Other',
+  ];
+
   final _formKey = GlobalKey<FormState>();
-  final _name = TextEditingController();
   final _subject = TextEditingController();
   final _description = TextEditingController();
 
-  String _priority = 'low';
+  String _priority = 'medium'; // low | medium | high | urgent
+  String? _category;
+  PlatformFile? _attachment;
+
   bool _loadingShop = true;
   bool _submitting = false;
   ShopInfo? _shop;
@@ -50,45 +75,32 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
   String _shopProgress = '';
   late final PosShopService _posShop = PosShopService(store: widget.store);
 
-  // Manual-setup panel state — shown the very first time /ticket runs
-  // on a fresh install before any admin has pinned a POS host. After a
-  // successful Connect we save the host+port to SessionStore and never
-  // show this panel again.
+  // Auto-detected local IPv4 — shown as the "Terminal" line. Pulled
+  // once on initState; null while resolving / when no usable interface
+  // exists (rare on a POS box but possible in headless dev).
+  String? _terminalIp;
+
+  // Manual-setup panel — appears in the metadata card slot the very
+  // first time /ticket runs on a fresh install before any admin has
+  // pinned a POS host. After a successful Connect the host+port are
+  // saved and we never show this panel again.
   bool _needsSetup = false;
   final _setupHost = TextEditingController();
   final _setupPort = TextEditingController(text: '3306');
   bool _setupBusy = false;
   String? _setupError;
 
-  // Diagnostic panel state — see _buildDiagnosticsCard.
-  bool _diagOpen = false;
-  bool _diagScanning = false;
-  String _diagProgress = '';
-  PosScanReport? _diagReport;
-  String? _diagBusyKey; // "host:port" currently being validated by tap-to-connect
-  String? _diagConnectError;
-
   /// Periodic silent retry while we're sitting on cached / fallback data.
   /// Heals a transient LAN / DB hiccup without forcing the user to tap
   /// Retry. Cancelled the moment we hit live POS data or the screen is
-  /// disposed. 15s cadence keeps the noise low — handshake itself is
-  /// already capped at 8s.
+  /// disposed. 15s cadence keeps the noise low.
   Timer? _silentRetryTimer;
   static const _silentRetryInterval = Duration(seconds: 15);
 
   @override
   void initState() {
     super.initState();
-    // Default the name field to whatever the employee identifies as in
-    // chat. They can overwrite it.
-    _name.text = widget.info.meName;
-    // Three-way decision:
-    //   - cached ShopInfo  → render instantly, silently refresh if we
-    //                        have a configured target to talk to
-    //   - manual target set but no cache → load visibly (single-shot
-    //                                       connect, no LAN scan)
-    //   - nothing configured             → show the setup panel so an
-    //                                       admin can pin host+port
+    _resolveTerminalIp();
     final cached = widget.store.cachedShop;
     final hasManual = widget.store.hasPosManualTarget;
     if (cached != null) {
@@ -119,7 +131,6 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
   @override
   void dispose() {
     _silentRetryTimer?.cancel();
-    _name.dispose();
     _subject.dispose();
     _description.dispose();
     _setupHost.dispose();
@@ -127,14 +138,39 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
     super.dispose();
   }
 
-  /// Kick off (or restart) the periodic silent refresh. Idempotent.
-  /// Stops itself once we hit live POS data — see _stopSilentRetryTimer
-  /// at the end of _loadShop().
+  Future<void> _resolveTerminalIp() async {
+    try {
+      final ifaces = await NetworkInterface.list(
+        type: InternetAddressType.IPv4,
+        includeLinkLocal: false,
+        includeLoopback: false,
+      );
+      String? best;
+      for (final i in ifaces) {
+        for (final a in i.addresses) {
+          final ip = a.address;
+          if (ip.isEmpty) continue;
+          // Prefer the first non-loopback IPv4 — that's the LAN address
+          // the cashier and the support agent will use to talk about
+          // "this terminal."
+          best = ip;
+          break;
+        }
+        if (best != null) break;
+      }
+      if (!mounted) return;
+      setState(() => _terminalIp = best);
+    } catch (_) {
+      // Permissions / sandboxing on some platforms; metadata card just
+      // shows "—" for the IP. Not worth surfacing.
+    }
+  }
+
   void _startSilentRetryTimer() {
     _silentRetryTimer?.cancel();
     _silentRetryTimer = Timer.periodic(_silentRetryInterval, (_) {
       if (!mounted) return;
-      if (_shopSource == 'pos') return; // already live
+      if (_shopSource == 'pos') return;
       if (!widget.store.hasPosManualTarget) return;
       _loadShop(silent: true);
     });
@@ -154,9 +190,6 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
         _shopProgress = 'Looking for the POS server…';
       });
     }
-    // POS DB read is the source of truth for vat_reg. The session's
-    // store name covers business-name display when no POS row matches
-    // by TIN (almost always the case — shop_tin is rarely populated).
     final apiHost = _hostFromBaseUrl(widget.api.baseUrl);
     final hints = <String>[if (apiHost != null) apiHost];
     final pos = await _posShop.getShopInfo(
@@ -171,21 +204,12 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
             },
     );
 
-    // Fallback: if direct POS DB access fails (network/credentials/firewall),
-    // use support-backend customer info so ticket creation can still proceed.
-    // Skip the fallback on silent refreshes — we already have a cached
-    // ShopInfo on screen, no point downgrading it to a less-trusted source.
     ShopInfo? fallback;
     if (pos == null && !silent) {
       fallback = await widget.tickets.getShopInfo();
     }
-
     if (!mounted) return;
 
-    // Silent path: only mutate UI / cache when we actually got fresh POS
-    // data. Failures during background refresh are intentionally
-    // swallowed — the cached values stay on screen so offline still
-    // works.
     if (silent) {
       if (pos == null) return;
       final businessName = pos.businessName.isNotEmpty
@@ -208,12 +232,8 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
           _shopSource = 'pos';
           _shopError = null;
         });
-      } else {
-        // Values unchanged but we just confirmed liveness — flip the
-        // source so the caption (and timer) stops claiming "cache".
-        if (_shopSource != 'pos') {
-          setState(() => _shopSource = 'pos');
-        }
+      } else if (_shopSource != 'pos') {
+        setState(() => _shopSource = 'pos');
       }
       _stopSilentRetryTimer();
       return;
@@ -226,11 +246,10 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
         _shopSource = 'none';
         final posErr = _posShop.lastError;
         _shopError = posErr == null
-            ? 'Could not read shop info from the POS database. Tap Retry.'
-            : 'Could not read shop info from the POS database ($posErr). Tap Retry.';
+            ? 'Could not read shop info from the POS database.'
+            : 'Could not read shop info from the POS database ($posErr).';
         return;
       }
-
       if (pos == null && fallback != null) {
         _shop = ShopInfo(
           businessName: fallback.businessName.isNotEmpty
@@ -244,16 +263,10 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
         );
         _shopSource = 'fallback';
         _shopError = null;
-        // Background-retry the POS so a transient outage upgrades to
-        // live data automatically once it heals.
         _startSilentRetryTimer();
         return;
       }
-
       final resolvedPos = pos!;
-      // Adopt the session's store name when the POS row didn't carry
-      // one (typical — the shop table's shop_name is often the POS
-      // provider's brand, not the merchant's business).
       final businessName = resolvedPos.businessName.isNotEmpty
           ? resolvedPos.businessName
           : (widget.store.storeName ?? '');
@@ -269,17 +282,12 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
       _shopError = null;
     });
 
-    // Persist successful POS reads so the next /ticket open is instant.
     if (pos != null) {
       await widget.store.saveCachedShop(_shop!);
       _stopSilentRetryTimer();
     }
   }
 
-  /// Admin-driven setup: connect to the typed host/port, and if it
-  /// works, pin it to SessionStore so we never ask again on this
-  /// install. On failure we leave the manual target unset — the admin
-  /// can correct the values and retry.
   Future<void> _saveSetupAndConnect() async {
     final host = _setupHost.text.trim();
     final portText = _setupPort.text.trim();
@@ -330,9 +338,6 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
     });
   }
 
-  /// Escape hatch from the setup panel — try the existing LAN
-  /// auto-discovery. Useful when the admin doesn't know the host but is
-  /// on the same network as the POS.
   void _setupTryAutoDiscover() {
     setState(() {
       _needsSetup = false;
@@ -341,28 +346,34 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
     _loadShop();
   }
 
-  /// Re-open the setup panel to change a previously-pinned host (e.g.,
-  /// the POS box got a new IP). Called from the diagnostic card.
-  void _openSetupPanel() {
-    setState(() {
-      _setupHost.text = widget.store.posManualHost ?? '';
-      _setupPort.text = (widget.store.posManualPort ?? 3306).toString();
-      _setupError = null;
-      _needsSetup = true;
-    });
-  }
-
-  /// Pull "host" out of an http(s) base URL — the support backend often
-  /// runs on the same machine as the POS, so its host is the strongest
-  /// hint for the LAN scanner.
   String? _hostFromBaseUrl(String url) {
     try {
-      final u = Uri.parse(url);
-      final h = u.host;
+      final h = Uri.parse(url).host;
       return h.isEmpty ? null : h;
     } catch (_) {
       return null;
     }
+  }
+
+  Future<void> _pickAttachment() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.image,
+      allowMultiple: false,
+      withData: false,
+    );
+    if (result == null || result.files.isEmpty) return;
+    final f = result.files.first;
+    // 10 MB cap matches the backend; reject early so we don't waste an
+    // upload round-trip on a too-large file.
+    if (f.size > 10 * 1024 * 1024) {
+      _toast('That image is too large (10 MB max).');
+      return;
+    }
+    setState(() => _attachment = f);
+  }
+
+  void _clearAttachment() {
+    setState(() => _attachment = null);
   }
 
   Future<void> _submit() async {
@@ -373,20 +384,19 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
       return;
     }
     setState(() => _submitting = true);
+    final attachmentPath = _attachment?.path;
     final result = await widget.tickets.createTicket(
-      customerName: _name.text.trim(),
-      // Employee app has no portal customer email — the server-side
-      // ticket facade is tolerant of an empty value here.
+      // Cashier no longer types their name — the chat identity is the
+      // canonical "who sent this ticket" value.
+      customerName: widget.info.meName,
       customerEmail: '',
       businessName: shop.businessName,
       vatReg: shop.vatReg,
       subject: _subject.text.trim(),
       description: _description.text.trim(),
       priority: _priority,
-      // Link the ticket to this chat conversation so admin-side
-      // resolve/accept actions can post their announcement bubbles
-      // back to the same thread — without this, the server falls back
-      // to email-keyed user creation and never posts the bubble.
+      category: _category,
+      attachment: attachmentPath != null ? File(attachmentPath) : null,
       conversationId: widget.info.conversationId,
     );
     if (!mounted) return;
@@ -413,47 +423,88 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Brand.surface,
-      appBar: AppBar(
-        backgroundColor: Brand.canvas,
-        elevation: 0,
-        scrolledUnderElevation: 0,
-        shape: const Border(bottom: BorderSide(color: Brand.stroke)),
-        title: const Text(
-          'New support ticket',
-          style: TextStyle(
-            fontWeight: FontWeight.w700,
-            color: Brand.textPrimary,
-            fontSize: 16,
-          ),
-        ),
-        iconTheme: const IconThemeData(color: Brand.textPrimary),
-      ),
       body: LayoutBuilder(
         builder: (context, constraints) {
-          // Use the full app width on desktop — only the outer
-          // padding scales. The wide breakpoint (≥ 960px) still
-          // controls the inner two-column form layout, but the card
-          // itself stretches edge-to-edge so a maximized window
-          // doesn't show empty gutters.
-          final wide = constraints.maxWidth >= 960.0;
+          final w = constraints.maxWidth;
+          final wide = w >= 720.0;
+          // On a real desktop monitor split into two columns so the whole
+          // ticket fits in view with little or no scrolling. Below this we
+          // fall back to the single stacked column (small windows / mobile).
+          final twoCol = w >= 1000.0;
+          final double pad = !wide ? 18.0 : (w >= 1600.0 ? 48.0 : 32.0);
+          final double avail =
+              (w - pad * 2).clamp(280.0, double.infinity).toDouble();
+          // The form is laid out at a fixed "base" design width, then ZOOMED
+          // UP proportionally once the screen is wider than that — so on a
+          // big / ultrawide monitor the whole UI (text, cards, spacing)
+          // scales instead of staying small with empty side margins. Below
+          // the base width it renders 1:1 and just fills the available width.
+          const double baseTwoCol = 1560.0;
+          const double baseSingle = 860.0;
+          const double maxZoom = 1.4;
+          final bool zoom = twoCol && avail > baseTwoCol;
+          final double scale =
+              zoom ? (avail / baseTwoCol).clamp(1.0, maxZoom).toDouble() : 1.0;
+          final double contentWidth =
+              !twoCol ? baseSingle : (zoom ? baseTwoCol : avail);
           return SafeArea(
             child: Column(
               children: [
+                Container(
+                  color: Brand.canvas,
+                  child: _buildHeaderBar(pad: pad),
+                ),
+                const _Divider(),
                 Expanded(
-                  child: ListView(
-                    padding: EdgeInsets.fromLTRB(
-                        wide ? 32 : 20,
-                        wide ? 28 : 24,
-                        wide ? 32 : 20,
-                        24),
-                    children: [
-                      _buildHero(wide: wide),
-                      SizedBox(height: wide ? 24 : 20),
-                      _buildFormCard(wide: wide),
-                    ],
+                  child: Form(
+                    key: _formKey,
+                    child: LayoutBuilder(
+                      builder: (context, viewport) {
+                        const vPad = 24.0 + 24.0;
+                        return SingleChildScrollView(
+                          padding: EdgeInsets.fromLTRB(pad, 24, pad, 24),
+                          child: ConstrainedBox(
+                            // Fill at least the viewport so the content can be
+                            // vertically centred — kills the big empty band at
+                            // the bottom on a desktop monitor — while still
+                            // scrolling on short windows.
+                            constraints: BoxConstraints(
+                                minHeight: viewport.maxHeight - vPad),
+                            child: Center(
+                              child: scale == 1.0
+                                  ? ConstrainedBox(
+                                      constraints: BoxConstraints(
+                                          maxWidth: contentWidth),
+                                      child: _buildFormBody(
+                                          wide: wide, twoCol: twoCol),
+                                    )
+                                  : SizedBox(
+                                      // Reserve the scaled footprint so the
+                                      // scroll view + vertical centring know
+                                      // the real (zoomed) size.
+                                      width: contentWidth * scale,
+                                      child: FittedBox(
+                                        fit: BoxFit.fitWidth,
+                                        alignment: Alignment.topCenter,
+                                        child: SizedBox(
+                                          width: contentWidth,
+                                          child: _buildFormBody(
+                                              wide: wide, twoCol: twoCol),
+                                        ),
+                                      ),
+                                    ),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
                   ),
                 ),
-                _buildStickyFooter(wide: wide),
+                const _Divider(),
+                Container(
+                  color: Brand.canvas,
+                  child: _buildFooterBar(pad: pad),
+                ),
               ],
             ),
           );
@@ -462,320 +513,854 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
     );
   }
 
-  /// Sticky submit footer — pinned to the bottom of the scaffold so
-  /// the CTA stays in view even while the user is mid-way through a
-  /// long description. Top hairline + soft upward shadow separates it
-  /// from the scrolling content above.
-  Widget _buildStickyFooter({required bool wide}) {
-    return Container(
-      decoration: BoxDecoration(
-        color: Brand.canvas,
-        border: Border(
-          top: BorderSide(color: Brand.stroke.withValues(alpha: 0.7)),
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.04),
-            blurRadius: 16,
-            offset: const Offset(0, -4),
-          ),
-        ],
-      ),
-      child: SafeArea(
-        top: false,
-        child: Padding(
-          padding: EdgeInsets.fromLTRB(
-              wide ? 32 : 20, 14, wide ? 32 : 20, 14),
-          child: _buildSubmit(),
-        ),
-      ),
-    );
-  }
+  // ── Form body (responsive 1 / 2 column) ────────────────────────────────
 
-  /// Premium hero — soft warm gradient and (on desktop) a row of
-  /// reassurance bullets describing the post-submit experience. The
-  /// hero replaces the old duplicate title block and on wide displays
-  /// uses the horizontal space rather than wasting it.
-  Widget _buildHero({required bool wide}) {
-    return Container(
-      padding: EdgeInsets.fromLTRB(
-          wide ? 28 : 22, wide ? 24 : 22, wide ? 28 : 22, wide ? 24 : 22),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [
-            Brand.signal.withValues(alpha: 0.08),
-            Brand.canvas,
-          ],
-        ),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Brand.stroke),
-      ),
-      child: Flex(
-        direction: wide ? Axis.horizontal : Axis.vertical,
-        crossAxisAlignment:
-            wide ? CrossAxisAlignment.center : CrossAxisAlignment.start,
+  Widget _buildFormBody({required bool wide, required bool twoCol}) {
+    final issueCard = _SectionCard(
+      icon: Icons.subject_rounded,
+      title: 'Issue details',
+      subtitle: 'A clear subject helps us route this faster.',
+      child: _buildSubjectAndCategory(wide: wide),
+    );
+    final priorityCard = _SectionCard(
+      icon: Icons.flag_outlined,
+      title: 'Priority',
+      subtitle: 'How urgent is this for the store?',
+      child: _buildPriority(),
+    );
+    final describeCard = _SectionCard(
+      icon: Icons.edit_note_rounded,
+      title: 'Describe the issue',
+      titleRequired: true,
+      subtitle: 'The more detail, the quicker we can help.',
+      child: _buildDescription(),
+    );
+    final attachmentCard = _SectionCard(
+      icon: Icons.attach_file_rounded,
+      title: 'Attachment',
+      titleTrailing: 'OPTIONAL',
+      child: _buildAttachment(),
+    );
+    final includedCard = _buildIncludedCard();
+
+    if (!twoCol) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // Title block — must be flex-wrapped on horizontal so the
-          // inner Flexible(text) has a bounded width. On vertical the
-          // raw Row sizes itself to the parent Container's width.
-          if (wide)
-            Expanded(flex: 5, child: _heroTitleRow(wide: wide))
-          else
-            _heroTitleRow(wide: wide),
-          if (wide) ...[
-            const SizedBox(width: 32),
-            const Expanded(
-              flex: 6,
-              child: Wrap(
-                spacing: 24,
-                runSpacing: 12,
-                children: [
-                  _HeroBullet(
-                    icon: Icons.confirmation_number_outlined,
-                    label: 'Ticket # right away',
-                  ),
-                  _HeroBullet(
-                    icon: Icons.bolt_outlined,
-                    label: 'Agent picks it up quickly',
-                  ),
-                  _HeroBullet(
-                    icon: Icons.forum_outlined,
-                    label: 'Updates here in chat',
-                  ),
-                ],
-              ),
-            ),
-          ] else ...[
-            const SizedBox(height: 16),
-            Row(
-              children: const [
-                _HeroBullet(
-                  icon: Icons.confirmation_number_outlined,
-                  label: 'Ticket # right away',
-                  compact: true,
-                ),
-              ],
-            ),
-          ],
+          issueCard,
+          const SizedBox(height: 16),
+          priorityCard,
+          const SizedBox(height: 16),
+          describeCard,
+          const SizedBox(height: 16),
+          attachmentCard,
+          const SizedBox(height: 16),
+          includedCard,
+          const SizedBox(height: 4),
         ],
-      ),
-    );
-  }
+      );
+    }
 
-  Widget _heroTitleRow({required bool wide}) {
+    // Desktop: the main filling-out flow on the left, supporting cards
+    // (attach + the read-only auto-included metadata) on the right.
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Container(
-          width: 44,
-          height: 44,
-          decoration: BoxDecoration(
-            color: Brand.signal.withValues(alpha: 0.12),
-            borderRadius: BorderRadius.circular(12),
-          ),
-          alignment: Alignment.center,
-          child: const Icon(Icons.support_agent_outlined,
-              color: Brand.signal, size: 22),
-        ),
-        const SizedBox(width: 14),
         Expanded(
-          child: ConstrainedBox(
-            constraints: BoxConstraints(maxWidth: wide ? 380 : 600),
-            child: const Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  "Let's get you sorted",
-                  style: TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.w700,
-                    color: Brand.textPrimary,
-                    letterSpacing: -0.2,
-                    height: 1.2,
-                  ),
-                ),
-                SizedBox(height: 6),
-                Text(
-                  "Tell us what's happening. We'll route the ticket to support and post updates right back into this chat.",
-                  style: TextStyle(
-                    color: Brand.textMuted,
-                    fontSize: 13,
-                    height: 1.5,
-                  ),
-                ),
-              ],
-            ),
+          flex: 60,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              issueCard,
+              const SizedBox(height: 16),
+              priorityCard,
+              const SizedBox(height: 16),
+              describeCard,
+            ],
+          ),
+        ),
+        const SizedBox(width: 16),
+        Expanded(
+          flex: 40,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              attachmentCard,
+              const SizedBox(height: 16),
+              includedCard,
+              const SizedBox(height: 16),
+              _buildNextStepsCard(),
+            ],
           ),
         ),
       ],
     );
   }
 
-  Widget _buildFormCard({required bool wide}) {
-    final nameField = Column(
+  /// Small reassurance card shown in the desktop sidebar — fills the
+  /// right column so it reads even with the taller left column, and sets
+  /// expectations for what happens after submitting.
+  Widget _buildNextStepsCard() {
+    const steps = [
+      'A TinkerPro agent reviews your ticket.',
+      'You can keep chatting while you wait.',
+      'Please set an honest priority — use High or Urgent only when the '
+          'store is affected, so real emergencies get help first.',
+    ];
+    return _SectionCard(
+      icon: Icons.bolt_outlined,
+      title: 'What happens next',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          for (var i = 0; i < steps.length; i++) ...[
+            if (i > 0) const SizedBox(height: 10),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(
+                  width: 20,
+                  height: 20,
+                  margin: const EdgeInsets.only(top: 1),
+                  decoration: BoxDecoration(
+                    color: Brand.signal.withValues(alpha: 0.10),
+                    shape: BoxShape.circle,
+                  ),
+                  alignment: Alignment.center,
+                  child: Text(
+                    '${i + 1}',
+                    style: const TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      color: Brand.signal,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    steps[i],
+                    style: const TextStyle(
+                      fontSize: 12.5,
+                      color: Brand.textMuted,
+                      height: 1.4,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  // ── Header bar ─────────────────────────────────────────────────────────
+
+  Widget _buildHeaderBar({required double pad}) {
+    return Padding(
+      padding: EdgeInsets.fromLTRB(pad, 18, pad, 18),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          _IconButtonBox(
+            icon: Icons.arrow_back_rounded,
+            tooltip: 'Back',
+            onTap: _submitting ? null : () => Navigator.of(context).maybePop(),
+          ),
+          const SizedBox(width: 16),
+          // Brand mark — a gradient rounded square with a headset glyph,
+          // anchoring the screen as part of the TinkerPro product family.
+          Container(
+            width: 44,
+            height: 44,
+            decoration: BoxDecoration(
+              gradient: Brand.primary,
+              borderRadius: BorderRadius.circular(13),
+              boxShadow: [
+                BoxShadow(
+                  color: Brand.signal.withValues(alpha: 0.30),
+                  blurRadius: 12,
+                  offset: const Offset(0, 4),
+                ),
+              ],
+            ),
+            alignment: Alignment.center,
+            child: const Icon(Icons.support_agent_rounded,
+                color: Colors.white, size: 24),
+          ),
+          const SizedBox(width: 14),
+          const Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Submit a ticket',
+                  style: TextStyle(
+                    fontSize: 22,
+                    fontWeight: FontWeight.w800,
+                    color: Brand.textPrimary,
+                    letterSpacing: -0.4,
+                    height: 1.15,
+                  ),
+                ),
+                SizedBox(height: 3),
+                Text(
+                  'Tell us what is wrong and we will get back to you',
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: Brand.textMuted,
+                    height: 1.4,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 16),
+          if (Navigator.of(context).canPop())
+            _OutlineButton(
+              icon: Icons.menu_book_outlined,
+              label: 'Help articles',
+              onTap: _submitting ? null : () => Navigator.of(context).maybePop(),
+            ),
+        ],
+      ),
+    );
+  }
+
+  // ── Subject + Category ─────────────────────────────────────────────────
+
+  Widget _buildSubjectAndCategory({required bool wide}) {
+    final subjectField = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _label('Full name', required_: true),
+        _label('Subject', required_: true),
         TextFormField(
-          controller: _name,
-          decoration: _fieldDecoration('Enter your full name'),
-          validator: (v) =>
-              (v == null || v.trim().isEmpty) ? 'Name is required.' : null,
+          controller: _subject,
+          decoration: _inputDecoration('Brief description of your issue'),
+          textInputAction: TextInputAction.next,
+          validator: (v) => (v == null || v.trim().isEmpty)
+              ? 'Subject is required.'
+              : null,
         ),
       ],
     );
-    final businessField = Column(
+    final categoryField = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _label('Business', required_: true),
-        _buildBusinessField(),
-        if (!_loadingShop && !_needsSetup && _shop != null)
-          _buildSourceCaption(),
+        _label('Category'),
+        DropdownButtonFormField<String>(
+          initialValue: _category,
+          isExpanded: true,
+          icon: const Icon(Icons.expand_more_rounded, color: Brand.textMuted),
+          decoration: _inputDecoration('Select a category'),
+          style: const TextStyle(
+            fontSize: 14,
+            color: Brand.textPrimary,
+            fontWeight: FontWeight.w500,
+          ),
+          items: _categories
+              .map((c) => DropdownMenuItem<String>(
+                    value: c,
+                    child: Text(c, overflow: TextOverflow.ellipsis),
+                  ))
+              .toList(),
+          onChanged: (v) => setState(() => _category = v),
+        ),
       ],
     );
 
-    return Container(
-      padding: EdgeInsets.fromLTRB(
-          wide ? 32 : 24, wide ? 28 : 24, wide ? 32 : 24, wide ? 28 : 24),
-      decoration: BoxDecoration(
-        color: Brand.canvas,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Brand.stroke),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.025),
-            blurRadius: 24,
-            offset: const Offset(0, 8),
-          ),
+    if (!wide) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          subjectField,
+          const SizedBox(height: 18),
+          categoryField,
         ],
-      ),
-      child: Form(
-        key: _formKey,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _sectionHeader(icon: Icons.badge_outlined, text: 'Your details'),
-            // On desktop the two short top-fields share a row instead of
-            // stacking — uses the horizontal real estate naturally and
-            // collapses the visual height of the form.
-            if (wide)
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Expanded(child: nameField),
-                  const SizedBox(width: 20),
-                  Expanded(child: businessField),
-                ],
-              )
-            else ...[
-              nameField,
-              const SizedBox(height: 20),
-              businessField,
+      );
+    }
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(child: subjectField),
+        const SizedBox(width: 20),
+        Expanded(child: categoryField),
+      ],
+    );
+  }
+
+  // ── Priority strip ─────────────────────────────────────────────────────
+
+  Widget _buildPriority() {
+    const opts = <_PriorityOpt>[
+      _PriorityOpt('low', 'Low', Color(0xFF64748B), Icons.arrow_downward_rounded),
+      _PriorityOpt('medium', 'Normal', Color(0xFF2563EB), Icons.drag_handle_rounded),
+      _PriorityOpt('high', 'High', Color(0xFFD97706), Icons.arrow_upward_rounded),
+      _PriorityOpt('urgent', 'Urgent, store down', Color(0xFFDC2626),
+          Icons.warning_amber_rounded),
+    ];
+    return LayoutBuilder(builder: (context, constraints) {
+      final narrow = constraints.maxWidth < 480;
+      // Narrow viewport stacks into a 2x2 grid so labels don't truncate.
+      if (narrow) {
+        return Wrap(
+          spacing: 10,
+          runSpacing: 10,
+          children: opts.map((o) {
+            return SizedBox(
+              width: (constraints.maxWidth - 10) / 2,
+              child: _priorityTile(o),
+            );
+          }).toList(),
+        );
+      }
+      return Row(
+        children: [
+          for (var i = 0; i < opts.length; i++) ...[
+            Expanded(child: _priorityTile(opts[i])),
+            if (i < opts.length - 1) const SizedBox(width: 10),
+          ],
+        ],
+      );
+    });
+  }
+
+  Widget _priorityTile(_PriorityOpt o) {
+    final selected = _priority == o.value;
+    final accent = o.color;
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(14),
+        onTap: () => setState(() => _priority = o.value),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          curve: Curves.easeOut,
+          padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 10),
+          decoration: BoxDecoration(
+            color: selected ? accent.withValues(alpha: 0.08) : Brand.canvas,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(
+              color: selected ? accent : Brand.stroke,
+              width: selected ? 1.6 : 1,
+            ),
+            boxShadow: selected
+                ? [
+                    BoxShadow(
+                      color: accent.withValues(alpha: 0.16),
+                      blurRadius: 12,
+                      offset: const Offset(0, 4),
+                    ),
+                  ]
+                : null,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 180),
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  color: selected
+                      ? accent.withValues(alpha: 0.16)
+                      : Brand.subtle,
+                  shape: BoxShape.circle,
+                ),
+                alignment: Alignment.center,
+                child: Icon(o.icon,
+                    size: 18, color: selected ? accent : Brand.textMuted),
+              ),
+              const SizedBox(height: 9),
+              Text(
+                o.label,
+                textAlign: TextAlign.center,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: selected ? FontWeight.w700 : FontWeight.w600,
+                  color: selected ? accent : Brand.textPrimary,
+                  letterSpacing: -0.05,
+                ),
+              ),
             ],
-            const SizedBox(height: 4),
-            const _Hairline(),
-            _sectionHeader(
-                icon: Icons.report_problem_outlined, text: 'The issue'),
-            // Subject + Priority pair on desktop. Priority is dense
-            // (three tiles); pairing it with the single Subject input
-            // keeps both within an eye-friendly horizontal scan.
-            if (wide)
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Expanded(
-                    flex: 5,
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ── Description ───────────────────────────────────────────────────────
+
+  Widget _buildDescription() {
+    return TextFormField(
+      controller: _description,
+      minLines: 6,
+      maxLines: 12,
+      decoration: _inputDecoration(
+        'What happened, what you tried, and what you expected. Paste error messages here too.',
+      ),
+      validator: (v) => (v == null || v.trim().isEmpty)
+          ? 'A description is required.'
+          : null,
+    );
+  }
+
+  // ── Attachment row ─────────────────────────────────────────────────────
+
+  Widget _buildAttachment() {
+    final attached = _attachment;
+    return DottedBorderBox(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        child: Row(
+          children: [
+            Icon(
+              attached != null
+                  ? Icons.image_outlined
+                  : Icons.attach_file_rounded,
+              size: 18,
+              color: Brand.textMuted,
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: attached != null
+                  ? Row(
                       children: [
-                        _label('Subject', required_: true),
-                        TextFormField(
-                          controller: _subject,
-                          decoration: _fieldDecoration(
-                              'Brief description of your issue'),
-                          validator: (v) => (v == null || v.trim().isEmpty)
-                              ? 'Subject is required.'
-                              : null,
+                        Flexible(
+                          child: Text(
+                            attached.name,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontSize: 13.5,
+                              color: Brand.textPrimary,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          _humanSize(attached.size),
+                          style: const TextStyle(
+                            fontSize: 12,
+                            color: Brand.textMuted,
+                          ),
                         ),
                       ],
+                    )
+                  : const Text(
+                      'Attach a screenshot or photo (optional, helps us a lot)',
+                      style: TextStyle(
+                        fontSize: 13.5,
+                        color: Brand.textMuted,
+                      ),
                     ),
-                  ),
-                  const SizedBox(width: 20),
-                  Expanded(
-                    flex: 6,
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        _label('Priority'),
-                        _buildPriority(),
-                      ],
-                    ),
-                  ),
-                ],
-              )
-            else ...[
-              _label('Subject', required_: true),
-              TextFormField(
-                controller: _subject,
-                decoration:
-                    _fieldDecoration('Brief description of your issue'),
-                validator: (v) => (v == null || v.trim().isEmpty)
-                    ? 'Subject is required.'
-                    : null,
-              ),
-              const SizedBox(height: 20),
-              _label('Priority'),
-              _buildPriority(),
-            ],
-            const SizedBox(height: 20),
-            _label('Description', required_: true),
-            TextFormField(
-              controller: _description,
-              minLines: 5,
-              maxLines: 8,
-              decoration: _fieldDecoration(
-                  "What happened, what you tried, and what you expected. Paste error messages here too."),
-              validator: (v) => (v == null || v.trim().isEmpty)
-                  ? 'A description is required.'
-                  : null,
             ),
+            const SizedBox(width: 12),
+            if (attached != null)
+              TextButton.icon(
+                onPressed: _submitting ? null : _clearAttachment,
+                icon: const Icon(Icons.close_rounded, size: 16),
+                label: const Text('Remove'),
+                style: TextButton.styleFrom(
+                  foregroundColor: Brand.textMuted,
+                  textStyle: const TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              )
+            else
+              OutlinedButton(
+                onPressed: _submitting ? null : _pickAttachment,
+                style: OutlinedButton.styleFrom(
+                  side: const BorderSide(color: Brand.stroke),
+                  foregroundColor: Brand.textPrimary,
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 16, vertical: 10),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  textStyle: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                child: const Text('Browse'),
+              ),
           ],
         ),
       ),
     );
   }
 
-  Widget _sectionHeader({required IconData icon, required String text}) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 18, top: 4),
-      child: Row(
-        children: [
-          Container(
-            width: 26,
-            height: 26,
-            decoration: BoxDecoration(
-              color: Brand.signal.withValues(alpha: 0.10),
-              borderRadius: BorderRadius.circular(8),
-            ),
-            alignment: Alignment.center,
-            child: Icon(icon, size: 14, color: Brand.signal),
-          ),
-          const SizedBox(width: 10),
-          Text(
-            text,
+  // ── "Included with this ticket" card ──────────────────────────────────
+
+  Widget _buildIncludedCard() {
+    return _SectionCard(
+      icon: Icons.verified_outlined,
+      title: 'Auto-included',
+      titleTrailing: 'AUTOMATIC',
+      child: _needsSetup
+          ? _buildSetupPanel()
+          : _loadingShop
+              ? _includedLoading()
+              : _shop == null
+                  ? _includedError()
+                  : _includedDataGrid(),
+    );
+  }
+
+  Widget _includedLoading() {
+    return Row(
+      children: [
+        const SizedBox(
+          width: 14,
+          height: 14,
+          child: CircularProgressIndicator(
+              strokeWidth: 2, color: Brand.signal),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Text(
+            _shopProgress.isEmpty ? 'Loading business info…' : _shopProgress,
             style: const TextStyle(
-              fontSize: 13,
-              fontWeight: FontWeight.w700,
-              color: Brand.textPrimary,
-              letterSpacing: -0.1,
+              fontSize: 12.5,
+              color: Brand.textMuted,
             ),
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _includedError() {
+    return Row(
+      children: [
+        const Icon(Icons.error_outline, size: 16, color: Brand.danger),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            _shopError ?? 'Could not load your business info.',
+            style: const TextStyle(fontSize: 12.5, color: Brand.danger),
+          ),
+        ),
+        TextButton(
+          onPressed: _loadShop,
+          style: TextButton.styleFrom(
+            foregroundColor: Brand.danger,
+            textStyle: const TextStyle(
+                fontSize: 12.5, fontWeight: FontWeight.w700),
+          ),
+          child: const Text('Retry'),
+        ),
+      ],
+    );
+  }
+
+  Widget _includedDataGrid() {
+    final shop = _shop!;
+    final tenant = shop.businessName.isNotEmpty
+        ? shop.businessName
+        : (widget.store.storeName ?? '—');
+    final branch = (widget.store.storeName ?? '').isNotEmpty
+        ? widget.store.storeName!
+        : (shop.businessName.isNotEmpty ? shop.businessName : '—');
+    final terminal = _terminalIp != null && _terminalIp!.isNotEmpty
+        ? 'ip ${_terminalIp!}'
+        : '—';
+    final user = widget.info.meName.isNotEmpty
+        ? widget.info.meName
+        : '—';
+    final os = _osLabel();
+
+    return LayoutBuilder(builder: (context, constraints) {
+      final narrow = constraints.maxWidth < 460;
+      final rows = <List<_KV>>[
+        [
+          _KV('Tenant', tenant),
+          _KV('Branch', branch),
+        ],
+        [
+          _KV('Terminal', terminal),
+          _KV('User', user),
+        ],
+        [
+          _KV('App version', _appVersion),
+          _KV('OS', os),
+        ],
+      ];
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          for (var i = 0; i < rows.length; i++) ...[
+            if (i > 0) const SizedBox(height: 10),
+            if (narrow) ...[
+              _kvLine(rows[i][0], alignRight: false),
+              const SizedBox(height: 10),
+              _kvLine(rows[i][1], alignRight: false),
+            ] else
+              Row(
+                children: [
+                  Expanded(child: _kvLine(rows[i][0], alignRight: false)),
+                  const SizedBox(width: 16),
+                  Expanded(child: _kvLine(rows[i][1], alignRight: true)),
+                ],
+              ),
+          ],
+        ],
+      );
+    });
+  }
+
+  Widget _kvLine(_KV kv, {required bool alignRight}) {
+    return Row(
+      mainAxisAlignment:
+          alignRight ? MainAxisAlignment.spaceBetween : MainAxisAlignment.start,
+      children: [
+        Text(
+          kv.key,
+          style: const TextStyle(
+            fontSize: 12.5,
+            color: Brand.textMuted,
+          ),
+        ),
+        const SizedBox(width: 12),
+        Flexible(
+          child: Text(
+            kv.value,
+            textAlign: alignRight ? TextAlign.right : TextAlign.left,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              fontSize: 12.5,
+              color: Brand.textPrimary,
+              fontWeight: FontWeight.w600,
+              letterSpacing: -0.05,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSetupPanel() {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Brand.warning.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: Brand.warning.withValues(alpha: 0.45)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 28,
+                height: 28,
+                decoration: BoxDecoration(
+                  color: Brand.warning.withValues(alpha: 0.18),
+                  borderRadius: BorderRadius.circular(7),
+                ),
+                alignment: Alignment.center,
+                child: const Icon(
+                  Icons.settings_input_antenna_outlined,
+                  size: 16,
+                  color: Color(0xFFB45309),
+                ),
+              ),
+              const SizedBox(width: 10),
+              const Expanded(
+                child: Text(
+                  'POS server setup needed',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 13,
+                    color: Color(0xFF92400E),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            "A TinkerPro admin only needs to enter this once. We'll save it on this machine "
+            "so future tickets open instantly.",
+            style: TextStyle(fontSize: 12, color: Brand.textMuted, height: 1.4),
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                flex: 3,
+                child: TextField(
+                  controller: _setupHost,
+                  enabled: !_setupBusy,
+                  autofocus: true,
+                  decoration: _inputDecoration('e.g. 192.168.1.40').copyWith(
+                    labelText: 'Host',
+                    floatingLabelBehavior: FloatingLabelBehavior.always,
+                    isDense: true,
+                  ),
+                  textInputAction: TextInputAction.next,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: TextField(
+                  controller: _setupPort,
+                  enabled: !_setupBusy,
+                  decoration: _inputDecoration('3306').copyWith(
+                    labelText: 'Port',
+                    floatingLabelBehavior: FloatingLabelBehavior.always,
+                    isDense: true,
+                  ),
+                  keyboardType: TextInputType.number,
+                  onSubmitted: (_) => _saveSetupAndConnect(),
+                ),
+              ),
+            ],
+          ),
+          if (_setupError != null) ...[
+            const SizedBox(height: 10),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Icon(Icons.error_outline, size: 14, color: Brand.danger),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    _setupError!,
+                    style: const TextStyle(
+                        color: Brand.danger,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w500),
+                  ),
+                ),
+              ],
+            ),
+          ],
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              FilledButton.icon(
+                onPressed: _setupBusy ? null : _saveSetupAndConnect,
+                icon: _setupBusy
+                    ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: Colors.white),
+                      )
+                    : const Icon(Icons.link, size: 16),
+                label: Text(_setupBusy ? 'Connecting…' : 'Connect & save'),
+                style: FilledButton.styleFrom(
+                  backgroundColor: Brand.signal,
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8)),
+                  textStyle: const TextStyle(
+                      fontSize: 13, fontWeight: FontWeight.w700),
+                ),
+              ),
+              const SizedBox(width: 6),
+              TextButton(
+                onPressed: _setupBusy ? null : _setupTryAutoDiscover,
+                style: TextButton.styleFrom(
+                  foregroundColor: Brand.textMuted,
+                  textStyle: const TextStyle(
+                      fontSize: 12.5, fontWeight: FontWeight.w600),
+                ),
+                child: const Text('Try auto-discover'),
+              ),
+            ],
           ),
         ],
       ),
     );
   }
+
+  // ── Footer ────────────────────────────────────────────────────────────
+
+  Widget _buildFooterBar({required double pad}) {
+    return Padding(
+      padding: EdgeInsets.fromLTRB(pad, 14, pad, 14),
+      child: LayoutBuilder(builder: (context, constraints) {
+        final narrow = constraints.maxWidth < 520;
+        final replyText = Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+          decoration: BoxDecoration(
+            color: Brand.subtle,
+            borderRadius: BorderRadius.circular(999),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: const [
+              Icon(Icons.schedule_outlined, size: 14, color: Brand.textMuted),
+              SizedBox(width: 6),
+              Text(
+                'Average reply within 2 hours',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Brand.textMuted,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ],
+          ),
+        );
+        final actions = Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            OutlinedButton(
+              onPressed: _submitting ? null : () => Navigator.of(context).pop(),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: Brand.textPrimary,
+                side: const BorderSide(color: Brand.stroke),
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 20, vertical: 15),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                textStyle: const TextStyle(
+                  fontSize: 13.5,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              child: const Text('Cancel'),
+            ),
+            const SizedBox(width: 12),
+            _GradientButton(
+              busy: _submitting,
+              label: _submitting ? 'Submitting…' : 'Submit ticket',
+              icon: Icons.send_rounded,
+              onTap: _submitting ? null : _submit,
+            ),
+          ],
+        );
+        if (narrow) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              actions,
+              const SizedBox(height: 10),
+              Center(child: replyText),
+            ],
+          );
+        }
+        return Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [replyText, actions],
+        );
+      }),
+    );
+  }
+
+  // ── Field primitives ───────────────────────────────────────────────────
 
   Widget _label(String text, {bool required_ = false}) {
     return Padding(
@@ -807,944 +1392,435 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
     );
   }
 
-  InputDecoration _fieldDecoration(String hint) => InputDecoration(
+  InputDecoration _inputDecoration(String hint) => InputDecoration(
         hintText: hint,
         hintStyle: TextStyle(
-          color: Brand.textMuted.withValues(alpha: 0.65),
-          fontSize: 14,
+          color: Brand.textMuted.withValues(alpha: 0.7),
+          fontSize: 13.5,
           fontWeight: FontWeight.w400,
         ),
         contentPadding:
-            const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+            const EdgeInsets.symmetric(horizontal: 16, vertical: 15),
         filled: true,
         fillColor: Brand.surface,
         border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(14),
-          borderSide: BorderSide.none,
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: Brand.stroke),
         ),
         enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(14),
-          borderSide: BorderSide(
-              color: Brand.stroke.withValues(alpha: 0.65), width: 1),
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: Brand.stroke),
         ),
         focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(14),
+          borderRadius: BorderRadius.circular(12),
           borderSide: const BorderSide(color: Brand.signal, width: 1.6),
         ),
         errorBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(14),
-          borderSide:
-              const BorderSide(color: Brand.danger, width: 1),
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: Brand.danger, width: 1),
         ),
         focusedErrorBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(14),
+          borderRadius: BorderRadius.circular(12),
           borderSide: const BorderSide(color: Brand.danger, width: 1.6),
         ),
       );
 
-  Widget _buildBusinessField() {
-    if (_needsSetup) return _buildSetupPanel();
-    if (_loadingShop) {
-      return Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
-        decoration: BoxDecoration(
-          color: Brand.subtle,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: Brand.stroke, width: 1.4),
-        ),
-        child: Row(
-          children: [
-            const SizedBox(
-                width: 16,
-                height: 16,
-                child: CircularProgressIndicator(
-                    strokeWidth: 2, color: Brand.signal)),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Text(
-                _shopProgress.isEmpty
-                    ? 'Loading business info…'
-                    : _shopProgress,
-                style: const TextStyle(color: Brand.textMuted, fontSize: 13.5),
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-          ],
-        ),
-      );
+  String _osLabel() {
+    final os = Platform.operatingSystem;
+    if (os == 'windows') {
+      final v = Platform.operatingSystemVersion;
+      if (v.contains('11')) return 'Windows 11';
+      if (v.contains('10')) return 'Windows 10';
+      return 'Windows';
     }
-    if (_shop == null) {
-      return Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
-        decoration: BoxDecoration(
-          color: Brand.danger.withValues(alpha: 0.06),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-              color: Brand.danger.withValues(alpha: 0.35), width: 1.4),
-        ),
-        child: Row(
-          children: [
-            const Icon(Icons.error_outline,
-                size: 18, color: Brand.danger),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Text(
-                _shopError ?? 'Could not load your business info.',
-                style: const TextStyle(color: Brand.danger, fontSize: 13),
-              ),
-            ),
-            TextButton(
-              onPressed: _loadShop,
-              style: TextButton.styleFrom(
-                foregroundColor: Brand.danger,
-                textStyle:
-                    const TextStyle(fontWeight: FontWeight.w700, fontSize: 13),
-              ),
-              child: const Text('Retry'),
-            ),
-          ],
-        ),
-      );
-    }
-    final shop = _shop!;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-      decoration: BoxDecoration(
-        color: Brand.surface,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: Brand.stroke.withValues(alpha: 0.65)),
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 36,
-            height: 36,
-            decoration: BoxDecoration(
-              color: Brand.canvas,
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: Brand.stroke.withValues(alpha: 0.65)),
-            ),
-            alignment: Alignment.center,
-            child: const Icon(Icons.storefront_outlined,
-                size: 18, color: Brand.textMuted),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  shop.businessName.isEmpty
-                      ? 'Unnamed business'
-                      : shop.businessName,
-                  style: const TextStyle(
-                    fontWeight: FontWeight.w700,
-                    fontSize: 14.5,
-                    color: Brand.textPrimary,
-                    letterSpacing: -0.1,
-                  ),
-                  overflow: TextOverflow.ellipsis,
-                ),
-                if (shop.tin.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 2),
-                    child: Text(
-                      'TIN ${shop.tin}',
-                      style: const TextStyle(
-                          fontSize: 11.5, color: Brand.textMuted),
-                    ),
-                  ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 10),
-          _VatChip(isVat: shop.isVat, label: shop.vatLabel),
-        ],
-      ),
-    );
+    if (os == 'macos') return 'macOS';
+    if (os.isEmpty) return '—';
+    return os[0].toUpperCase() + os.substring(1);
   }
 
-  Widget _buildSetupPanel() {
+  String _humanSize(int bytes) {
+    if (bytes <= 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB'];
+    var n = bytes.toDouble();
+    var i = 0;
+    while (n >= 1024 && i < units.length - 1) {
+      n /= 1024;
+      i++;
+    }
+    final fixed = n >= 10 || i == 0 ? n.toStringAsFixed(0) : n.toStringAsFixed(1);
+    return '$fixed ${units[i]}';
+  }
+}
+
+// ── Tiny widgets used by the screen ───────────────────────────────────────
+
+class _Divider extends StatelessWidget {
+  const _Divider();
+  @override
+  Widget build(BuildContext context) =>
+      Container(height: 1, color: Brand.stroke);
+}
+
+/// Premium section container: white surface, soft layered shadow, a
+/// tinted rounded icon chip in the header, a title with optional
+/// required-marker + subtitle, and a pill-style trailing hint. The
+/// stacked building block of the redesigned ticket form.
+class _SectionCard extends StatelessWidget {
+  const _SectionCard({
+    required this.title,
+    required this.child,
+    this.icon,
+    this.subtitle,
+    this.titleRequired = false,
+    this.titleTrailing,
+  });
+
+  final String title;
+  final Widget child;
+  final IconData? icon;
+  final String? subtitle;
+  final bool titleRequired;
+  final String? titleTrailing;
+
+  @override
+  Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
       decoration: BoxDecoration(
-        color: Brand.warning.withValues(alpha: 0.08),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(
-            color: Brand.warning.withValues(alpha: 0.45), width: 1.4),
+        color: Brand.canvas,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: Brand.stroke),
+        boxShadow: kCardShadow,
       ),
+      padding: const EdgeInsets.fromLTRB(20, 18, 20, 20),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              Container(
-                width: 32,
-                height: 32,
-                decoration: BoxDecoration(
-                  color: Brand.warning.withValues(alpha: 0.18),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                alignment: Alignment.center,
-                child: const Icon(Icons.settings_input_antenna_outlined,
-                    size: 18, color: Color(0xFFB45309)),
-              ),
-              const SizedBox(width: 10),
-              const Expanded(
-                child: Text(
-                  'POS server setup needed',
-                  style: TextStyle(
-                    fontWeight: FontWeight.w700,
-                    fontSize: 14,
-                    color: Color(0xFF92400E),
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          const Text(
-            "A TinkerPro admin only needs to enter this once. We'll save it "
-            "on this machine so future /ticket forms open instantly.",
-            style: TextStyle(fontSize: 12.5, color: Brand.textMuted, height: 1.4),
-          ),
-          const SizedBox(height: 14),
-          Row(
-            children: [
-              Expanded(
-                flex: 3,
-                child: TextField(
-                  controller: _setupHost,
-                  enabled: !_setupBusy,
-                  autofocus: true,
-                  decoration: _fieldDecoration('e.g. 192.168.1.40').copyWith(
-                    labelText: 'Host',
-                    floatingLabelBehavior: FloatingLabelBehavior.always,
-                    isDense: true,
-                  ),
-                  textInputAction: TextInputAction.next,
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: TextField(
-                  controller: _setupPort,
-                  enabled: !_setupBusy,
-                  decoration: _fieldDecoration('3306').copyWith(
-                    labelText: 'Port',
-                    floatingLabelBehavior: FloatingLabelBehavior.always,
-                    isDense: true,
-                  ),
-                  keyboardType: TextInputType.number,
-                  onSubmitted: (_) => _saveSetupAndConnect(),
-                ),
-              ),
-            ],
-          ),
-          if (_setupError != null) ...[
-            const SizedBox(height: 10),
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Icon(Icons.error_outline,
-                    size: 14, color: Brand.danger),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: Text(
-                    _setupError!,
-                    style: const TextStyle(
-                        color: Brand.danger,
-                        fontSize: 12,
-                        fontWeight: FontWeight.w500),
-                  ),
-                ),
-              ],
-            ),
-          ],
-          const SizedBox(height: 14),
-          Row(
-            children: [
-              FilledButton.icon(
-                onPressed: _setupBusy ? null : _saveSetupAndConnect,
-                icon: _setupBusy
-                    ? const SizedBox(
-                        width: 14,
-                        height: 14,
-                        child: CircularProgressIndicator(
-                            strokeWidth: 2, color: Colors.white),
-                      )
-                    : const Icon(Icons.link, size: 16),
-                label: Text(_setupBusy ? 'Connecting…' : 'Connect & save'),
-                style: FilledButton.styleFrom(
-                  backgroundColor: Brand.signal,
-                  foregroundColor: Colors.white,
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(10)),
-                  textStyle: const TextStyle(
-                      fontSize: 13, fontWeight: FontWeight.w700),
-                ),
-              ),
-              const SizedBox(width: 6),
-              TextButton(
-                onPressed: _setupBusy ? null : _setupTryAutoDiscover,
-                style: TextButton.styleFrom(
-                  foregroundColor: Brand.textMuted,
-                  textStyle: const TextStyle(
-                      fontSize: 12.5, fontWeight: FontWeight.w600),
-                ),
-                child: const Text('Try auto-discover'),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildSourceCaption() {
-    // The only states the user needs to see a caption for are:
-    //   - 'pending' → still loading on first paint
-    //   - 'none'    → genuinely no shop info (form can't proceed)
-    // Cached / fallback / live POS data all render silently with no
-    // banner — the form is filled, the user doesn't need to know
-    // which source it came from. A background timer keeps retrying
-    // the live read until it succeeds, so cache→live upgrades happen
-    // without a Retry button anyway.
-    if (_shopSource != 'pending' && _shopSource != 'none') {
-      return const SizedBox.shrink();
-    }
-    final err = _posShop.lastError;
-    final (dotColor, text) = _shopSource == 'pending'
-        ? (Brand.textMuted, _shopProgress.isNotEmpty
-            ? _shopProgress
-            : 'Looking up shop info…')
-        : (
-            Brand.warning,
-            err == null
-                ? 'Could not read shop info.'
-                : 'Could not read shop info ($err).',
-          );
-    return Padding(
-      padding: const EdgeInsets.only(top: 8, left: 4),
-      child: Row(
-        children: [
-          Container(
-            width: 6,
-            height: 6,
-            decoration: BoxDecoration(
-              color: dotColor,
-              shape: BoxShape.circle,
-            ),
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              text,
-              style: const TextStyle(
-                fontSize: 11,
-                color: Brand.textMuted,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ),
-          if (_shopSource == 'none')
-            InkWell(
-              onTap: _loadShop,
-              borderRadius: BorderRadius.circular(6),
-              child: const Padding(
-                padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                child: Text(
-                  'Retry',
-                  style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w700,
-                    color: Brand.signal,
-                  ),
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  Future<void> _toggleDiagnostics() async {
-    setState(() {
-      _diagOpen = !_diagOpen;
-      _diagConnectError = null;
-    });
-    if (_diagOpen && _diagReport == null && !_diagScanning) {
-      await _runDiagScan();
-    }
-  }
-
-  Future<void> _runDiagScan() async {
-    setState(() {
-      _diagScanning = true;
-      _diagProgress = 'Scanning network…';
-      _diagReport = null;
-      _diagConnectError = null;
-    });
-    final report = await _posShop.scanLan(
-      onProgress: (s) {
-        if (!mounted) return;
-        setState(() => _diagProgress = s);
-      },
-    );
-    if (!mounted) return;
-    setState(() {
-      _diagScanning = false;
-      _diagReport = report;
-      _diagProgress = '';
-    });
-  }
-
-  Future<void> _diagConnect(PosScanRow row) async {
-    final key = '${row.host}:${row.port}';
-    setState(() {
-      _diagBusyKey = key;
-      _diagConnectError = null;
-    });
-    final result = await _posShop.tryTarget(host: row.host, port: row.port);
-    if (!mounted) return;
-    if (result == null) {
-      setState(() {
-        _diagBusyKey = null;
-        _diagConnectError = '$key: ${_posShop.lastError ?? 'connect failed'}';
-      });
-      return;
-    }
-    final adopted = ShopInfo(
-      businessName: result.businessName.isNotEmpty
-          ? result.businessName
-          : (widget.store.storeName ?? ''),
-      vatReg: result.vatReg,
-      vatLabel: result.vatLabel,
-      tin: result.tin,
-      email: result.email,
-      fullName: result.fullName,
-    );
-    setState(() {
-      _diagBusyKey = null;
-      _shop = adopted;
-      _shopSource = 'pos';
-      _shopError = null;
-      _diagOpen = false;
-    });
-    await widget.store.saveCachedShop(adopted);
-  }
-
-  // ignore: unused_element
-  Widget _buildDiagnosticsCard() {
-    final report = _diagReport;
-    final hasResults = report != null && report.openTargets.isNotEmpty;
-    final headerLabel = _diagOpen
-        ? 'Hide POS server diagnostics'
-        : 'POS server diagnostics';
-
-    return Padding(
-      padding: const EdgeInsets.only(top: 8),
-      child: Container(
-        decoration: BoxDecoration(
-          color: const Color(0xFFF6F7FB),
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: const Color(0xFFE1E5E9)),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            InkWell(
-              onTap: _toggleDiagnostics,
-              borderRadius: BorderRadius.circular(10),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(
-                    horizontal: 12, vertical: 10),
-                child: Row(
-                  children: [
-                    Icon(
-                      _diagOpen
-                          ? Icons.keyboard_arrow_down
-                          : Icons.keyboard_arrow_right,
-                      size: 18,
-                      color: Brand.textMuted,
-                    ),
-                    const SizedBox(width: 4),
-                    Icon(Icons.lan_outlined,
-                        size: 14, color: Brand.textMuted),
-                    const SizedBox(width: 6),
-                    Expanded(
-                      child: Text(
-                        headerLabel,
-                        style: const TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w700,
-                            color: Brand.textMuted),
-                      ),
-                    ),
-                    if (_diagScanning)
-                      const SizedBox(
-                        width: 12,
-                        height: 12,
-                        child: CircularProgressIndicator(
-                            strokeWidth: 1.6, color: Brand.signal),
-                      )
-                    else if (_diagOpen) ...[
-                      InkWell(
-                        onTap: _diagScanning ? null : _openSetupPanel,
-                        borderRadius: BorderRadius.circular(4),
-                        child: const Padding(
-                          padding: EdgeInsets.symmetric(
-                              horizontal: 6, vertical: 2),
-                          child: Text(
-                            'Edit host',
-                            style: TextStyle(
-                              fontSize: 11,
-                              fontWeight: FontWeight.w700,
-                              color: Brand.signal,
-                              decoration: TextDecoration.underline,
-                            ),
-                          ),
-                        ),
-                      ),
-                      InkWell(
-                        onTap: _diagScanning ? null : _runDiagScan,
-                        borderRadius: BorderRadius.circular(4),
-                        child: const Padding(
-                          padding: EdgeInsets.symmetric(
-                              horizontal: 6, vertical: 2),
-                          child: Text(
-                            'Rescan',
-                            style: TextStyle(
-                              fontSize: 11,
-                              fontWeight: FontWeight.w700,
-                              color: Brand.signal,
-                              decoration: TextDecoration.underline,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-            ),
-            if (_diagOpen) const Divider(height: 1, color: Color(0xFFE1E5E9)),
-            if (_diagOpen)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    if (_diagScanning)
-                      Text(
-                        _diagProgress.isEmpty ? 'Scanning…' : _diagProgress,
-                        style: const TextStyle(
-                            fontSize: 11.5, color: Brand.textMuted),
-                      )
-                    else if (report == null)
-                      const Text(
-                        'Tap Rescan to look for MariaDB on the LAN.',
-                        style: TextStyle(
-                            fontSize: 11.5, color: Brand.textMuted),
-                      )
-                    else
-                      _buildDiagReport(report),
-                    if (_diagConnectError != null) ...[
-                      const SizedBox(height: 6),
-                      Text(
-                        _diagConnectError!,
-                        style: const TextStyle(
-                            fontSize: 11.5, color: Brand.danger),
-                      ),
-                    ],
-                    if (hasResults) ...[
-                      const SizedBox(height: 6),
-                      const Text(
-                        'Tap a row to connect — we\'ll authenticate as root '
-                        '(empty password) and read tinkerpro.shop.',
-                        style: TextStyle(
-                          fontSize: 10.5,
-                          fontStyle: FontStyle.italic,
-                          color: Brand.textMuted,
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildDiagReport(PosScanReport report) {
-    final ifaces = report.interfaces;
-    final rows = report.openTargets;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        if (ifaces.isEmpty)
-          const Text(
-            'No usable IPv4 interface found on this machine.',
-            style: TextStyle(fontSize: 11.5, color: Brand.danger),
-          )
-        else
-          Text(
-            'Scanned ${ifaces.length == 1 ? "interface" : "interfaces"}: '
-            '${ifaces.map((i) => "${i.name} ${i.address} (${i.subnet})").join(", ")}',
-            style: const TextStyle(fontSize: 11, color: Brand.textMuted),
-          ),
-        const SizedBox(height: 8),
-        if (rows.isEmpty)
-          const Text(
-            'No host on the LAN had any of the MariaDB ports open. '
-            'Check that the POS server is on the same subnet, that '
-            'MariaDB is bound to 0.0.0.0 (not 127.0.0.1), and that '
-            'its port isn\'t blocked by Windows Defender on the '
-            'server side.',
-            style: TextStyle(fontSize: 11.5, color: Brand.textMuted),
-          )
-        else ...[
-          Text(
-            '${rows.length} open '
-            '${rows.length == 1 ? "target" : "targets"} — tap to connect:',
-            style: const TextStyle(
-              fontSize: 11.5,
-              fontWeight: FontWeight.w700,
-              color: Brand.textPrimary,
-            ),
-          ),
-          const SizedBox(height: 6),
-          ...rows.map(_buildDiagRow),
-        ],
-      ],
-    );
-  }
-
-  Widget _buildDiagRow(PosScanRow row) {
-    final key = '${row.host}:${row.port}';
-    final busy = _diagBusyKey == key;
-    final disabled = _diagBusyKey != null;
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 4),
-      child: InkWell(
-        onTap: disabled ? null : () => _diagConnect(row),
-        borderRadius: BorderRadius.circular(8),
-        child: Container(
-          padding:
-              const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: const Color(0xFFE1E5E9)),
-          ),
-          child: Row(
-            children: [
-              Icon(
-                row.deviceName == null
-                    ? Icons.device_unknown_outlined
-                    : Icons.computer_outlined,
-                size: 16,
-                color: Brand.textMuted,
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      row.deviceName ?? 'Unknown device',
-                      style: const TextStyle(
-                          fontSize: 12.5,
-                          fontWeight: FontWeight.w700,
-                          color: Brand.textPrimary),
-                    ),
-                    Text(
-                      '${row.host}:${row.port}',
-                      style: const TextStyle(
-                          fontSize: 11, color: Brand.textMuted),
-                    ),
-                  ],
-                ),
-              ),
-              if (busy)
-                const SizedBox(
-                  width: 14,
-                  height: 14,
-                  child: CircularProgressIndicator(
-                      strokeWidth: 1.6, color: Brand.signal),
-                )
-              else
-                Text(
-                  disabled ? '' : 'Connect',
-                  style: const TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w700,
-                    color: Brand.signal,
-                    decoration: TextDecoration.underline,
-                  ),
-                ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildPriority() {
-    final opts = const [
-      _PriorityOpt(
-        'low',
-        Icons.south_rounded,
-        'Low',
-        'General question',
-        Brand.success,
-      ),
-      _PriorityOpt(
-        'medium',
-        Icons.drag_handle_rounded,
-        'Medium',
-        'Need help soon',
-        Brand.warning,
-      ),
-      _PriorityOpt(
-        'high',
-        Icons.bolt_rounded,
-        'Urgent',
-        'System down',
-        Brand.danger,
-      ),
-    ];
-    return Row(
-      children: opts.map((o) {
-        final selected = _priority == o.value;
-        return Expanded(
-          child: Padding(
-            padding: EdgeInsets.only(right: o == opts.last ? 0 : 10),
-            child: Material(
-              color: Colors.transparent,
-              child: InkWell(
-                borderRadius: BorderRadius.circular(14),
-                onTap: () => setState(() => _priority = o.value),
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 180),
-                  curve: Curves.easeOut,
-                  padding: const EdgeInsets.symmetric(
-                      vertical: 14, horizontal: 12),
+              if (icon != null) ...[
+                Container(
+                  width: 34,
+                  height: 34,
                   decoration: BoxDecoration(
-                    color: selected
-                        ? o.color.withValues(alpha: 0.08)
-                        : Brand.surface,
-                    borderRadius: BorderRadius.circular(14),
-                    border: Border.all(
-                      color: selected
-                          ? o.color
-                          : Brand.stroke.withValues(alpha: 0.65),
-                      width: selected ? 1.6 : 1,
-                    ),
+                    color: Brand.signal.withValues(alpha: 0.10),
+                    borderRadius: BorderRadius.circular(10),
                   ),
-                  child: Column(
-                    children: [
-                      AnimatedContainer(
-                        duration: const Duration(milliseconds: 180),
-                        width: 34,
-                        height: 34,
-                        decoration: BoxDecoration(
-                          color: selected
-                              ? o.color
-                              : o.color.withValues(alpha: 0.12),
-                          borderRadius: BorderRadius.circular(10),
+                  alignment: Alignment.center,
+                  child: Icon(icon, size: 18, color: Brand.signal),
+                ),
+                const SizedBox(width: 12),
+              ],
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            title,
+                            style: const TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w700,
+                              color: Brand.textPrimary,
+                              letterSpacing: -0.2,
+                            ),
+                          ),
                         ),
-                        alignment: Alignment.center,
-                        child: Icon(
-                          o.icon,
-                          size: 18,
-                          color: selected ? Colors.white : o.color,
-                        ),
-                      ),
-                      const SizedBox(height: 10),
-                      Text(
-                        o.label,
-                        style: TextStyle(
-                          fontWeight: FontWeight.w700,
-                          color: selected
-                              ? Brand.textPrimary
-                              : Brand.textPrimary,
-                          fontSize: 13,
-                          letterSpacing: -0.1,
-                        ),
-                      ),
+                        if (titleRequired)
+                          const Padding(
+                            padding: EdgeInsets.only(left: 4),
+                            child: Text(
+                              '*',
+                              style: TextStyle(
+                                color: Brand.signal,
+                                fontSize: 15,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                    if (subtitle != null) ...[
                       const SizedBox(height: 2),
                       Text(
-                        o.subtitle,
-                        style: TextStyle(
-                          fontSize: 10.5,
+                        subtitle!,
+                        style: const TextStyle(
+                          fontSize: 12,
                           color: Brand.textMuted,
-                          fontWeight:
-                              selected ? FontWeight.w500 : FontWeight.w400,
+                          height: 1.3,
                         ),
                       ),
                     ],
+                  ],
+                ),
+              ),
+              if (titleTrailing != null)
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: Brand.subtle,
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: Text(
+                    titleTrailing!,
+                    style: const TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: Brand.textMuted,
+                      letterSpacing: 0.1,
+                    ),
                   ),
                 ),
+            ],
+          ),
+          const SizedBox(height: 18),
+          child,
+        ],
+      ),
+    );
+  }
+}
+
+/// Subtle, premium layered shadow used across the ticket-form cards and
+/// the primary CTA. Low-opacity slate so white cards lift off the grey
+/// canvas without looking heavy.
+const List<BoxShadow> kCardShadow = [
+  BoxShadow(
+    color: Color(0x0A0F172A), // slate-900 @ ~4%
+    blurRadius: 14,
+    offset: Offset(0, 6),
+  ),
+  BoxShadow(
+    color: Color(0x080F172A), // slate-900 @ ~3%
+    blurRadius: 4,
+    offset: Offset(0, 1),
+  ),
+];
+
+class _IconButtonBox extends StatelessWidget {
+  const _IconButtonBox({
+    required this.icon,
+    required this.onTap,
+    this.tooltip,
+  });
+  final IconData icon;
+  final VoidCallback? onTap;
+  final String? tooltip;
+
+  @override
+  Widget build(BuildContext context) {
+    final btn = Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(8),
+        child: Container(
+          width: 36,
+          height: 36,
+          decoration: BoxDecoration(
+            border: Border.all(color: Brand.stroke),
+            borderRadius: BorderRadius.circular(8),
+            color: Brand.canvas,
+          ),
+          alignment: Alignment.center,
+          child: Icon(icon, size: 18, color: Brand.textPrimary),
+        ),
+      ),
+    );
+    return tooltip != null ? Tooltip(message: tooltip!, child: btn) : btn;
+  }
+}
+
+class _OutlineButton extends StatelessWidget {
+  const _OutlineButton({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+  });
+  final IconData icon;
+  final String label;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return OutlinedButton.icon(
+      onPressed: onTap,
+      icon: Icon(icon, size: 16, color: Brand.textPrimary),
+      label: Text(label),
+      style: OutlinedButton.styleFrom(
+        foregroundColor: Brand.textPrimary,
+        side: const BorderSide(color: Brand.stroke),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(8),
+        ),
+        textStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+      ),
+    );
+  }
+}
+
+/// Premium primary CTA — a brand-gradient pill with a soft accent glow,
+/// an inline spinner while busy, and a dimmed disabled state. Replaces
+/// the flat ElevatedButton for a more high-end feel.
+class _GradientButton extends StatelessWidget {
+  const _GradientButton({
+    required this.label,
+    required this.icon,
+    required this.onTap,
+    this.busy = false,
+  });
+
+  final String label;
+  final IconData icon;
+  final VoidCallback? onTap;
+  final bool busy;
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = onTap != null;
+    return Opacity(
+      opacity: enabled ? 1 : 0.6,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          gradient: Brand.primary,
+          borderRadius: BorderRadius.circular(12),
+          boxShadow: enabled
+              ? [
+                  BoxShadow(
+                    color: Brand.signal.withValues(alpha: 0.35),
+                    blurRadius: 16,
+                    offset: const Offset(0, 6),
+                  ),
+                ]
+              : null,
+        ),
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(12),
+            onTap: onTap,
+            child: Padding(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 22, vertical: 15),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  busy
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2, color: Colors.white),
+                        )
+                      : Icon(icon, size: 16, color: Colors.white),
+                  const SizedBox(width: 9),
+                  Text(
+                    label,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 13.5,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.2,
+                    ),
+                  ),
+                ],
               ),
             ),
           ),
-        );
-      }).toList(),
-    );
-  }
-
-  Widget _buildSubmit() {
-    return SizedBox(
-      width: double.infinity,
-      height: 54,
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(14),
-          boxShadow: _submitting
-              ? []
-              : [
-                  BoxShadow(
-                    color: Brand.signal.withValues(alpha: 0.30),
-                    blurRadius: 18,
-                    offset: const Offset(0, 8),
-                  ),
-                ],
-        ),
-        child: ElevatedButton.icon(
-          onPressed: _submitting ? null : _submit,
-          icon: _submitting
-              ? const SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(
-                      strokeWidth: 2, color: Colors.white),
-                )
-              : const Icon(Icons.arrow_forward_rounded, size: 18),
-          label: Text(_submitting ? 'Submitting…' : 'Submit ticket'),
-          style: ElevatedButton.styleFrom(
-            backgroundColor: Brand.signal,
-            foregroundColor: Colors.white,
-            disabledBackgroundColor: Brand.signal.withValues(alpha: 0.4),
-            elevation: 0,
-            shadowColor: Colors.transparent,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(14),
-            ),
-            textStyle: const TextStyle(
-              fontSize: 15,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 0.15,
-            ),
-          ),
         ),
       ),
     );
   }
 }
 
-/// Hairline section separator — subtler than the default Divider.
-class _Hairline extends StatelessWidget {
-  const _Hairline();
+/// Box with a 1.4px dashed border — used by the attachment row to mirror
+/// the marketing-mock dropzone aesthetic. Implemented with a custom
+/// painter rather than pulling in a dotted-border package for one widget.
+class DottedBorderBox extends StatelessWidget {
+  const DottedBorderBox({super.key, required this.child});
+  final Widget child;
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 22),
-      child: Container(
-        height: 1,
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            colors: [
-              Brand.stroke.withValues(alpha: 0),
-              Brand.stroke,
-              Brand.stroke.withValues(alpha: 0),
-            ],
-          ),
-        ),
+    return CustomPaint(
+      painter: _DashedBorderPainter(
+        color: Brand.stroke,
+        radius: 10,
+        strokeWidth: 1.2,
+        dash: 5,
+        gap: 4,
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(10),
+        child: child,
       ),
     );
   }
 }
 
-/// Reassurance bullet shown on the hero strip — small icon + label,
-/// optionally compact for narrow viewports.
-class _HeroBullet extends StatelessWidget {
-  const _HeroBullet({
-    required this.icon,
-    required this.label,
-    this.compact = false,
+class _DashedBorderPainter extends CustomPainter {
+  _DashedBorderPainter({
+    required this.color,
+    required this.radius,
+    required this.strokeWidth,
+    required this.dash,
+    required this.gap,
   });
-
-  final IconData icon;
-  final String label;
-  final bool compact;
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Container(
-          width: compact ? 22 : 26,
-          height: compact ? 22 : 26,
-          decoration: BoxDecoration(
-            color: Brand.canvas,
-            borderRadius: BorderRadius.circular(7),
-            border: Border.all(color: Brand.stroke),
-          ),
-          alignment: Alignment.center,
-          child: Icon(icon, size: compact ? 12 : 14, color: Brand.signal),
-        ),
-        const SizedBox(width: 8),
-        Text(
-          label,
-          style: TextStyle(
-            color: Brand.textPrimary,
-            fontSize: compact ? 12 : 12.5,
-            fontWeight: FontWeight.w600,
-            letterSpacing: -0.05,
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _VatChip extends StatelessWidget {
-  const _VatChip({required this.isVat, required this.label});
-  final bool isVat;
-  final String label;
+  final Color color;
+  final double radius;
+  final double strokeWidth;
+  final double dash;
+  final double gap;
 
   @override
-  Widget build(BuildContext context) {
-    final color = isVat ? const Color(0xFF16A34A) : const Color(0xFF6B7280);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: color.withValues(alpha: 0.45)),
-      ),
-      child: Text(
-        label.isEmpty ? (isVat ? 'VAT' : 'Non-VAT') : label,
-        style: TextStyle(
-            fontWeight: FontWeight.w800, fontSize: 11.5, color: color),
-      ),
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = strokeWidth
+      ..style = PaintingStyle.stroke;
+    final rrect = RRect.fromRectAndRadius(
+      Offset.zero & size,
+      Radius.circular(radius),
     );
+    final path = Path()..addRRect(rrect);
+    final dashed = Path();
+    for (final metric in path.computeMetrics()) {
+      var distance = 0.0;
+      while (distance < metric.length) {
+        final next = (distance + dash).clamp(0.0, metric.length);
+        dashed.addPath(metric.extractPath(distance, next), Offset.zero);
+        distance = next + gap;
+      }
+    }
+    canvas.drawPath(dashed, paint);
   }
+
+  @override
+  bool shouldRepaint(covariant _DashedBorderPainter old) =>
+      old.color != color ||
+      old.radius != radius ||
+      old.strokeWidth != strokeWidth ||
+      old.dash != dash ||
+      old.gap != gap;
 }
 
 class _PriorityOpt {
-  const _PriorityOpt(
-      this.value, this.icon, this.label, this.subtitle, this.color);
+  const _PriorityOpt(this.value, this.label, this.color, this.icon);
   final String value;
-  final IconData icon;
   final String label;
-  final String subtitle;
   final Color color;
+  final IconData icon;
+}
+
+class _KV {
+  const _KV(this.key, this.value);
+  final String key;
+  final String value;
 }
 
 /// Returned to the chat screen when a ticket is successfully submitted —

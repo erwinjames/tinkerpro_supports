@@ -1,0 +1,12 @@
+# ── Heavy / local-only tooling accidentally dropped into employee_app ──
+# The tinker-chat backend (its own deploy + venv/models, multi-GB) and a
+# downloaded Google Cloud SDK do NOT belong in the app repo. tinker-chat
+# also carries backend/.env with live API keys — never commit it.
+employee_app/tinker-chat/
+employee_app/google-cloud-sdk/
+employee_app/google-cloud-cli-*.tar.gz
+
+# Stray secrets, just in case any .env lands in the tree
+**/.env
+**/.env.*
+!**/.env.example

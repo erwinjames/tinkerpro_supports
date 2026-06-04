@@ -11,6 +11,17 @@ const String _kDefaultBaseUrl = String.fromEnvironment(
   defaultValue: 'http://10.0.2.2/tinkerpro_support',
 );
 
+/// Origin that hosts the admin Help Center content. The Help Guide fetches
+/// `help.public` and resolves `/uploads/help/*` images against THIS base —
+/// intentionally decoupled from [_kDefaultBaseUrl] so the FAQ can be curated
+/// on a dedicated support site regardless of which TinkerPro server the
+/// employee logs into. Override at build time:
+///   flutter run --dart-define=TPS_HELP_BASE_URL=https://example.com/path
+const String kHelpBaseUrl = String.fromEnvironment(
+  'TPS_HELP_BASE_URL',
+  defaultValue: 'https://support.tinkerpro.com.ph',
+);
+
 /// Single source of HTTP truth for the customer app.
 ///
 /// • Cookie jar persists `PHPSESSID` across app launches → TIN+branch login
@@ -126,6 +137,29 @@ class ApiClient {
       'as_guest': '1',
       ...fields,
       fileField: file,
+    });
+    final res = await _dio.post<dynamic>(
+      '/api.php',
+      queryParameters: {'action': action},
+      data: fd,
+      onSendProgress: onProgress,
+    );
+    return _decode(res);
+  }
+
+  /// Generic multipart POST. Distinct from [uploadChat] in that it does
+  /// NOT auto-stamp `as_guest=1` — endpoints like `create_ticket` don't
+  /// route through chatResolveActor and should not receive that flag.
+  Future<Map<String, dynamic>> upload(
+    String action, {
+    Map<String, dynamic> fields = const {},
+    MultipartFile? file,
+    String fileField = 'file',
+    void Function(int sent, int total)? onProgress,
+  }) async {
+    final fd = FormData.fromMap({
+      ...fields,
+      if (file != null) fileField: file,
     });
     final res = await _dio.post<dynamic>(
       '/api.php',

@@ -1,4 +1,12 @@
+import 'dart:io';
+
+import 'package:dio/dio.dart' show MultipartFile;
+
 import '../api_client.dart';
+
+/// Format a ticket id as a zero-padded 4-digit reference (#0069). The
+/// underlying id stays numeric for lookups; this is display-only.
+String fmtTicketNo(int id) => '#${id.toString().padLeft(4, '0')}';
 
 /// Thin HTTP wrapper around the support backend's ticket endpoints.
 ///
@@ -31,15 +39,27 @@ class TicketService {
     required String subject,
     required String description,
     required String priority,
+    String? category,
+    File? attachment,
     int? conversationId,
   }) async {
-    final res = await api.post('create_ticket', body: {
+    // Category isn't a column in the `tickets` table — prepend it into
+    // the description so the agent reading the ticket still sees which
+    // bucket the cashier picked. Cheap and reversible if/when the
+    // backend grows a real category column.
+    var body = description.trim();
+    final cat = (category ?? '').trim();
+    if (cat.isNotEmpty) {
+      body = 'Category: $cat\n\n$body';
+    }
+
+    final fields = <String, dynamic>{
       'customerName': customerName,
       'customerEmail': customerEmail,
       'businessName': businessName,
       'vatReg': vatReg.toString(),
       'subject': subject,
-      'description': description,
+      'description': body,
       'priority': priority,
       // Pass the conv we're already chatting in so the server can
       // link the ticket to it. Without this, admin-side resolve can't
@@ -47,11 +67,36 @@ class TicketService {
       // gates that on a non-null conversation_id).
       if (conversationId != null && conversationId > 0)
         'conversation_id': conversationId.toString(),
-    });
+    };
+
+    final Map<String, dynamic> res;
+    if (attachment != null) {
+      final fileName = attachment.path.split(Platform.pathSeparator).last;
+      final mp = await MultipartFile.fromFile(
+        attachment.path,
+        filename: fileName,
+      );
+      res = await api.upload(
+        'create_ticket',
+        fields: fields,
+        file: mp,
+        fileField: 'attachment',
+      );
+    } else {
+      res = await api.post('create_ticket', body: fields);
+    }
+
     final ok = res['status'] == 'success';
+    // The user-facing reference is the random `ticket_number` (not the
+    // sequential `ticket_id`). Carry that through as the ticket identity
+    // so the optimistic "🎫 Ticket #N" note, the pending-ticket anchor,
+    // and the chat-event correlation all key on the same number the
+    // server stamps into its accept/resolve bubbles. Falls back to the
+    // internal id only if an older server doesn't return a number.
     return TicketSubmitResult(
       ok: ok,
-      ticketId: int.tryParse((res['ticket_id'] ?? '').toString()),
+      ticketId: int.tryParse((res['ticket_number'] ?? '').toString()) ??
+          int.tryParse((res['ticket_id'] ?? '').toString()),
       message: (res['message'] ?? (ok ? 'Ticket created.' : 'Could not create ticket.'))
           .toString(),
     );
@@ -89,6 +134,7 @@ class TicketDetail {
     required this.agentName,
     required this.createdAt,
     required this.updatedAt,
+    this.conversationId,
   });
 
   final int id;
@@ -102,6 +148,18 @@ class TicketDetail {
   final String createdAt;
   final String updatedAt;
 
+  /// Conversation this ticket is linked to (set when filed through chat).
+  /// Used to decide whether a ticket entered by number belongs to this
+  /// employee's support thread before routing them into it.
+  final int? conversationId;
+
+  /// Claimed = anything past the unassigned `new` state — an agent has
+  /// picked it up (assigned/in_progress) or it's already done
+  /// (resolved/closed). Only `new` still sits in the support queue, so
+  /// only `new` should land on the "waiting to be accepted" screen.
+  bool get isClaimed => status.isNotEmpty && status != 'new';
+  bool get isResolved => status == 'resolved' || status == 'closed';
+
   factory TicketDetail.fromJson(Map<String, dynamic> j) => TicketDetail(
         id: int.tryParse((j['id'] ?? 0).toString()) ?? 0,
         subject: (j['subject'] ?? '').toString(),
@@ -113,6 +171,9 @@ class TicketDetail {
         agentName: (j['agent_name'] ?? '').toString(),
         createdAt: (j['created_at'] ?? '').toString(),
         updatedAt: (j['updated_at'] ?? '').toString(),
+        conversationId: j['conversation_id'] != null
+            ? int.tryParse(j['conversation_id'].toString())
+            : null,
       );
 }
 

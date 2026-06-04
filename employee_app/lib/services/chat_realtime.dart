@@ -23,12 +23,18 @@ class ChatRealtimeConfig {
     required this.host,
     required this.port,
     required this.useTls,
+    this.path = '',
   });
 
   final String apiKey;
   final String host;
   final int port;
   final bool useTls;
+
+  /// Optional URL path prefix Soketi is proxied under (e.g. `/soketi` when
+  /// nginx fronts it on the main 443 vhost). Empty when Soketi is reached
+  /// at the host root (direct port, or a dedicated subdomain).
+  final String path;
 
   /// Build a config given the API base URL the rest of the app already
   /// uses. If [hostOverride] is set (via `--dart-define=CHAT_SOKETI_HOST`),
@@ -39,6 +45,7 @@ class ChatRealtimeConfig {
       defaultValue: 'tinkerpro-chat-key',
     );
     const port = int.fromEnvironment('CHAT_SOKETI_PORT', defaultValue: 6001);
+    const path = String.fromEnvironment('CHAT_SOKETI_PATH', defaultValue: '');
     const hostOverride =
         String.fromEnvironment('CHAT_SOKETI_HOST', defaultValue: '');
     const tlsOverride =
@@ -63,13 +70,18 @@ class ChatRealtimeConfig {
       host: host,
       port: port,
       useTls: useTls,
+      path: path,
     );
   }
 
   Uri wsUri() {
     final scheme = useTls ? 'wss' : 'ws';
+    // Normalise the optional proxy prefix: '' → none; 'soketi' or '/soketi/'
+    // → '/soketi'. The '/app/...' Pusher path is appended after it.
+    final prefix =
+        path.isEmpty ? '' : '/${path.replaceAll(RegExp(r'^/+|/+$'), '')}';
     return Uri.parse(
-      '$scheme://$host:$port/app/$apiKey?protocol=7&client=tinkerpro-customer&version=1.0&flash=false',
+      '$scheme://$host:$port$prefix/app/$apiKey?protocol=7&client=tinkerpro-customer&version=1.0&flash=false',
     );
   }
 }
@@ -102,6 +114,7 @@ class ChatRealtimeService {
   final _typingEvents = StreamController<TypingEvent>.broadcast();
   final _readEvents = StreamController<MessageRead>.broadcast();
   final _deletedEvents = StreamController<int>.broadcast(); // message_id
+  final _pinnedEvents = StreamController<PinnedEvent>.broadcast();
   final _callSignalEvents = StreamController<CallSignal>.broadcast();
   // Conversation-wide call presence — fires when a colleague in the
   // same support thread starts/ends a call so this terminal can grey
@@ -121,6 +134,7 @@ class ChatRealtimeService {
   Stream<TypingEvent> get typingEvents => _typingEvents.stream;
   Stream<MessageRead> get readEvents => _readEvents.stream;
   Stream<int> get messageDeletedEvents => _deletedEvents.stream;
+  Stream<PinnedEvent> get pinnedEvents => _pinnedEvents.stream;
   Stream<CallSignal> get callSignalEvents => _callSignalEvents.stream;
   Stream<CallPresence> get callPresenceEvents => _callPresenceEvents.stream;
   Stream<ConversationInvite> get conversationCreatedEvents =>
@@ -186,6 +200,7 @@ class ChatRealtimeService {
     await _typingEvents.close();
     await _readEvents.close();
     await _deletedEvents.close();
+    await _pinnedEvents.close();
     await _callSignalEvents.close();
     await _callPresenceEvents.close();
     await _conversationCreatedEvents.close();
@@ -310,6 +325,27 @@ class ChatRealtimeService {
             debugPrint('[chat-realtime] message.deleted id=$id');
             _deletedEvents.add(id);
           }
+        }
+        break;
+      case 'message.pinned':
+        if (data != null && !_pinnedEvents.isClosed) {
+          _pinnedEvents.add(PinnedEvent(
+            conversationId:
+                int.tryParse((data['conversation_id'] ?? 0).toString()) ?? 0,
+            messageId: int.tryParse((data['message_id'] ?? 0).toString()) ?? 0,
+            pinned: true,
+            entry: PinnedMessage.fromJson(data),
+          ));
+        }
+        break;
+      case 'message.unpinned':
+        if (data != null && !_pinnedEvents.isClosed) {
+          _pinnedEvents.add(PinnedEvent(
+            conversationId:
+                int.tryParse((data['conversation_id'] ?? 0).toString()) ?? 0,
+            messageId: int.tryParse((data['message_id'] ?? 0).toString()) ?? 0,
+            pinned: false,
+          ));
         }
         break;
       case 'typing':

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'api_client.dart';
@@ -13,8 +14,8 @@ import 'services/pos_shop_service.dart';
 import 'services/remote_access_service.dart';
 import 'services/session_store.dart';
 import 'services/ticket_service.dart' show ShopInfo;
+import 'screens/ai_chat_screen.dart';
 import 'screens/chat_screen.dart';
-import 'screens/help_guide_screen.dart';
 import 'screens/store_setup_screen.dart';
 import 'theme.dart';
 
@@ -27,6 +28,19 @@ Future<void> main() async {
   // is the prerequisite for those calls to take effect.
   if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
     await windowManager.ensureInitialized();
+    // Fit the screen on launch: wait until the native window is ready,
+    // then maximize so the form uses the whole monitor (a POS terminal
+    // runs this as the primary window). Kept as a window (not full
+    // borderless) so the cashier still has the title-bar close button.
+    const winOpts = WindowOptions(
+      title: 'TinkerPro Employee',
+      titleBarStyle: TitleBarStyle.normal,
+    );
+    await windowManager.waitUntilReadyToShow(winOpts, () async {
+      await windowManager.maximize();
+      await windowManager.show();
+      await windowManager.focus();
+    });
   }
   final api = await ApiClient.create();
   final store = await SessionStore.open();
@@ -39,12 +53,39 @@ class EmployeeApp extends StatelessWidget {
   final ApiClient api;
   final SessionStore store;
 
+  /// Root navigator key so the global Esc-to-go-back shortcut can pop the
+  /// current route from outside any screen's BuildContext.
+  static final GlobalKey<NavigatorState> _navKey =
+      GlobalKey<NavigatorState>();
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'TinkerPro Employee',
       debugShowCheckedModeBanner: false,
       theme: buildTheme(),
+      navigatorKey: _navKey,
+      // Bind the keyboard Esc key to "go back" everywhere — the POS
+      // terminal is keyboard-first, so Esc should do exactly what tapping
+      // any screen's back/close button does. maybePop() routes through
+      // each route's PopScope (e.g. the chat screen's pending-ticket lock
+      // and the active-call guard), so Esc respects the same guards a
+      // back tap would and never force-closes a blocked screen. Dialogs
+      // already handle Esc via their own dismiss intent, so this only
+      // kicks in for full-page routes.
+      builder: (context, child) {
+        return CallbackShortcuts(
+          bindings: {
+            const SingleActivator(LogicalKeyboardKey.escape): () {
+              _navKey.currentState?.maybePop();
+            },
+          },
+          child: Focus(
+            autofocus: true,
+            child: child ?? const SizedBox.shrink(),
+          ),
+        );
+      },
       home: _Bootstrap(api: api, store: store),
     );
   }
@@ -256,11 +297,12 @@ class _BootstrapState extends State<_Bootstrap> {
         info: _info!,
         sinceMessageId: widget.store.pendingTicketAnchorMessageId,
         onTicketClosed: (ctx) {
-          // Same callback shape HelpGuideScreen uses — on resolution
-          // we replace the chat route with a fresh Help Guide.
+          // On resolution we drop control back to the AI-first landing
+          // screen so the cashier can either ask the bot another
+          // question or open the FAQ / file another ticket.
           Navigator.of(ctx).pushReplacement(
             MaterialPageRoute(
-              builder: (_) => HelpGuideScreen(
+              builder: (_) => AiChatScreen(
                 api: widget.api,
                 chat: _chat,
                 realtime: _realtime!,
@@ -275,9 +317,11 @@ class _BootstrapState extends State<_Bootstrap> {
       );
     }
 
-    // No pending ticket — land on the self-serve help guide.
-    // "Contact Support" from there routes into EmployeeChatScreen.
-    return HelpGuideScreen(
+    // No pending ticket — land on the new AI-first POS support screen.
+    // The top bar's "Help articles" opens the legacy HelpGuideScreen
+    // (FAQ), and "Submit ticket" opens the TicketFormScreen → live chat
+    // flow that HelpGuideScreen used to drive.
+    return AiChatScreen(
       api: widget.api,
       chat: _chat,
       realtime: _realtime!,

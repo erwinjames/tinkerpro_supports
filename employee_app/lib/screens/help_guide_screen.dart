@@ -12,19 +12,19 @@ import '../theme.dart';
 import 'chat_screen.dart';
 import 'ticket_form_screen.dart';
 
-/// First screen the employee sees after the bootstrap has resolved
-/// their store + chat session. POS-focused self-serve FAQ — common
-/// register / sales / BIR / inventory questions the cashier hits day
-/// to day. A live search field at the top filters the article list
-/// as the user types (matches title or body, case-insensitive) so
-/// they don't have to scroll through every collapsed tile.
+/// "Help articles" view — reached from the AI chat screen's top-bar
+/// button. Replaces the older POS Help & Guide layout with a
+/// category-driven browse + search experience:
 ///
-/// "Contact Support" is the only escape hatch: it pushes the existing
-/// TicketFormScreen, posts the same "🎫 Ticket #N submitted…" note as
-/// the /ticket slash-command, then pushReplacement's into
-/// EmployeeChatScreen with the ticket id as the history anchor so the
-/// freshly-opened chat starts at the new ticket bubble (no unrelated
-/// past-ticket chatter).
+///   • top bar: back arrow, "Help articles" + subtitle, "Submit ticket"
+///   • search input (filters by title/body, live)
+///   • BROWSE BY TOPIC row of category cards (counts per category)
+///   • MOST ASKED list of articles (chevron → detail view)
+///
+/// Categories are derived client-side from keyword matches against the
+/// article title + body — the admin's Help Center schema doesn't carry
+/// an explicit category column yet, so this is the lightest path to
+/// the mock-up without a server-side migration.
 class HelpGuideScreen extends StatefulWidget {
   const HelpGuideScreen({
     super.key,
@@ -52,13 +52,15 @@ class HelpGuideScreen extends StatefulWidget {
 class _HelpGuideScreenState extends State<HelpGuideScreen> {
   final _search = TextEditingController();
   String _query = '';
+  _CategoryDef? _activeCategory;
 
-  /// Articles currently driving the list. Starts as the baked-in
-  /// fallback so the screen has something to show on a fresh install
-  /// before the first network call lands; gets replaced by the
-  /// admin-managed list once `help.public` responds (or the cached
-  /// JSON from last launch is decoded).
-  List<HelpArticle> _articles = _fallbackArticles;
+  // Help content is sourced exclusively from the live Help Center
+  // (see HelpArticleService). We deliberately ship NO baked-in sample
+  // articles — showing fake "Log in to the POS"-style placeholders when
+  // the fetch fails reads as real content but isn't. Instead we show a
+  // loader while fetching and an honest "couldn't load" state on failure.
+  List<HelpArticle> _articles = const [];
+  bool _loading = true;
 
   late final HelpArticleService _helpSvc =
       HelpArticleService(api: widget.api, store: widget.store);
@@ -76,48 +78,58 @@ class _HelpGuideScreenState extends State<HelpGuideScreen> {
   }
 
   Future<void> _fetchFromServer() async {
+    if (!_loading) setState(() => _loading = true);
     final list = await _helpSvc.load();
     if (!mounted) return;
-    // Only swap in when the server (or cache) returned something —
-    // otherwise stay on the baked-in fallback so the screen never
-    // shows an empty FAQ.
-    if (list.isEmpty) return;
     setState(() {
       _articles = List<HelpArticle>.unmodifiable(list);
+      _loading = false;
     });
   }
 
-  /// Offline-bootstrap defaults. Used until the server response (or
-  /// the cached JSON from a prior session) supersedes them. Kept
-  /// intentionally short — the admin web app's Help Center is the
-  /// source of truth, this only exists so a brand-new install can
-  /// still show something useful before its first network call.
-  static const _fallbackArticles = <HelpArticle>[
-    HelpArticle(
-      title: 'Log in to the POS',
-      body: 'On the POS terminal, enter your cashier username and PIN, then '
-          'press LOG IN.\n\n'
-          'If the screen says "License invalid" or "License expired", call '
-          'your manager before continuing — do not try to re-enter the PIN; '
-          'every wrong attempt is logged.'
+  // ── Categories ────────────────────────────────────────────────
+  // Keyword buckets used to assign each article to a "Browse by topic"
+  // card. Lowercase, longest-first so "z reading" beats a bare "z".
+  static const _categories = <_CategoryDef>[
+    _CategoryDef(
+      label: 'Getting started',
+      icon: Icons.flag_outlined,
+      keywords: [
+        'log in', 'login', 'sign in', 'setup', 'set up', 'configure',
+        'install', 'first launch', 'get started', 'pin'
+      ],
     ),
-    HelpArticle(
-      title: 'Open a shift / starting cash',
-      body: 'After login, the POS asks for the starting cash in the drawer. '
-          'Count the float, type the exact amount and press CONFIRM. The '
-          'shift is now open and any sale you ring will be tied to your '
-          'cashier ID for the day-end Z-reading.',
+    _CategoryDef(
+      label: 'Daily operations',
+      icon: Icons.schedule_outlined,
+      keywords: [
+        'z reading', 'z-reading', 'x reading', 'x-reading',
+        'end of shift', 'end of day', 'open shift', 'close shift',
+        'starting cash', 'cash float', 'bir', 'audit'
+      ],
     ),
-    HelpArticle(
-      title: 'Still stuck?',
-      body: 'If none of the above answers your question, tap "Contact '
-          'Support" below. Fill in the form with the OR number / item '
-          'code / error message and we will reach out in chat as soon '
-          'as we see your ticket.',
+    _CategoryDef(
+      label: 'Sales and payments',
+      icon: Icons.credit_card_outlined,
+      keywords: [
+        'refund', 'void', 'discount', 'payment', 'tender', 'cash',
+        'card', 'change', 'or ', 'receipt', 'reprint', 'checkout',
+        'pwd', 'senior'
+      ],
+    ),
+    _CategoryDef(
+      label: 'Hardware',
+      icon: Icons.print_outlined,
+      keywords: [
+        'printer', 'scanner', 'barcode', 'drawer', 'usb', 'paper',
+        'ribbon', 'offline', 'thermal', 'cable'
+      ],
     ),
   ];
 
-  List<HelpArticle> get _visibleArticles {
+  // ── Filtering ─────────────────────────────────────────────────
+
+  List<HelpArticle> get _searchFiltered {
     final q = _query.trim().toLowerCase();
     if (q.isEmpty) return _articles;
     return _articles
@@ -127,7 +139,61 @@ class _HelpGuideScreenState extends State<HelpGuideScreen> {
         .toList(growable: false);
   }
 
-  Future<void> _contactSupport() async {
+  /// Articles to show in the MOST ASKED list — search wins over category,
+  /// category wins over "show everything".
+  List<HelpArticle> get _visibleArticles {
+    final base = _searchFiltered;
+    final cat = _activeCategory;
+    if (cat == null) return base;
+    return base.where((a) => cat.matches(a)).toList(growable: false);
+  }
+
+  int _countFor(_CategoryDef c) {
+    // Counts respect the live search query, so a search of "printer"
+    // shrinks the "Hardware" badge to whatever's actually visible.
+    return _searchFiltered.where((a) => c.matches(a)).length;
+  }
+
+  _CategoryDef? _categoryFor(HelpArticle a) {
+    for (final c in _categories) {
+      if (c.matches(a)) return c;
+    }
+    return null;
+  }
+
+  // ── Actions ───────────────────────────────────────────────────
+
+  Future<void> _submitTicket() async {
+    // One unresolved ticket at a time. If the cashier already has a
+    // pending ticket pinned in SessionStore, jump them back into that
+    // chat instead of letting them open a second one.
+    if (widget.store.hasPendingTicket) {
+      final pendingId = widget.store.pendingTicketId;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(
+          pendingId != null
+              ? 'You already have ticket #$pendingId pending — please wait for support to resolve it.'
+              : 'You already have a ticket pending — please wait for support to resolve it.',
+        ),
+        duration: const Duration(seconds: 3),
+      ));
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute(
+          builder: (_) => EmployeeChatScreen(
+            api: widget.api,
+            chat: widget.chat,
+            realtime: widget.realtime,
+            calls: widget.calls,
+            lan: widget.lan,
+            store: widget.store,
+            info: widget.info,
+            sinceMessageId: widget.store.pendingTicketAnchorMessageId,
+            onTicketClosed: (ctx) => Navigator.of(ctx).pop(),
+          ),
+        ),
+      );
+      return;
+    }
     final tickets = TicketService(widget.api);
     final outcome = await Navigator.of(context).push<TicketSubmitOutcome>(
       MaterialPageRoute(
@@ -140,8 +206,8 @@ class _HelpGuideScreenState extends State<HelpGuideScreen> {
       ),
     );
     if (outcome == null || !mounted) return;
-
-    final ticketRef = outcome.ticketId != null ? ' #${outcome.ticketId}' : '';
+    final ticketRef =
+        outcome.ticketId != null ? ' ${fmtTicketNo(outcome.ticketId!)}' : '';
     final note = '🎫 Ticket$ticketRef submitted: "${outcome.subject}"\n'
         'Business: ${outcome.businessName} (${outcome.vatLabel})\n'
         'Priority: ${outcome.priority.toUpperCase()}';
@@ -151,19 +217,12 @@ class _HelpGuideScreenState extends State<HelpGuideScreen> {
       clientNonce: 'help-${DateTime.now().microsecondsSinceEpoch}',
     );
     final anchorId = sent?.persistedId;
-
-    // Persist the pending-ticket pointer so an accidental app close
-    // mid-wait resumes on the same scoped chat instead of dumping
-    // the cashier back on the Help Guide. _Bootstrap reads this on
-    // launch; EmployeeChatScreen clears it once the ticket is
-    // accepted or resolved.
     if (anchorId != null && outcome.ticketId != null) {
       await widget.store.savePendingTicket(
         anchorMessageId: anchorId,
         ticketId: outcome.ticketId!,
       );
     }
-
     if (!mounted) return;
     Navigator.of(context).pushReplacement(
       MaterialPageRoute(
@@ -176,80 +235,53 @@ class _HelpGuideScreenState extends State<HelpGuideScreen> {
           store: widget.store,
           info: widget.info,
           sinceMessageId: anchorId,
-          // When the admin resolves this ticket, chat hands control
-          // back to a fresh HelpGuideScreen so the employee starts a
-          // new self-serve flow (search the FAQ or file another
-          // ticket). Using pushReplacement again so the closed chat
-          // route is gone from the stack.
-          onTicketClosed: (ctx) {
-            Navigator.of(ctx).pushReplacement(
-              MaterialPageRoute(
-                builder: (_) => HelpGuideScreen(
-                  api: widget.api,
-                  chat: widget.chat,
-                  realtime: widget.realtime,
-                  calls: widget.calls,
-                  lan: widget.lan,
-                  store: widget.store,
-                  info: widget.info,
-                ),
-              ),
-            );
-          },
+          onTicketClosed: (ctx) => Navigator.of(ctx).pop(),
         ),
       ),
     );
   }
+
+  void _openArticle(HelpArticle a) {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => _ArticleDetailScreen(
+          article: a,
+          baseUrl: _helpSvc.baseUrl,
+          category: _categoryFor(a),
+        ),
+      ),
+    );
+  }
+
+  // ── Build ─────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
-    final text = Theme.of(context).textTheme;
-    final visible = _visibleArticles;
     return Scaffold(
       backgroundColor: Brand.surface,
-      appBar: AppBar(
-        title: const Text('POS Help & Guide'),
-        backgroundColor: Brand.canvas,
-        foregroundColor: Brand.textPrimary,
-        elevation: 0,
-      ),
       body: SafeArea(
         child: Column(
           children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
-              child: _buildHero(text),
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
-              child: _buildSearchField(),
-            ),
+            _buildHeader(context),
+            const Divider(height: 1, color: Brand.stroke),
             Expanded(
-              child: visible.isEmpty
-                  ? _buildEmptyState(text)
-                  : ListView.builder(
-                      padding: const EdgeInsets.fromLTRB(20, 4, 20, 12),
-                      itemCount: visible.length,
-                      itemBuilder: (_, i) =>
-                          _buildArticle(visible[i], text),
-                    ),
-            ),
-            Container(
-              padding: const EdgeInsets.fromLTRB(20, 12, 20, 16),
-              decoration: BoxDecoration(
-                color: Brand.canvas,
-                border: Border(top: BorderSide(color: Brand.stroke)),
-              ),
-              child: SizedBox(
-                width: double.infinity,
-                child: FilledButton.icon(
-                  onPressed: _contactSupport,
-                  icon: const Icon(Icons.support_agent),
-                  label: const Text('Contact Support'),
-                  style: FilledButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(vertical: 14),
+              child: ListView(
+                padding: const EdgeInsets.fromLTRB(24, 18, 24, 24),
+                children: [
+                  _buildSearch(),
+                  const SizedBox(height: 18),
+                  _buildSectionLabel('BROWSE BY TOPIC'),
+                  const SizedBox(height: 10),
+                  _buildCategoryRow(),
+                  const SizedBox(height: 22),
+                  _buildSectionLabel(
+                    _activeCategory == null
+                        ? 'MOST ASKED'
+                        : _activeCategory!.label.toUpperCase(),
                   ),
-                ),
+                  const SizedBox(height: 10),
+                  _buildArticleList(),
+                ],
               ),
             ),
           ],
@@ -258,193 +290,617 @@ class _HelpGuideScreenState extends State<HelpGuideScreen> {
     );
   }
 
-  Widget _buildSearchField() {
-    return TextField(
-      controller: _search,
-      onChanged: (v) => setState(() => _query = v),
-      textInputAction: TextInputAction.search,
-      decoration: InputDecoration(
-        hintText: 'Search the guide… (e.g., "refund", "Z-reading", "printer")',
-        prefixIcon: const Icon(Icons.search, color: Brand.textMuted),
-        suffixIcon: _query.isEmpty
-            ? null
-            : IconButton(
-                icon: const Icon(Icons.close, size: 18),
-                tooltip: 'Clear',
-                onPressed: () {
-                  _search.clear();
-                  setState(() => _query = '');
-                },
-              ),
-        filled: true,
-        fillColor: Brand.canvas,
-        contentPadding:
-            const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(10),
-          borderSide: const BorderSide(color: Brand.stroke),
-        ),
-        enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(10),
-          borderSide: const BorderSide(color: Brand.stroke),
-        ),
-        focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(10),
-          borderSide: const BorderSide(color: Brand.signal, width: 1.4),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildEmptyState(TextTheme text) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.search_off,
-                size: 48, color: Brand.textMuted),
-            const SizedBox(height: 12),
-            Text(
-              'No matching guide entries.',
-              style: text.bodyMedium?.copyWith(color: Brand.textMuted),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              'Try a different keyword, or tap Contact Support below.',
-              textAlign: TextAlign.center,
-              style: text.bodySmall?.copyWith(color: Brand.textMuted),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildHero(TextTheme text) {
+  Widget _buildHeader(BuildContext context) {
+    final text = Theme.of(context).textTheme;
     return Container(
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        gradient: Brand.primary,
-        borderRadius: BorderRadius.circular(14),
-        boxShadow: [
-          BoxShadow(
-            color: Brand.signal.withValues(alpha: 0.18),
-            blurRadius: 18,
-            offset: const Offset(0, 8),
-          ),
-        ],
-      ),
+      color: Brand.canvas,
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
       child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          const Icon(Icons.point_of_sale,
-              color: Colors.white, size: 32),
+          _CircleIconButton(
+            icon: Icons.arrow_back,
+            tooltip: 'Back',
+            onTap: () => Navigator.of(context).maybePop(),
+          ),
           const SizedBox(width: 14),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'Welcome, ${widget.info.storeName}',
-                  style: text.titleMedium?.copyWith(
-                    color: Colors.white,
+                  'Help articles',
+                  style: text.titleLarge?.copyWith(
                     fontWeight: FontWeight.w700,
+                    color: Brand.textPrimary,
                   ),
                 ),
-                const SizedBox(height: 6),
+                const SizedBox(height: 2),
                 Text(
-                  'Quick answers to common POS questions live below. '
-                  'Search for a topic, or tap Contact Support if your '
-                  'question is not covered.',
-                  style: text.bodySmall?.copyWith(
-                    color: Colors.white.withValues(alpha: 0.92),
-                    height: 1.4,
-                  ),
+                  'Browse guides for the POS',
+                  style: text.bodySmall?.copyWith(color: Brand.textMuted),
                 ),
               ],
             ),
+          ),
+          _OutlineButton(
+            icon: Icons.headset_mic_outlined,
+            label: 'Submit ticket',
+            onTap: _submitTicket,
           ),
         ],
       ),
     );
   }
 
-  Widget _buildArticle(HelpArticle a, TextTheme text) {
+  Widget _buildSearch() {
     return Container(
-      margin: const EdgeInsets.only(bottom: 10),
+      decoration: BoxDecoration(
+        color: Brand.canvas,
+        borderRadius: BorderRadius.circular(28),
+        border: Border.all(color: Brand.stroke),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 2),
+      child: Row(
+        children: [
+          const Icon(Icons.search, color: Brand.textMuted, size: 20),
+          const SizedBox(width: 12),
+          Expanded(
+            child: TextField(
+              controller: _search,
+              onChanged: (v) => setState(() => _query = v),
+              textInputAction: TextInputAction.search,
+              decoration: const InputDecoration(
+                isCollapsed: true,
+                contentPadding: EdgeInsets.symmetric(vertical: 16),
+                filled: false,
+                fillColor: Colors.transparent,
+                border: InputBorder.none,
+                enabledBorder: InputBorder.none,
+                focusedBorder: InputBorder.none,
+                hintText:
+                    'Search articles, e.g. "Z reading", "discount", "printer offline"',
+                hintStyle: TextStyle(color: Brand.textMuted, fontSize: 14),
+              ),
+            ),
+          ),
+          if (_query.isNotEmpty)
+            IconButton(
+              icon: const Icon(Icons.close, size: 18, color: Brand.textMuted),
+              tooltip: 'Clear search',
+              onPressed: () {
+                _search.clear();
+                setState(() => _query = '');
+              },
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSectionLabel(String label) {
+    return Text(
+      label,
+      style: const TextStyle(
+        color: Brand.textMuted,
+        fontSize: 11,
+        fontWeight: FontWeight.w700,
+        letterSpacing: 1.4,
+      ),
+    );
+  }
+
+  Widget _buildCategoryRow() {
+    // LayoutBuilder so the four cards collapse to two-per-row when the
+    // window is narrow (POS dual-monitor portrait mode, mostly).
+    return LayoutBuilder(builder: (_, c) {
+      final twoCol = c.maxWidth < 700;
+      final cards = [
+        for (final cat in _categories)
+          _CategoryCard(
+            def: cat,
+            count: _countFor(cat),
+            active: _activeCategory == cat,
+            onTap: () => setState(() {
+              _activeCategory = _activeCategory == cat ? null : cat;
+            }),
+          ),
+      ];
+      if (!twoCol) {
+        return Row(
+          children: [
+            for (var i = 0; i < cards.length; i++) ...[
+              Expanded(child: cards[i]),
+              if (i < cards.length - 1) const SizedBox(width: 12),
+            ],
+          ],
+        );
+      }
+      return Column(
+        children: [
+          Row(children: [
+            Expanded(child: cards[0]),
+            const SizedBox(width: 12),
+            Expanded(child: cards[1]),
+          ]),
+          const SizedBox(height: 12),
+          Row(children: [
+            Expanded(child: cards[2]),
+            const SizedBox(width: 12),
+            Expanded(child: cards[3]),
+          ]),
+        ],
+      );
+    });
+  }
+
+  Widget _buildArticleList() {
+    // Still fetching the live Help Center (and nothing cached to show yet).
+    if (_loading && _articles.isEmpty) {
+      return Container(
+        padding: const EdgeInsets.all(40),
+        decoration: BoxDecoration(
+          color: Brand.canvas,
+          border: Border.all(color: Brand.stroke),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: const Center(
+          child: SizedBox(
+            width: 26,
+            height: 26,
+            child: CircularProgressIndicator(strokeWidth: 2.4),
+          ),
+        ),
+      );
+    }
+
+    final list = _visibleArticles;
+    if (list.isEmpty) {
+      // Nothing loaded at all (network/server failure) vs. a search or
+      // category that simply matched nothing — different messages, and a
+      // Retry on the load-failure case.
+      final loadFailed =
+          _articles.isEmpty && _query.isEmpty && _activeCategory == null;
+      return Container(
+        padding: const EdgeInsets.all(24),
+        decoration: BoxDecoration(
+          color: Brand.canvas,
+          border: Border.all(color: Brand.stroke),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Column(
+          children: [
+            Icon(loadFailed ? Icons.cloud_off_outlined : Icons.search_off,
+                size: 36, color: Brand.textMuted),
+            const SizedBox(height: 10),
+            Text(
+              loadFailed
+                  ? "Couldn't load help articles."
+                  : _query.isNotEmpty
+                      ? 'No articles match "$_query".'
+                      : 'No articles in this category yet.',
+              style: Theme.of(context)
+                  .textTheme
+                  .bodyMedium
+                  ?.copyWith(color: Brand.textMuted),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              loadFailed
+                  ? 'Check your connection and try again, or tap Submit ticket above.'
+                  : 'Try a different keyword, or tap Submit ticket above.',
+              textAlign: TextAlign.center,
+              style: Theme.of(context)
+                  .textTheme
+                  .bodySmall
+                  ?.copyWith(color: Brand.textMuted),
+            ),
+            if (loadFailed) ...[
+              const SizedBox(height: 14),
+              _OutlineButton(
+                icon: Icons.refresh,
+                label: 'Retry',
+                onTap: _fetchFromServer,
+              ),
+            ],
+          ],
+        ),
+      );
+    }
+
+    return Container(
       decoration: BoxDecoration(
         color: Brand.canvas,
         border: Border.all(color: Brand.stroke),
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(12),
       ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(10),
-        child: ExpansionTile(
-          // While a search query is active, auto-expand the tile so
-          // the matching body text is visible without an extra tap.
-          initiallyExpanded: _query.trim().isNotEmpty,
-          shape: const Border(),
-          collapsedShape: const Border(),
-          title: Text(
-            a.title,
-            style: text.bodyMedium?.copyWith(
-              fontWeight: FontWeight.w600,
-              color: Brand.textPrimary,
+      child: Column(
+        children: [
+          for (var i = 0; i < list.length; i++) ...[
+            _ArticleRow(
+              key: ValueKey(list[i].title),
+              article: list[i],
+              category: _categoryFor(list[i]),
+              onTap: () => _openArticle(list[i]),
             ),
+            if (i < list.length - 1)
+              const Divider(
+                height: 1,
+                thickness: 1,
+                color: Brand.stroke,
+                indent: 18,
+                endIndent: 18,
+              ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+// ───────────────────────── Category model ─────────────────────────
+
+class _CategoryDef {
+  const _CategoryDef({
+    required this.label,
+    required this.icon,
+    required this.keywords,
+  });
+
+  final String label;
+  final IconData icon;
+  final List<String> keywords;
+
+  bool matches(HelpArticle a) {
+    final haystack = '${a.title} ${a.body}'.toLowerCase();
+    for (final k in keywords) {
+      if (haystack.contains(k)) return true;
+    }
+    return false;
+  }
+}
+
+// ───────────────────────── Components ─────────────────────────────
+
+class _CircleIconButton extends StatelessWidget {
+  const _CircleIconButton({
+    required this.icon,
+    required this.onTap,
+    this.tooltip,
+  });
+
+  final IconData icon;
+  final VoidCallback onTap;
+  final String? tooltip;
+
+  @override
+  Widget build(BuildContext context) {
+    final btn = Material(
+      color: Brand.canvas,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(10),
+        side: const BorderSide(color: Brand.stroke),
+      ),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(10),
+        onTap: onTap,
+        child: SizedBox(
+          width: 38,
+          height: 38,
+          child: Icon(icon, size: 18, color: Brand.textPrimary),
+        ),
+      ),
+    );
+    if (tooltip == null) return btn;
+    return Tooltip(message: tooltip!, child: btn);
+  }
+}
+
+class _OutlineButton extends StatelessWidget {
+  const _OutlineButton({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Brand.canvas,
+      borderRadius: BorderRadius.circular(10),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(10),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+          decoration: BoxDecoration(
+            border: Border.all(color: Brand.stroke),
+            borderRadius: BorderRadius.circular(10),
           ),
-          iconColor: Brand.signal,
-          collapsedIconColor: Brand.textMuted,
-          childrenPadding:
-              const EdgeInsets.fromLTRB(16, 0, 16, 14),
-          expandedAlignment: Alignment.centerLeft,
-          children: [
-            if (a.body.isNotEmpty)
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 17, color: Brand.textPrimary),
+              const SizedBox(width: 8),
               Text(
-                a.body,
-                style: text.bodySmall?.copyWith(
-                  color: Brand.textMuted,
-                  height: 1.55,
+                label,
+                style: const TextStyle(
+                  color: Brand.textPrimary,
+                  fontSize: 13.5,
+                  fontWeight: FontWeight.w600,
                 ),
               ),
-            // Inline images attached to the topic (any help_content
-            // row that carried an image_path). Hosted as static files
-            // under /uploads/help/ on the support server — no auth.
-            // Tap to expand into a full-screen viewer.
-            for (final p in a.imagePaths)
-              Padding(
-                padding: const EdgeInsets.only(top: 10),
-                child: _buildHelpImage(p),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CategoryCard extends StatelessWidget {
+  const _CategoryCard({
+    required this.def,
+    required this.count,
+    required this.active,
+    required this.onTap,
+  });
+
+  final _CategoryDef def;
+  final int count;
+  final bool active;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final borderColor = active ? Brand.signal : Brand.stroke;
+    return Material(
+      color: Brand.canvas,
+      borderRadius: BorderRadius.circular(12),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 160),
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            border: Border.all(color: borderColor, width: active ? 1.5 : 1),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Container(
+                width: 44,
+                height: 44,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Brand.signal.withValues(alpha: 0.10),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Icon(def.icon, color: Brand.signal, size: 22),
               ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      def.label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Brand.textPrimary,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      '$count article${count == 1 ? '' : 's'}',
+                      style: const TextStyle(
+                        color: Brand.textMuted,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ArticleRow extends StatelessWidget {
+  const _ArticleRow({
+    super.key,
+    required this.article,
+    required this.category,
+    required this.onTap,
+  });
+
+  final HelpArticle article;
+  final _CategoryDef? category;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(18, 14, 14, 14),
+        child: Row(
+          children: [
+            Icon(
+              category?.icon ?? Icons.article_outlined,
+              size: 20,
+              color: Brand.textMuted,
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Text(
+                article.title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: Brand.textPrimary,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ),
+            const Icon(Icons.chevron_right,
+                size: 20, color: Brand.textMuted),
           ],
         ),
       ),
     );
   }
+}
 
-  Widget _buildHelpImage(String path) {
-    final url = '${widget.api.baseUrl}/uploads/help/$path';
+// ───────────────────────── Article detail ─────────────────────────
+
+class _ArticleDetailScreen extends StatelessWidget {
+  const _ArticleDetailScreen({
+    required this.article,
+    required this.baseUrl,
+    required this.category,
+  });
+
+  final HelpArticle article;
+  final String baseUrl;
+  final _CategoryDef? category;
+
+  @override
+  Widget build(BuildContext context) {
+    final text = Theme.of(context).textTheme;
+    return Scaffold(
+      backgroundColor: Brand.surface,
+      body: SafeArea(
+        child: Column(
+          children: [
+            Container(
+              color: Brand.canvas,
+              padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+              child: Row(
+                children: [
+                  _CircleIconButton(
+                    icon: Icons.arrow_back,
+                    tooltip: 'Back',
+                    onTap: () => Navigator.of(context).maybePop(),
+                  ),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        if (category != null)
+                          Text(
+                            category!.label.toUpperCase(),
+                            style: const TextStyle(
+                              color: Brand.textMuted,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: 1.4,
+                            ),
+                          ),
+                        const SizedBox(height: 2),
+                        Text(
+                          article.title,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: text.titleLarge?.copyWith(
+                            fontWeight: FontWeight.w700,
+                            color: Brand.textPrimary,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const Divider(height: 1, color: Brand.stroke),
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.fromLTRB(24, 20, 24, 24),
+                children: [
+                  if (article.body.isNotEmpty)
+                    Container(
+                      padding: const EdgeInsets.all(20),
+                      decoration: BoxDecoration(
+                        color: Brand.canvas,
+                        border: Border.all(color: Brand.stroke),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: SelectableText(
+                        article.body,
+                        style: text.bodyMedium?.copyWith(
+                          color: Brand.textPrimary,
+                          height: 1.6,
+                        ),
+                      ),
+                    ),
+                  // Stable per-URL keys so Flutter never recycles one
+                  // image's element for a different URL — without them a
+                  // list of network images can briefly swap the first
+                  // image for the second as they decode at different times.
+                  for (var i = 0; i < article.imagePaths.length; i++) ...[
+                    const SizedBox(height: 14),
+                    _ArticleImage(
+                      key: ValueKey('help-img-$i-${article.imagePaths[i]}'),
+                      url: '$baseUrl/uploads/help/${article.imagePaths[i]}',
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ArticleImage extends StatelessWidget {
+  const _ArticleImage({super.key, required this.url});
+
+  final String url;
+
+  @override
+  Widget build(BuildContext context) {
     return GestureDetector(
-      onTap: () => _openImagePreview(url, path),
+      onTap: () => _openPreview(context),
       child: ClipRRect(
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(10),
         child: Container(
           decoration: BoxDecoration(
             color: Brand.subtle,
             border: Border.all(color: Brand.stroke),
-            borderRadius: BorderRadius.circular(8),
+            borderRadius: BorderRadius.circular(10),
           ),
           child: Image.network(
             url,
             fit: BoxFit.contain,
-            loadingBuilder: (_, child, progress) {
-              if (progress == null) return child;
+            // Hold the last decoded frame instead of flashing blank if the
+            // provider is ever swapped during a rebuild.
+            gaplessPlayback: true,
+            loadingBuilder: (_, child, p) {
+              if (p == null) return child;
               return const SizedBox(
-                height: 160,
+                height: 180,
                 child: Center(
                   child: SizedBox(
-                    width: 22, height: 22,
+                    width: 22,
+                    height: 22,
                     child: CircularProgressIndicator(strokeWidth: 2),
                   ),
                 ),
@@ -453,7 +909,6 @@ class _HelpGuideScreenState extends State<HelpGuideScreen> {
             errorBuilder: (_, __, ___) => Container(
               height: 80,
               alignment: Alignment.center,
-              padding: const EdgeInsets.all(12),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: const [
@@ -461,8 +916,7 @@ class _HelpGuideScreenState extends State<HelpGuideScreen> {
                       size: 18, color: Brand.textMuted),
                   SizedBox(width: 6),
                   Text('Image unavailable',
-                      style: TextStyle(
-                          color: Brand.textMuted, fontSize: 12)),
+                      style: TextStyle(color: Brand.textMuted, fontSize: 12)),
                 ],
               ),
             ),
@@ -472,43 +926,42 @@ class _HelpGuideScreenState extends State<HelpGuideScreen> {
     );
   }
 
-  Future<void> _openImagePreview(String url, String filename) async {
+  Future<void> _openPreview(BuildContext context) async {
     await showDialog<void>(
       context: context,
       barrierColor: Colors.black.withValues(alpha: 0.85),
-      builder: (ctx) {
-        return Dialog(
-          backgroundColor: Colors.transparent,
-          insetPadding: const EdgeInsets.all(16),
-          child: Stack(
-            children: [
-              GestureDetector(
-                onTap: () => Navigator.of(ctx).pop(),
-                child: const SizedBox.expand(),
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.transparent,
+        insetPadding: const EdgeInsets.all(16),
+        child: Stack(
+          children: [
+            GestureDetector(
+              onTap: () => Navigator.of(ctx).pop(),
+              child: const SizedBox.expand(),
+            ),
+            Center(
+              child: InteractiveViewer(
+                panEnabled: true,
+                minScale: 0.5,
+                maxScale: 4.0,
+                child: Image.network(url, fit: BoxFit.contain, gaplessPlayback: true),
               ),
-              Center(
-                child: InteractiveViewer(
-                  panEnabled: true,
-                  minScale: 0.5,
-                  maxScale: 4.0,
-                  child: Image.network(url, fit: BoxFit.contain),
+            ),
+            Positioned(
+              top: 8,
+              right: 8,
+              child: Material(
+                color: Colors.black.withValues(alpha: 0.55),
+                shape: const CircleBorder(),
+                child: IconButton(
+                  icon: const Icon(Icons.close, color: Colors.white),
+                  onPressed: () => Navigator.of(ctx).pop(),
                 ),
               ),
-              Positioned(
-                top: 8, right: 8,
-                child: Material(
-                  color: Colors.black.withValues(alpha: 0.55),
-                  shape: const CircleBorder(),
-                  child: IconButton(
-                    icon: const Icon(Icons.close, color: Colors.white),
-                    onPressed: () => Navigator.of(ctx).pop(),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        );
-      },
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

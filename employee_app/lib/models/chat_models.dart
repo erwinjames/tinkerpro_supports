@@ -227,3 +227,48 @@ class MessageRead {
             int.tryParse((j['last_read_message_id'] ?? 0).toString()) ?? 0,
       );
 }
+
+/// A pinned message — a standing instruction support left for the next
+/// agent. Shown read-only in a banner above the employee's chat.
+class PinnedMessage {
+  PinnedMessage({
+    required this.conversationId,
+    required this.messageId,
+    required this.senderName,
+    required this.body,
+    required this.createdAt,
+    required this.pinnedAt,
+  });
+
+  final int conversationId;
+  final int messageId;
+  final String senderName;
+  final String body;
+  final String createdAt;
+  final String pinnedAt;
+
+  factory PinnedMessage.fromJson(Map<String, dynamic> j) => PinnedMessage(
+        conversationId:
+            int.tryParse((j['conversation_id'] ?? 0).toString()) ?? 0,
+        messageId: int.tryParse((j['message_id'] ?? 0).toString()) ?? 0,
+        senderName: (j['sender_name'] ?? '').toString(),
+        body: (j['body'] ?? '').toString(),
+        createdAt: (j['created_at'] ?? '').toString(),
+        pinnedAt: (j['pinned_at'] ?? '').toString(),
+      );
+}
+
+/// Pin/unpin fan-out broadcast on `private-conv-{id}`. [entry] is set on
+/// pin; [pinned] is false for unpin (only [messageId] is meaningful then).
+class PinnedEvent {
+  PinnedEvent({
+    required this.conversationId,
+    required this.messageId,
+    required this.pinned,
+    this.entry,
+  });
+  final int conversationId;
+  final int messageId;
+  final bool pinned;
+  final PinnedMessage? entry;
+}

@@ -79,6 +79,23 @@ class ChatService {
     return list;
   }
 
+  /// Pinned messages for a conversation (support handoff instructions),
+  /// newest pin first. Read-only on the employee side.
+  Future<List<PinnedMessage>> listPinned(int convId) async {
+    final res = await api.getChat('chat.listPinned', params: {
+      'conversation_id': convId.toString(),
+    });
+    final raw = res['pinned'];
+    if (raw is! List) return const [];
+    final out = <PinnedMessage>[];
+    for (final p in raw) {
+      if (p is Map) {
+        out.add(PinnedMessage.fromJson(Map<String, dynamic>.from(p)));
+      }
+    }
+    return out;
+  }
+
   /// Posts a message + binds any pre-uploaded attachments. Server returns
   /// the canonical row (with attachments inflated) that the UI swaps in
   /// for the optimistic placeholder.

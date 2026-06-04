@@ -46,6 +46,9 @@ class EmployeeChatScreen extends StatefulWidget {
     required this.info,
     this.sinceMessageId,
     this.onTicketClosed,
+    this.scopedTicketId,
+    this.initialAccepted,
+    this.initiallyResolved = false,
   });
 
   final ApiClient api;
@@ -73,6 +76,22 @@ class EmployeeChatScreen extends StatefulWidget {
   /// (scoped mode); legacy unscoped chat keeps its existing behavior.
   final void Function(BuildContext context)? onTicketClosed;
 
+  /// Scope the chat to a specific ticket *without* a local anchor bubble —
+  /// used when the employee enters an existing ticket number (one they
+  /// filed on the web). Takes precedence over parsing [sinceMessageId].
+  final int? scopedTicketId;
+
+  /// Initial accepted state for the explicit-scoping path: true when the
+  /// looked-up ticket is already claimed (so we open straight into the
+  /// live chat), false to show the "waiting for support to accept" card
+  /// until the accept event arrives over realtime.
+  final bool? initialAccepted;
+
+  /// When opening an already resolved/closed ticket by number, the chat
+  /// is a read-back view — there's nothing left to wait on, so the
+  /// "ticket still pending" back-navigation guard must not trap the user.
+  final bool initiallyResolved;
+
   @override
   State<EmployeeChatScreen> createState() => _EmployeeChatScreenState();
 }
@@ -94,6 +113,10 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
   StreamSubscription<CallPresence>? _presenceSub;
   StreamSubscription<MessageRead>? _readSub;
   StreamSubscription<int>? _deletedSub;
+  StreamSubscription<PinnedEvent>? _pinnedSub;
+
+  /// Pinned support instructions for this conversation (read-only here).
+  List<PinnedMessage> _pinned = [];
 
   /// Per-user `last_read_message_id` populated from realtime read
   /// events. Drives the "no one else has seen this message yet" gate
@@ -188,6 +211,8 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
     _readSub = widget.realtime.readEvents.listen(_onMessageRead);
     _deletedSub =
         widget.realtime.messageDeletedEvents.listen(_onMessageDeleted);
+    _pinnedSub = widget.realtime.pinnedEvents.listen(_onPinnedEvent);
+    _loadPinned();
     widget.calls.addListener(_onCallChange);
     // Desktop-only window lock during the waiting-for-acceptance
     // phase. Apply the initial state on the next frame, after
@@ -216,6 +241,7 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
     _presenceSub?.cancel();
     _readSub?.cancel();
     _deletedSub?.cancel();
+    _pinnedSub?.cancel();
     _presenceAutoClear?.cancel();
     _highlightClearTimer?.cancel();
     widget.calls.removeListener(_onCallChange);
@@ -294,15 +320,39 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
     final list = await widget.chat.history(_convId);
     if (!mounted) return;
     final anchor = widget.sinceMessageId;
-    final scoped = anchor == null
+    // Decide where the visible history starts. Normally that's the explicit
+    // `sinceMessageId` anchor. When the employee tracked a ticket by number
+    // (scopedTicketId set, no anchor) there's no anchor, so derive one from
+    // the "🎫 Ticket #N submitted" bubble for that ticket — the moment the
+    // ticket was opened — and start there instead of dumping the entire
+    // conversation backlog. If that bubble isn't in this conversation we
+    // fall back to showing everything (safer than hiding the whole chat).
+    int? scopedStart = anchor;
+    if (scopedStart == null && widget.scopedTicketId != null) {
+      for (final m in list) {
+        final ev = _detectTicketEvent(m.body);
+        if (ev != null &&
+            ev.kind == _TicketEventKind.submitted &&
+            ev.id == widget.scopedTicketId) {
+          scopedStart = m.persistedId;
+          break;
+        }
+      }
+    }
+    final start = scopedStart;
+    final scoped = start == null
         ? list
         : list
-            .where((m) => (m.persistedId ?? 0) >= anchor)
+            .where((m) => (m.persistedId ?? 0) >= start)
             .toList(growable: false);
     // Pull the ticket id out of the anchor message so we can match
     // a resolved event later. The anchor is the "🎫 Ticket #N
     // submitted…" bubble HelpGuideScreen posted on Contact Support.
-    if (anchor != null) {
+    // Explicit scoping (employee entered a ticket number) wins over
+    // parsing the anchor bubble.
+    if (widget.scopedTicketId != null) {
+      _scopedTicketId = widget.scopedTicketId;
+    } else if (anchor != null) {
       ChatMessage? anchorMsg;
       for (final m in scoped) {
         if ((m.persistedId ?? 0) == anchor) {
@@ -323,19 +373,33 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
     // event matching the scoped ticket id (covers warm restarts
     // where the admin accepted before this screen opened); if so,
     // the waiting card never shows.
-    var initiallyAccepted = anchor == null || _scopedTicketId == null;
-    if (!initiallyAccepted && _scopedTicketId != null) {
-      for (final m in scoped) {
-        final ev = _detectTicketEvent(m.body);
-        if (ev != null &&
-            ev.kind == _TicketEventKind.accepted &&
-            ev.id == _scopedTicketId) {
-          initiallyAccepted = true;
-          break;
+    bool initiallyAccepted;
+    if (widget.initialAccepted != null) {
+      // Caller already resolved the claimed/unclaimed state from the
+      // ticket lookup — trust it. A later live `accepted` event still
+      // flips the waiting card via _onIncoming.
+      initiallyAccepted = widget.initialAccepted!;
+    } else {
+      initiallyAccepted = anchor == null || _scopedTicketId == null;
+      if (!initiallyAccepted && _scopedTicketId != null) {
+        for (final m in scoped) {
+          final ev = _detectTicketEvent(m.body);
+          if (ev != null &&
+              ev.kind == _TicketEventKind.accepted &&
+              ev.id == _scopedTicketId) {
+            initiallyAccepted = true;
+            break;
+          }
         }
       }
     }
     _ticketAccepted = initiallyAccepted;
+    // Opened straight onto a resolved/closed ticket (entered by number):
+    // mark it already-closed so the back-nav guard lets the user leave
+    // and a stray live resolved event can't double-fire onTicketClosed.
+    if (widget.initiallyResolved) {
+      _closedFromResolution = true;
+    }
     // Warm-restart resolution check. If the ticket was resolved
     // while the app was closed, the loaded history will contain a
     // matching `✅ … as resolved` event; treat it the same way we
@@ -449,7 +513,7 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
           unawaited(_applyWindowLock(false));
           ScaffoldMessenger.of(context).showSnackBar(SnackBar(
             content: Text(
-              'Ticket #${ev.id} resolved by ${ev.agentName.isNotEmpty ? ev.agentName : "support"}.',
+              'Ticket ${fmtTicketNo(ev.id)} resolved by ${ev.agentName.isNotEmpty ? ev.agentName : "support"}.',
             ),
             duration: const Duration(seconds: 2),
           ));
@@ -695,7 +759,7 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
     // Post a confirmation back into the support thread so admins see
     // the ticket land in chat in real time.
     final ticketRef =
-        outcome.ticketId != null ? ' #${outcome.ticketId}' : '';
+        outcome.ticketId != null ? ' ${fmtTicketNo(outcome.ticketId!)}' : '';
     final note = '🎫 Ticket$ticketRef submitted: "${outcome.subject}"\n'
         'Business: ${outcome.businessName} (${outcome.vatLabel})\n'
         'Priority: ${outcome.priority.toUpperCase()}';
@@ -932,6 +996,22 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
     final before = _messages.length;
     _messages.removeWhere((m) => m.id == messageId);
     if (_messages.length != before) setState(() {});
+  }
+
+  Future<void> _loadPinned() async {
+    final pins = await widget.chat.listPinned(_convId);
+    if (!mounted) return;
+    setState(() => _pinned = pins);
+  }
+
+  void _onPinnedEvent(PinnedEvent e) {
+    if (!mounted || e.conversationId != _convId) return;
+    setState(() {
+      _pinned.removeWhere((p) => p.messageId == e.messageId);
+      if (e.pinned && e.entry != null) {
+        _pinned.insert(0, e.entry!);
+      }
+    });
   }
 
   /// True when any other participant's read cursor has already
@@ -1444,7 +1524,24 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
   @override
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
-    return Scaffold(
+    // While the scoped ticket is still pending (created, not yet
+    // resolved), block back-navigation out of the chat. The cashier
+    // must wait for support to mark it resolved — at which point
+    // [_closedFromResolution] flips and we let the route pop.
+    final hasPendingTicket =
+        _scopedTicketId != null && !_closedFromResolution;
+    return PopScope(
+      canPop: !hasPendingTicket,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop || !hasPendingTicket) return;
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(
+            'Ticket ${fmtTicketNo(_scopedTicketId!)} is still pending — please wait for support to resolve it before leaving.',
+          ),
+          duration: const Duration(seconds: 3),
+        ));
+      },
+      child: Scaffold(
       backgroundColor: Brand.surface,
       appBar: AppBar(
         backgroundColor: Brand.canvas,
@@ -1483,41 +1580,57 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
           ],
         ),
         actions: [
+          // In resolved-review mode every live action is disabled — the
+          // ticket is closed, so no remote/add/call, only reading.
           IconButton(
-            tooltip: _ticketAccepted
-                ? 'Show remote-desktop password (for first-time setup)'
-                : 'Waiting for support to accept your ticket',
+            tooltip: widget.initiallyResolved
+                ? 'Ticket is resolved'
+                : (_ticketAccepted
+                    ? 'Show remote-desktop password (for first-time setup)'
+                    : 'Waiting for support to accept your ticket'),
             icon: const Icon(Icons.vpn_key_outlined),
-            onPressed: _ticketAccepted ? _showRemotePasswordSheet : null,
+            onPressed: (_ticketAccepted && !widget.initiallyResolved)
+                ? _showRemotePasswordSheet
+                : null,
           ),
           IconButton(
-            tooltip: _ticketAccepted
-                ? 'Add a colleague from this Wi-Fi'
-                : 'Waiting for support to accept your ticket',
+            tooltip: widget.initiallyResolved
+                ? 'Ticket is resolved'
+                : (_ticketAccepted
+                    ? 'Add a colleague from this Wi-Fi'
+                    : 'Waiting for support to accept your ticket'),
             icon: const Icon(Icons.person_add_alt_1),
-            onPressed: _ticketAccepted ? _openAddParticipantSheet : null,
+            onPressed: (_ticketAccepted && !widget.initiallyResolved)
+                ? _openAddParticipantSheet
+                : null,
           ),
           IconButton(
-            tooltip: !_ticketAccepted
-                ? 'Waiting for support to accept your ticket'
-                : (_colleagueInCall != null
-                    ? '${_colleagueInCall!.fromName} is on a call — please wait'
-                    : 'Voice call'),
+            tooltip: widget.initiallyResolved
+                ? 'Ticket is resolved'
+                : (!_ticketAccepted
+                    ? 'Waiting for support to accept your ticket'
+                    : (_colleagueInCall != null
+                        ? '${_colleagueInCall!.fromName} is on a call — please wait'
+                        : 'Voice call')),
             icon: const Icon(Icons.call),
-            onPressed: (!_ticketAccepted || _colleagueInCall != null)
-                ? null
-                : () => _placeCall(CallMedia.voice),
+            onPressed:
+                (!_ticketAccepted || widget.initiallyResolved || _colleagueInCall != null)
+                    ? null
+                    : () => _placeCall(CallMedia.voice),
           ),
           IconButton(
-            tooltip: !_ticketAccepted
-                ? 'Waiting for support to accept your ticket'
-                : (_colleagueInCall != null
-                    ? '${_colleagueInCall!.fromName} is on a call — please wait'
-                    : 'Video call'),
+            tooltip: widget.initiallyResolved
+                ? 'Ticket is resolved'
+                : (!_ticketAccepted
+                    ? 'Waiting for support to accept your ticket'
+                    : (_colleagueInCall != null
+                        ? '${_colleagueInCall!.fromName} is on a call — please wait'
+                        : 'Video call')),
             icon: const Icon(Icons.videocam),
-            onPressed: (!_ticketAccepted || _colleagueInCall != null)
-                ? null
-                : () => _placeCall(CallMedia.video),
+            onPressed:
+                (!_ticketAccepted || widget.initiallyResolved || _colleagueInCall != null)
+                    ? null
+                    : () => _placeCall(CallMedia.video),
           ),
           const SizedBox(width: 4),
         ],
@@ -1525,6 +1638,7 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
       body: Column(
         children: [
           if (_colleagueInCall != null) _buildColleagueCallBanner(),
+          if (_pinned.isNotEmpty) _buildPinnedBanner(),
           Expanded(
             // While the scoped ticket is still pending acceptance,
             // overlay a centered "waiting" card on top of the chat
@@ -1563,6 +1677,7 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
           _buildComposer(),
         ],
       ),
+    ),
     );
   }
 
@@ -1618,7 +1733,7 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
             const SizedBox(height: 8),
             Text(
               _scopedTicketId != null
-                  ? 'Ticket #$_scopedTicketId is in the support queue. '
+                  ? 'Ticket ${fmtTicketNo(_scopedTicketId!)} is in the support queue. '
                       'Chat and call options will unlock as soon as an '
                       'admin accepts it.'
                   : 'Your ticket is in the support queue. Chat and call '
@@ -1632,6 +1747,111 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  /// Read-only banner of pinned support instructions, above the chat.
+  Widget _buildPinnedBanner() {
+    return Container(
+      constraints: const BoxConstraints(maxHeight: 132),
+      decoration: const BoxDecoration(
+        color: Color(0xFFFFF7ED),
+        border: Border(bottom: BorderSide(color: Brand.stroke)),
+      ),
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: _pinned.map((p) {
+            final text = p.body.replaceAll(RegExp(r'\s+'), ' ').trim();
+            return InkWell(
+              onTap: () => _showPinnedMessage(p),
+              borderRadius: BorderRadius.circular(8),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 4),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Padding(
+                      padding: EdgeInsets.only(top: 2),
+                      child: Icon(Icons.push_pin, size: 13, color: Brand.signal),
+                    ),
+                    const SizedBox(width: 9),
+                    Expanded(
+                      child: RichText(
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        text: TextSpan(
+                          style: const TextStyle(
+                              fontSize: 12.5,
+                              color: Brand.textPrimary,
+                              height: 1.4),
+                          children: [
+                            TextSpan(
+                              text: '${p.senderName}: ',
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w700,
+                                color: Color(0xFFC2410C),
+                              ),
+                            ),
+                            TextSpan(text: text),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const Icon(Icons.chevron_right,
+                        size: 16, color: Brand.textMuted),
+                  ],
+                ),
+              ),
+            );
+          }).toList(),
+        ),
+      ),
+    );
+  }
+
+  /// Show a pinned message in full (the banner truncates to two lines).
+  void _showPinnedMessage(PinnedMessage p) {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Row(
+          children: [
+            const Icon(Icons.push_pin, size: 18, color: Brand.signal),
+            const SizedBox(width: 8),
+            const Expanded(child: Text('Pinned message')),
+          ],
+        ),
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                p.senderName,
+                style: const TextStyle(
+                  fontWeight: FontWeight.w700,
+                  color: Color(0xFFC2410C),
+                  fontSize: 13,
+                ),
+              ),
+              const SizedBox(height: 8),
+              SelectableText(
+                p.body.trim(),
+                style: const TextStyle(
+                    fontSize: 14, color: Brand.textPrimary, height: 1.45),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Close'),
+          ),
+        ],
       ),
     );
   }
@@ -2155,21 +2375,21 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
       _TicketEventKind.submitted => (
         Icons.confirmation_number_outlined,
         Brand.signal,
-        'Ticket #${ev.id} submitted',
+        'Ticket ${fmtTicketNo(ev.id)} submitted',
         ev.subject.isEmpty ? null : '"${ev.subject}"',
       ),
       _TicketEventKind.accepted => (
         Icons.check_circle_outline,
         const Color(0xFF2563EB),
         ev.agentName.isEmpty
-            ? 'Ticket #${ev.id} accepted'
-            : '${ev.agentName} accepted ticket #${ev.id}',
+            ? 'Ticket ${fmtTicketNo(ev.id)} accepted'
+            : '${ev.agentName} accepted ticket ${fmtTicketNo(ev.id)}',
         ev.subject.isEmpty ? "We'll help you from here." : '"${ev.subject}"',
       ),
       _TicketEventKind.resolved => (
         Icons.task_alt_outlined,
         Brand.success,
-        'Ticket #${ev.id} resolved',
+        'Ticket ${fmtTicketNo(ev.id)} resolved',
         ev.agentName.isEmpty ? null : 'by ${ev.agentName}',
       ),
     };
@@ -2840,6 +3060,33 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
   }
 
   Widget _buildComposer() {
+    // Resolved-review mode (opened by ticket number for an already
+    // resolved/closed ticket): the thread is read-only — show a banner
+    // instead of the input so the employee can read the history but
+    // can't keep chatting on a closed ticket.
+    if (widget.initiallyResolved) {
+      return Container(
+        decoration: const BoxDecoration(
+          color: Brand.canvas,
+          border: Border(top: BorderSide(color: Brand.stroke)),
+        ),
+        padding: const EdgeInsets.fromLTRB(18, 14, 18, 16),
+        child: Row(
+          children: [
+            const Icon(Icons.lock_outline, size: 18, color: Brand.textMuted),
+            const SizedBox(width: 10),
+            const Expanded(
+              child: Text(
+                'This ticket is resolved — you can review it but can’t send '
+                'new messages. File a new ticket if you need more help.',
+                style: TextStyle(
+                    fontSize: 12.5, color: Brand.textMuted, height: 1.4),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
     // Disabled in two scenarios that share the same UX: mid-upload
     // (existing) and pre-acceptance (new). Both grey out the row so
     // a stray click can't desync state. We keep them separate

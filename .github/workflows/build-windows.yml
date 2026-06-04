@@ -9,11 +9,15 @@ on:
       base_url:
         description: 'TPS_BASE_URL (chat backend)'
         required: true
-        default: 'https://uninterrupted-brent-lunulate.ngrok-free.dev/tinkerpro_support'
+        default: 'https://support.tinkerpro.io'
       soketi_host:
         description: 'CHAT_SOKETI_HOST (WebSocket host — usually same as base_url host)'
         required: true
-        default: 'uninterrupted-brent-lunulate.ngrok-free.dev'
+        default: 'support.tinkerpro.io'
+      tinker_chat_url:
+        description: 'TINKER_CHAT_URL (AI assistant backend)'
+        required: true
+        default: 'https://tinker-chat.tinkerpro.cloud'
       pos_user:
         description: 'TPS_POS_USER (MariaDB user the /ticket form authenticates as). Defaults to root, matching production POS installs.'
         required: true
@@ -55,17 +59,20 @@ jobs:
 
       - name: Build Windows release
         env:
-          BASE_URL:    ${{ github.event.inputs.base_url    || 'https://uninterrupted-brent-lunulate.ngrok-free.dev/tinkerpro_support' }}
-          SOKETI_HOST: ${{ github.event.inputs.soketi_host || 'uninterrupted-brent-lunulate.ngrok-free.dev' }}
-          POS_USER:    ${{ github.event.inputs.pos_user    || 'root' }}
-          POS_PASS:    ${{ github.event.inputs.pos_pass    || '' }}
+          BASE_URL:        ${{ github.event.inputs.base_url        || 'https://support.tinkerpro.io' }}
+          SOKETI_HOST:     ${{ github.event.inputs.soketi_host     || 'support.tinkerpro.io' }}
+          TINKER_CHAT_URL: ${{ github.event.inputs.tinker_chat_url || 'https://tinker-chat.tinkerpro.cloud' }}
+          POS_USER:        ${{ github.event.inputs.pos_user        || 'root' }}
+          POS_PASS:        ${{ github.event.inputs.pos_pass        || '' }}
         run: |
           flutter build windows --release `
             --dart-define="TPS_BASE_URL=$env:BASE_URL" `
             --dart-define="CHAT_SOKETI_HOST=$env:SOKETI_HOST" `
             --dart-define="CHAT_SOKETI_PORT=443" `
             --dart-define="CHAT_SOKETI_TLS=true" `
+            --dart-define="CHAT_SOKETI_PATH=/soketi" `
             --dart-define="CHAT_SOKETI_KEY=tinkerpro-chat-key" `
+            --dart-define="TINKER_CHAT_URL=$env:TINKER_CHAT_URL" `
             --dart-define="TPS_POS_USER=$env:POS_USER" `
             --dart-define="TPS_POS_PASS=$env:POS_PASS" `
             --dart-define="RUSTDESK_RELAY_HOST=192.168.1.40" `

@@ -33,6 +33,7 @@ class SessionStore {
   static const _kHelpAt           = 'help_topics_saved_at';
   static const _kPendingAnchor    = 'pending_ticket_anchor_msg_id';
   static const _kPendingTicketId  = 'pending_ticket_id';
+  static const _kTinkerChatApiKey = 'tinker_chat_api_key';
 
   static Future<SessionStore> open() async {
     final prefs = await SharedPreferences.getInstance();
@@ -209,6 +210,22 @@ class SessionStore {
   Future<void> clearPendingTicket() async {
     await _prefs.remove(_kPendingAnchor);
     await _prefs.remove(_kPendingTicketId);
+  }
+
+  /// Runtime override for the tinker-chat tenant API key. Takes
+  /// precedence over the `--dart-define=TINKER_CHAT_API_KEY` baked
+  /// into the binary, so a cashier (or roving tech) can paste in a
+  /// freshly-issued `pk_live_…` key without rebuilding. Cleared by
+  /// passing an empty string.
+  String? get tinkerChatApiKey => _prefs.getString(_kTinkerChatApiKey);
+
+  Future<void> setTinkerChatApiKey(String key) async {
+    final trimmed = key.trim();
+    if (trimmed.isEmpty) {
+      await _prefs.remove(_kTinkerChatApiKey);
+    } else {
+      await _prefs.setString(_kTinkerChatApiKey, trimmed);
+    }
   }
 
   /// Wipe everything — used by the "reset store" path if you ever want to
