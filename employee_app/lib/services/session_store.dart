@@ -34,6 +34,14 @@ class SessionStore {
   static const _kPendingAnchor    = 'pending_ticket_anchor_msg_id';
   static const _kPendingTicketId  = 'pending_ticket_id';
   static const _kTinkerChatApiKey = 'tinker_chat_api_key';
+  static const _kServerBaseUrl    = 'server_base_url';
+  static const _kHelpBaseUrl      = 'help_base_url';
+  static const _kWsHost           = 'ws_host';
+  static const _kWsPort           = 'ws_port';
+  static const _kWsKey            = 'ws_key';
+  static const _kWsTls            = 'ws_tls';
+  static const _kWsPath           = 'ws_path';
+  static const _kLastActiveAt     = 'last_active_at';
 
   static Future<SessionStore> open() async {
     final prefs = await SharedPreferences.getInstance();
@@ -82,6 +90,89 @@ class SessionStore {
   int? get convId => _prefs.getInt(_kConvId);
 
   bool get isConfigured => (storeName ?? '').trim().isNotEmpty;
+
+  /// TinkerPro server origin this device talks to. On desktop this stays
+  /// null and the compile-time `TPS_BASE_URL` default is used. On the
+  /// mobile APK it's populated from the scanned sync QR so the phone hits
+  /// the same server the desktop is logged into. Null → fall back to the
+  /// baked-in default.
+  String? get serverBaseUrl {
+    final v = _prefs.getString(_kServerBaseUrl);
+    return (v == null || v.trim().isEmpty) ? null : v.trim();
+  }
+
+  Future<void> saveServerBaseUrl(String? url) async {
+    if (url == null || url.trim().isEmpty) {
+      await _prefs.remove(_kServerBaseUrl);
+    } else {
+      await _prefs.setString(_kServerBaseUrl, url.trim());
+    }
+  }
+
+  /// Help Center origin carried in the sync QR (optional).
+  String? get helpBaseUrl {
+    final v = _prefs.getString(_kHelpBaseUrl);
+    return (v == null || v.trim().isEmpty) ? null : v.trim();
+  }
+
+  Future<void> saveHelpBaseUrl(String? url) async {
+    if (url == null || url.trim().isEmpty) {
+      await _prefs.remove(_kHelpBaseUrl);
+    } else {
+      await _prefs.setString(_kHelpBaseUrl, url.trim());
+    }
+  }
+
+  /// Realtime (Soketi) connection carried in the sync QR from the desktop.
+  /// Lets the phone reach the same WebSocket endpoint the desktop uses, so
+  /// live ticket/chat/call events arrive without restarting the app. Null
+  /// host → fall back to the compile-time default (derived from the API URL).
+  String? get wsHost {
+    final v = _prefs.getString(_kWsHost);
+    return (v == null || v.trim().isEmpty) ? null : v.trim();
+  }
+
+  int get wsPort => _prefs.getInt(_kWsPort) ?? 0;
+  String get wsKey => _prefs.getString(_kWsKey) ?? '';
+  bool get wsTls => _prefs.getBool(_kWsTls) ?? false;
+  String get wsPath => _prefs.getString(_kWsPath) ?? '';
+
+  bool get hasWsConfig => (wsHost ?? '').isNotEmpty && wsPort > 0;
+
+  /// Wall-clock of the last user activity / foreground use. Drives the
+  /// mobile inactivity timeout — when the app has been idle/away longer than
+  /// the limit, the session is ended and the user has to re-sync.
+  DateTime? get lastActiveAt {
+    final ms = _prefs.getInt(_kLastActiveAt);
+    return ms == null ? null : DateTime.fromMillisecondsSinceEpoch(ms);
+  }
+
+  Future<void> setLastActiveAt(DateTime t) =>
+      _prefs.setInt(_kLastActiveAt, t.millisecondsSinceEpoch);
+
+  Future<void> clearLastActiveAt() => _prefs.remove(_kLastActiveAt);
+
+  Future<void> saveWsConfig({
+    required String host,
+    required int port,
+    required String key,
+    required bool tls,
+    required String path,
+  }) async {
+    if (host.trim().isEmpty || port <= 0) {
+      await _prefs.remove(_kWsHost);
+      await _prefs.remove(_kWsPort);
+      await _prefs.remove(_kWsKey);
+      await _prefs.remove(_kWsTls);
+      await _prefs.remove(_kWsPath);
+      return;
+    }
+    await _prefs.setString(_kWsHost, host.trim());
+    await _prefs.setInt(_kWsPort, port);
+    await _prefs.setString(_kWsKey, key.trim());
+    await _prefs.setBool(_kWsTls, tls);
+    await _prefs.setString(_kWsPath, path.trim());
+  }
 
   Future<void> saveStoreName(String name) =>
       _prefs.setString(_kStoreName, name.trim());
@@ -239,5 +330,13 @@ class SessionStore {
     await _prefs.remove(_kPosManualPort);
     await _prefs.remove(_kShopJson);
     await _prefs.remove(_kShopAt);
+    await _prefs.remove(_kServerBaseUrl);
+    await _prefs.remove(_kHelpBaseUrl);
+    await _prefs.remove(_kWsHost);
+    await _prefs.remove(_kWsPort);
+    await _prefs.remove(_kWsKey);
+    await _prefs.remove(_kWsTls);
+    await _prefs.remove(_kWsPath);
+    await _prefs.remove(_kLastActiveAt);
   }
 }

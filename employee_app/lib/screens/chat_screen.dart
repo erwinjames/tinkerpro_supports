@@ -9,12 +9,15 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart'
     show Clipboard, ClipboardData, KeyDownEvent, LogicalKeyboardKey;
+import 'package:flutter_webrtc/flutter_webrtc.dart'
+    show navigator, MediaDeviceInfo;
 import 'package:open_filex/open_filex.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../api_client.dart';
 import '../models/chat_models.dart';
+import '../platform_info.dart';
 import '../services/call_service.dart';
 import '../services/chat_realtime.dart';
 import '../services/chat_service.dart';
@@ -182,6 +185,23 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
   CallPresence? _colleagueInCall;
   Timer? _presenceAutoClear;
 
+  /// Camera availability for the video-call button.
+  ///   null  → still probing (button disabled, "Checking for a camera…")
+  ///   false → no camera found (button stays disabled)
+  ///   true  → at least one camera detected (button enabled)
+  /// Re-probed on device hot-plug via mediaDevices.ondevicechange so a
+  /// webcam plugged into the POS box after launch lights the button up.
+  bool? _hasCamera;
+
+  /// Microphone availability for the voice-call button. Same tri-state
+  /// semantics as [_hasCamera]:
+  ///   null  → still probing (button disabled, "Checking for a microphone…")
+  ///   false → no microphone found (button stays disabled)
+  ///   true  → at least one microphone detected (button enabled)
+  /// Re-probed on the same device-change hook as the camera so a headset
+  /// plugged into the POS box after launch lights the button up.
+  bool? _hasMic;
+
   /// Mutable copy of the seed info — gets swapped wholesale when the
   /// user accepts an Add-Participant invite from a colleague (we
   /// re-key onto the inviter's conversation_id).
@@ -214,6 +234,12 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
     _pinnedSub = widget.realtime.pinnedEvents.listen(_onPinnedEvent);
     _loadPinned();
     widget.calls.addListener(_onCallChange);
+    // Probe for a camera + microphone so the video-call button only
+    // enables when a camera is present and the voice-call button only
+    // when a mic is present. Re-probe whenever devices change (webcam or
+    // headset plugged/unplugged on the POS terminal).
+    _detectMediaDevices();
+    navigator.mediaDevices.ondevicechange = (_) => _detectMediaDevices();
     // Desktop-only window lock during the waiting-for-acceptance
     // phase. Apply the initial state on the next frame, after
     // _loadHistory has settled _ticketAccepted from any cached
@@ -244,10 +270,37 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
     _pinnedSub?.cancel();
     _presenceAutoClear?.cancel();
     _highlightClearTimer?.cancel();
+    navigator.mediaDevices.ondevicechange = null;
     widget.calls.removeListener(_onCallChange);
     _composer.dispose();
     _scroll.dispose();
     super.dispose();
+  }
+
+  /// Enumerate media devices and flip [_hasCamera] / [_hasMic] based on
+  /// whether any `videoinput` / `audioinput` is present. Any failure (no
+  /// WebRTC backend, permission denied) is treated as "not present" so the
+  /// call buttons stay disabled rather than offering a call that can't
+  /// capture the media it needs.
+  Future<void> _detectMediaDevices() async {
+    bool foundCamera = false;
+    bool foundMic = false;
+    try {
+      final List<MediaDeviceInfo> devices =
+          await navigator.mediaDevices.enumerateDevices();
+      foundCamera = devices.any((d) => d.kind == 'videoinput');
+      foundMic = devices.any((d) => d.kind == 'audioinput');
+    } catch (_) {
+      foundCamera = false;
+      foundMic = false;
+    }
+    if (!mounted) return;
+    if (_hasCamera != foundCamera || _hasMic != foundMic) {
+      setState(() {
+        _hasCamera = foundCamera;
+        _hasMic = foundMic;
+      });
+    }
   }
 
   /// True on desktop platforms only — window_manager APIs are noop
@@ -1582,17 +1635,20 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
         actions: [
           // In resolved-review mode every live action is disabled — the
           // ticket is closed, so no remote/add/call, only reading.
-          IconButton(
-            tooltip: widget.initiallyResolved
-                ? 'Ticket is resolved'
-                : (_ticketAccepted
-                    ? 'Show remote-desktop password (for first-time setup)'
-                    : 'Waiting for support to accept your ticket'),
-            icon: const Icon(Icons.vpn_key_outlined),
-            onPressed: (_ticketAccepted && !widget.initiallyResolved)
-                ? _showRemotePasswordSheet
-                : null,
-          ),
+          // Remote-desktop password is desktop-only (RustDesk lives on the
+          // POS box); the mobile APK hides this entirely.
+          if (kIsDesktopPlatform)
+            IconButton(
+              tooltip: widget.initiallyResolved
+                  ? 'Ticket is resolved'
+                  : (_ticketAccepted
+                      ? 'Show remote-desktop password (for first-time setup)'
+                      : 'Waiting for support to accept your ticket'),
+              icon: const Icon(Icons.vpn_key_outlined),
+              onPressed: (_ticketAccepted && !widget.initiallyResolved)
+                  ? _showRemotePasswordSheet
+                  : null,
+            ),
           IconButton(
             tooltip: widget.initiallyResolved
                 ? 'Ticket is resolved'
@@ -1611,10 +1667,21 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
                     ? 'Waiting for support to accept your ticket'
                     : (_colleagueInCall != null
                         ? '${_colleagueInCall!.fromName} is on a call — please wait'
-                        : 'Voice call')),
+                        : (_hasMic == null
+                            ? 'Checking for a microphone…'
+                            : (_hasMic == false
+                                ? 'No microphone detected'
+                                : 'Voice call')))),
             icon: const Icon(Icons.call),
+            // Disabled while probing (_hasMic == null) and when no mic is
+            // found (_hasMic == false); only a detected microphone (== true)
+            // enables it, alongside the existing gates — same treatment as
+            // the video-call button below with the camera.
             onPressed:
-                (!_ticketAccepted || widget.initiallyResolved || _colleagueInCall != null)
+                (!_ticketAccepted ||
+                        widget.initiallyResolved ||
+                        _colleagueInCall != null ||
+                        _hasMic != true)
                     ? null
                     : () => _placeCall(CallMedia.voice),
           ),
@@ -1625,12 +1692,21 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
                     ? 'Waiting for support to accept your ticket'
                     : (_colleagueInCall != null
                         ? '${_colleagueInCall!.fromName} is on a call — please wait'
-                        : 'Video call')),
+                        : (_hasCamera == null
+                            ? 'Checking for a camera…'
+                            : (_hasCamera == false
+                                ? 'No camera detected'
+                                : 'Video call')))),
             icon: const Icon(Icons.videocam),
-            onPressed:
-                (!_ticketAccepted || widget.initiallyResolved || _colleagueInCall != null)
-                    ? null
-                    : () => _placeCall(CallMedia.video),
+            // Disabled while probing (_hasCamera == null) and when no
+            // camera is found (_hasCamera == false); only a detected
+            // camera (== true) enables it, alongside the existing gates.
+            onPressed: (!_ticketAccepted ||
+                    widget.initiallyResolved ||
+                    _colleagueInCall != null ||
+                    _hasCamera != true)
+                ? null
+                : () => _placeCall(CallMedia.video),
           ),
           const SizedBox(width: 4),
         ],
@@ -1975,7 +2051,9 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
     // instead of plain text. Eliminates the showDialog dependency
     // entirely (Flutter Linux desktop dialogs have a habit of
     // getting swallowed by the GTK shell).
-    if (_isPendingRemoteRequest(m)) {
+    // Desktop only — remote desktop (RustDesk) doesn't exist on the mobile
+    // APK, so there a /remote message just renders as a normal bubble.
+    if (kIsDesktopPlatform && _isPendingRemoteRequest(m)) {
       return _buildRemoteRequestCard(m, text);
     }
 
@@ -2381,9 +2459,9 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
       _TicketEventKind.accepted => (
         Icons.check_circle_outline,
         const Color(0xFF2563EB),
-        ev.agentName.isEmpty
-            ? 'Ticket ${fmtTicketNo(ev.id)} accepted'
-            : '${ev.agentName} accepted ticket ${fmtTicketNo(ev.id)}',
+        // Privacy: never surface the support agent's username — always
+        // show a generic line regardless of who accepted the ticket.
+        'Support agent accepted ticket ${fmtTicketNo(ev.id)}',
         ev.subject.isEmpty ? "We'll help you from here." : '"${ev.subject}"',
       ),
       _TicketEventKind.resolved => (

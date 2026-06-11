@@ -5,6 +5,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
 import '../api_client.dart';
+import '../platform_info.dart';
 import '../services/chat_service.dart' show EmployeeChatInfo;
 import '../services/pos_shop_service.dart';
 import '../services/session_store.dart';
@@ -101,6 +102,22 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
   void initState() {
     super.initState();
     _resolveTerminalIp();
+    // Mobile (QR-synced phone): there is no local POS database to read, and
+    // the store identity already came from the sync QR. Skip all POS
+    // discovery / "server setup" and just attach the store name.
+    if (kIsMobilePlatform) {
+      _shop = ShopInfo(
+        businessName: widget.store.storeName ?? '',
+        vatReg: 0,
+        vatLabel: '',
+        tin: '',
+        email: '',
+        fullName: '',
+      );
+      _loadingShop = false;
+      _needsSetup = false;
+      return;
+    }
     final cached = widget.store.cachedShop;
     final hasManual = widget.store.hasPosManualTarget;
     if (cached != null) {
@@ -1003,13 +1020,38 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
       icon: Icons.verified_outlined,
       title: 'Auto-included',
       titleTrailing: 'AUTOMATIC',
-      child: _needsSetup
-          ? _buildSetupPanel()
-          : _loadingShop
-              ? _includedLoading()
-              : _shop == null
-                  ? _includedError()
-                  : _includedDataGrid(),
+      // Mobile has no POS DB — just show the store identity that came from
+      // the sync QR; never the host/port "server setup" panel.
+      child: kIsMobilePlatform
+          ? _includedMobile()
+          : _needsSetup
+              ? _buildSetupPanel()
+              : _loadingShop
+                  ? _includedLoading()
+                  : _shop == null
+                      ? _includedError()
+                      : _includedDataGrid(),
+    );
+  }
+
+  Widget _includedMobile() {
+    final store = (widget.store.storeName ?? '').trim();
+    return Row(
+      children: [
+        const Icon(Icons.storefront, size: 16, color: Brand.signal),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            store.isEmpty ? 'Your store' : store,
+            style: const TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              color: Brand.textPrimary,
+            ),
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+      ],
     );
   }
 

@@ -1,7 +1,7 @@
 name: employee_app
 description: "TinkerPro employee desktop client — text chat + voice/video calls to admin support, identified by store name."
 publish_to: 'none'
-version: 1.0.0+1
+version: 1.0.12+13
 
 environment:
   sdk: ^3.5.0
@@ -57,11 +57,24 @@ dependencies:
   # check + database read with no deployment on the POS side.
   mysql_client_patched:
     path: third_party/mysql_client_patched
+  qr_flutter: ^4.1.0
+  flutter_zxing: ^2.3.0
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.4
+
+# Android launcher icon — uses the same TinkerPro brand mark the desktop
+# build ships (windows/runner/resources/app_icon.ico is derived from this
+# same 512px source). Regenerate with: dart run flutter_launcher_icons
+flutter_launcher_icons:
+  android: "ic_launcher"
+  ios: false
+  image_path: "assets/brand/tinkerpro-icon-512.png"
+  adaptive_icon_background: "#FFFFFF"
+  adaptive_icon_foreground: "assets/brand/tinkerpro-icon-512.png"
 
 flutter:
   uses-material-design: true

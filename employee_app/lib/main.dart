@@ -17,6 +17,8 @@ import 'services/ticket_service.dart' show ShopInfo;
 import 'screens/ai_chat_screen.dart';
 import 'screens/chat_screen.dart';
 import 'screens/store_setup_screen.dart';
+import 'screens/qr_sync_screen.dart';
+import 'platform_info.dart';
 import 'theme.dart';
 
 Future<void> main() async {
@@ -42,8 +44,10 @@ Future<void> main() async {
       await windowManager.focus();
     });
   }
-  final api = await ApiClient.create();
   final store = await SessionStore.open();
+  // Mobile adopts the server URL scanned from the desktop's sync QR; desktop
+  // leaves this null and uses the compile-time TPS_BASE_URL default.
+  final api = await ApiClient.create(overrideBaseUrl: store.serverBaseUrl);
   runApp(EmployeeApp(api: api, store: store));
 }
 
@@ -82,7 +86,14 @@ class EmployeeApp extends StatelessWidget {
           },
           child: Focus(
             autofocus: true,
-            child: child ?? const SizedBox.shrink(),
+            // App-wide activity tap detector — any pointer-down on any route
+            // resets the mobile inactivity timer. Listener doesn't intercept
+            // events, so it never interferes with the actual UI.
+            child: Listener(
+              behavior: HitTestBehavior.translucent,
+              onPointerDown: (_) => _BootstrapState.onActivity?.call(),
+              child: child ?? const SizedBox.shrink(),
+            ),
           ),
         );
       },
@@ -109,8 +120,11 @@ class _Bootstrap extends StatefulWidget {
   State<_Bootstrap> createState() => _BootstrapState();
 }
 
-class _BootstrapState extends State<_Bootstrap> {
-  late final ChatService _chat;
+class _BootstrapState extends State<_Bootstrap> with WidgetsBindingObserver {
+  // _api / _chat are mutable so the mobile QR-sync flow can swap in an
+  // ApiClient re-based onto the scanned server URL before bootstrapping.
+  late ApiClient _api;
+  late ChatService _chat;
   ChatRealtimeService? _realtime;
   CallService? _calls;
   LanPresence? _lan;
@@ -118,18 +132,131 @@ class _BootstrapState extends State<_Bootstrap> {
   String? _error;
   bool _resolving = false;
 
+  // ── Mobile inactivity timeout ──────────────────────────────────────────
+  // Mobile only (the desktop POS terminal is a kiosk and stays signed in):
+  // after this much idle/away time the session is ended and the user must
+  // re-scan the desktop QR to sign back in.
+  static const _idleTimeout = Duration(hours: 1);
+  Timer? _idleTimer;
+  DateTime? _lastTouchWrite;
+  bool _endingSession = false;
+
+  /// Set while a mobile session is live so the app-wide pointer Listener in
+  /// EmployeeApp.builder can report user activity from any route.
+  static void Function()? onActivity;
+
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _idleTimer?.cancel();
+    if (onActivity != null) onActivity = null;
     _lan?.stop();
     super.dispose();
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      // Coming back to the foreground: if we've been idle/away past the
+      // limit, end the session; otherwise treat the return as activity and
+      // re-establish the realtime socket (which the OS may have silently
+      // killed in the background).
+      if (_info != null && kIsMobilePlatform && _sessionExpired()) {
+        _endSession();
+        return;
+      }
+      _touchActivity();
+      final info = _info;
+      if (info != null) {
+        _realtime?.kick(
+          shadowUserId: info.meId,
+          conversationId: info.conversationId,
+        );
+      }
+    }
+  }
+
+  /// True when the last recorded activity is older than [_idleTimeout].
+  bool _sessionExpired() {
+    final last = widget.store.lastActiveAt;
+    if (last == null) return false;
+    return DateTime.now().difference(last) >= _idleTimeout;
+  }
+
+  /// Record "the app is being used now". Throttled so we don't hammer
+  /// SharedPreferences on every pointer event. Mobile only.
+  void _touchActivity() {
+    if (!kIsMobilePlatform) return;
+    final now = DateTime.now();
+    if (_lastTouchWrite != null &&
+        now.difference(_lastTouchWrite!) < const Duration(seconds: 20)) {
+      return;
+    }
+    _lastTouchWrite = now;
+    unawaited(widget.store.setLastActiveAt(now));
+  }
+
+  void _startIdleWatch() {
+    if (!kIsMobilePlatform) return;
+    _touchActivity();
+    onActivity = _touchActivity;
+    _idleTimer?.cancel();
+    // Check once a minute while foregrounded; the resume/launch checks cover
+    // time spent backgrounded (timers are throttled there anyway).
+    _idleTimer = Timer.periodic(const Duration(minutes: 1), (_) {
+      if (_info != null && _sessionExpired()) _endSession();
+    });
+  }
+
+  /// End the session: tear down realtime/calls, clear the stored identity +
+  /// server cookies, pop back to the root, and let the build show the QR
+  /// login again.
+  Future<void> _endSession() async {
+    if (_endingSession) return;
+    _endingSession = true;
+    _idleTimer?.cancel();
+    onActivity = null;
+    try {
+      await _realtime?.dispose();
+    } catch (_) {}
+    _lan?.stop();
+    try {
+      await _api.wipeCookies();
+    } catch (_) {}
+    await widget.store.reset();
+    await widget.store.clearLastActiveAt();
+    if (!mounted) {
+      _endingSession = false;
+      return;
+    }
+    // Drop any pushed screens (ticket form, chat, etc.) so we land on the
+    // bootstrap root, which now renders the QR-login screen.
+    Navigator.of(context, rootNavigator: true).popUntil((r) => r.isFirst);
+    setState(() {
+      _info = null;
+      _realtime = null;
+      _calls = null;
+      _lan = null;
+      _resolving = false;
+      _error = null;
+      _endingSession = false;
+    });
+  }
+
+  @override
   void initState() {
     super.initState();
-    _chat = ChatService(widget.api);
+    WidgetsBinding.instance.addObserver(this);
+    _api = widget.api;
+    _chat = ChatService(_api);
     if (widget.store.isConfigured) {
-      _resumeFromStoredName();
+      if (kIsMobilePlatform && _sessionExpired()) {
+        // Inactivity window elapsed while the app was closed — don't resume,
+        // drop straight to the QR login.
+        WidgetsBinding.instance.addPostFrameCallback((_) => _endSession());
+      } else {
+        _resumeFromStoredName();
+      }
     }
     // Warm the POS DB lookup in the background so the /ticket form can
     // render from cache instantly when the user eventually opens it.
@@ -146,7 +273,7 @@ class _BootstrapState extends State<_Bootstrap> {
       // configured yet, the ticket form's setup panel handles it.
       if (!widget.store.hasPosManualTarget) return;
       final svc = PosShopService(store: widget.store);
-      final apiHost = Uri.tryParse(widget.api.baseUrl)?.host;
+      final apiHost = Uri.tryParse(_api.baseUrl)?.host;
       final hints = <String>[if (apiHost != null && apiHost.isNotEmpty) apiHost];
       final pos = await svc.getShopInfo(
         hintHosts: hints,
@@ -196,7 +323,20 @@ class _BootstrapState extends State<_Bootstrap> {
   }
 
   void _wireRealtimeAndCalls(EmployeeChatInfo info) {
-    final realtime = ChatRealtimeService(widget.api);
+    // Prefer the Soketi endpoint carried in the sync QR (the one the desktop
+    // actually connects to). Falls back to the compile-time default when not
+    // present (e.g. desktop builds, or manual mobile setup).
+    final s = widget.store;
+    final ChatRealtimeConfig? rtConfig = s.hasWsConfig
+        ? ChatRealtimeConfig(
+            apiKey: s.wsKey,
+            host: s.wsHost!,
+            port: s.wsPort,
+            useTls: s.wsTls,
+            path: s.wsPath,
+          )
+        : null;
+    final realtime = ChatRealtimeService(_api, config: rtConfig);
     final calls = CallService(
       realtime: realtime,
       chat: _chat,
@@ -216,7 +356,11 @@ class _BootstrapState extends State<_Bootstrap> {
     // its ID with the rendezvous server in the background, and so the
     // /remote password gets pushed via IPC into the live instance.
     // prepare() now handles the launch itself — see RemoteAccessService.
-    unawaited(RemoteAccessService.instance.prepare());
+    // Desktop-only: the mobile APK ships no RustDesk binary and hides the
+    // entire remote-desktop flow, so we never spin it up there.
+    if (kIsDesktopPlatform) {
+      unawaited(RemoteAccessService.instance.prepare());
+    }
 
     setState(() {
       _info = info;
@@ -225,9 +369,20 @@ class _BootstrapState extends State<_Bootstrap> {
       _lan = lan;
       _resolving = false;
     });
+    // Session is live — begin tracking inactivity (mobile only).
+    _startIdleWatch();
   }
 
   void _onSetupReady(EmployeeChatInfo info) {
+    _wireRealtimeAndCalls(info);
+  }
+
+  /// Mobile QR-sync completed: the scanner already saved the server URL +
+  /// store name and ran chat.employeeStart against a fresh ApiClient based
+  /// on the scanned URL. Adopt that client and resume the normal flow.
+  void _onMobileSynced(ApiClient api, EmployeeChatInfo info) {
+    _api = api;
+    _chat = ChatService(api);
     _wireRealtimeAndCalls(info);
   }
 
@@ -235,6 +390,15 @@ class _BootstrapState extends State<_Bootstrap> {
   Widget build(BuildContext context) {
     // Not configured yet — first-launch screen.
     if (!widget.store.isConfigured) {
+      // Mobile onboards by scanning the desktop's sync QR (no manual entry).
+      // Desktop keeps typing the store name — it's the device that GENERATES
+      // the QR for phones to scan.
+      if (kIsMobilePlatform) {
+        return QrSyncScreen(
+          store: widget.store,
+          onSynced: _onMobileSynced,
+        );
+      }
       return StoreSetupScreen(
         chat: _chat,
         store: widget.store,
@@ -288,7 +452,7 @@ class _BootstrapState extends State<_Bootstrap> {
     // moves forward.
     if (widget.store.hasPendingTicket) {
       return EmployeeChatScreen(
-        api: widget.api,
+        api: _api,
         chat: _chat,
         realtime: _realtime!,
         calls: _calls!,
@@ -303,7 +467,7 @@ class _BootstrapState extends State<_Bootstrap> {
           Navigator.of(ctx).pushReplacement(
             MaterialPageRoute(
               builder: (_) => AiChatScreen(
-                api: widget.api,
+                api: _api,
                 chat: _chat,
                 realtime: _realtime!,
                 calls: _calls!,
@@ -322,7 +486,7 @@ class _BootstrapState extends State<_Bootstrap> {
     // (FAQ), and "Submit ticket" opens the TicketFormScreen → live chat
     // flow that HelpGuideScreen used to drive.
     return AiChatScreen(
-      api: widget.api,
+      api: _api,
       chat: _chat,
       realtime: _realtime!,
       calls: _calls!,

@@ -13,9 +13,11 @@ import '../services/lan_presence.dart';
 import '../services/session_store.dart';
 import '../services/ticket_service.dart';
 import '../services/tinker_chat_service.dart';
+import '../platform_info.dart';
 import '../theme.dart';
 import 'chat_screen.dart';
 import 'help_guide_screen.dart';
+import 'sync_mobile_screen.dart';
 import 'ticket_form_screen.dart';
 
 /// New landing screen for the employee app — AI-first POS support.
@@ -515,49 +517,117 @@ class _AiChatScreenState extends State<AiChatScreen> {
 
   Widget _buildHeader(BuildContext context) {
     final text = Theme.of(context).textTheme;
+    final titleBlock = Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'POS support',
+          style: text.titleLarge?.copyWith(
+            fontWeight: FontWeight.w700,
+            color: Brand.textPrimary,
+          ),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          'Chat with our AI assistant, anytime',
+          style: text.bodySmall?.copyWith(color: Brand.textMuted),
+        ),
+      ],
+    );
+
+    // One source of truth for the header actions; rendered as labelled
+    // buttons on wide screens and as an equal-width tile row on phones.
+    final actions = <_HeaderAction>[
+      _HeaderAction(
+        icon: Icons.menu_book_outlined,
+        label: 'Help articles',
+        shortLabel: 'Help',
+        onTap: _openHelpArticles,
+      ),
+      _HeaderAction(
+        icon: Icons.confirmation_number_outlined,
+        label: 'Track ticket',
+        shortLabel: 'Track',
+        onTap: _trackTicket,
+      ),
+      _HeaderAction(
+        icon: Icons.headset_mic_outlined,
+        label: 'Submit ticket',
+        shortLabel: 'Submit',
+        onTap: _submitTicket,
+      ),
+      // Desktop only — this is the device that generates the sync QR a
+      // phone scans to sign in. The mobile build never shows it.
+      if (kIsDesktopPlatform)
+        _HeaderAction(
+          icon: Icons.qr_code_2,
+          label: 'Sync mobile',
+          shortLabel: 'Sync',
+          onTap: _openSyncMobile,
+        ),
+    ];
+
+    List<Widget> spaced() {
+      final out = <Widget>[];
+      for (var i = 0; i < actions.length; i++) {
+        if (i > 0) out.add(const SizedBox(width: 10));
+        out.add(_HeaderButton(
+          icon: actions[i].icon,
+          label: actions[i].label,
+          onTap: actions[i].onTap,
+        ));
+      }
+      return out;
+    }
+
     return Container(
       padding: const EdgeInsets.fromLTRB(24, 14, 16, 14),
       color: Brand.canvas,
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          Expanded(
-            child: Column(
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          // On a phone the labelled buttons can't fit beside the title,
+          // and a horizontally scrolling strip hides whatever falls off
+          // the right edge. Instead show every action at once as an
+          // equal-width tile row — nothing to discover by scrolling.
+          if (constraints.maxWidth < 600) {
+            final tiles = <Widget>[];
+            for (var i = 0; i < actions.length; i++) {
+              if (i > 0) tiles.add(const SizedBox(width: 8));
+              tiles.add(Expanded(
+                child: _MobileActionTile(
+                  icon: actions[i].icon,
+                  label: actions[i].shortLabel,
+                  onTap: actions[i].onTap,
+                ),
+              ));
+            }
+            return Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  'POS support',
-                  style: text.titleLarge?.copyWith(
-                    fontWeight: FontWeight.w700,
-                    color: Brand.textPrimary,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  'Chat with our AI assistant, anytime',
-                  style: text.bodySmall?.copyWith(color: Brand.textMuted),
-                ),
+                titleBlock,
+                const SizedBox(height: 12),
+                Row(children: tiles),
               ],
-            ),
-          ),
-          _HeaderButton(
-            icon: Icons.menu_book_outlined,
-            label: 'Help articles',
-            onTap: _openHelpArticles,
-          ),
-          const SizedBox(width: 10),
-          _HeaderButton(
-            icon: Icons.confirmation_number_outlined,
-            label: 'Track ticket',
-            onTap: _trackTicket,
-          ),
-          const SizedBox(width: 10),
-          _HeaderButton(
-            icon: Icons.headset_mic_outlined,
-            label: 'Submit ticket',
-            onTap: _submitTicket,
-          ),
-        ],
+            );
+          }
+          // Desktop / wide: title expands, buttons sit on the right.
+          return Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Expanded(child: titleBlock),
+              ...spaced(),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  void _openSyncMobile() {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => SyncMobileScreen(api: widget.api, store: widget.store),
       ),
     );
   }
@@ -679,6 +749,70 @@ class _Msg {
   final bool showActions;
   final bool showSetApiKey;
   final int? logId;
+}
+
+class _HeaderAction {
+  const _HeaderAction({
+    required this.icon,
+    required this.label,
+    required this.shortLabel,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String label;
+  final String shortLabel;
+  final VoidCallback onTap;
+}
+
+/// Phone-width header action: icon stacked over a short label, sized by
+/// the parent Row so every action stays visible without scrolling.
+class _MobileActionTile extends StatelessWidget {
+  const _MobileActionTile({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Brand.canvas,
+      borderRadius: BorderRadius.circular(12),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 10),
+          decoration: BoxDecoration(
+            border: Border.all(color: Brand.stroke),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 20, color: Brand.signal),
+              const SizedBox(height: 4),
+              Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: Brand.textPrimary,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class _HeaderButton extends StatelessWidget {

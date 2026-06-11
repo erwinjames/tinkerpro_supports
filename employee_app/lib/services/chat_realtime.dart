@@ -167,6 +167,24 @@ class ChatRealtimeService {
     }
   }
 
+  /// Force a fresh socket. On mobile the OS can silently kill the WebSocket
+  /// while the app is backgrounded WITHOUT firing onDone, leaving us thinking
+  /// we're still connected. Call this when the app returns to the foreground
+  /// so live events (ticket accept/resolve, chat, call signals) resume
+  /// without the user having to restart the app. Cheap no-op if the existing
+  /// socket is actually still alive (we just reconnect + re-subscribe).
+  Future<void> kick({required int shadowUserId, required int conversationId}) async {
+    if (_disposed) return;
+    _wantConnected = true;
+    _reconnectAttempts = 0;
+    _pendingSubscribes
+      ..clear()
+      ..add('private-user-$shadowUserId')
+      ..add('private-conv-$conversationId');
+    await _closeSocket();
+    await _openSocket();
+  }
+
   /// Subscribe to an additional `private-conv-{id}` channel at runtime.
   /// Used by the "Add participant → switch primary conv" flow: B's app
   /// subscribes to A's conv before unsubscribing from B's old one.

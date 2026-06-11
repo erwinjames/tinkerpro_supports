@@ -247,12 +247,16 @@ class ChatService {
     required String callId,
     required String media,
     Map<String, dynamic>? payload,
+    int conversationId = 0,
   }) async {
     final res = await api.postChat('chat.signal', body: {
       'peer_id': peerId.toString(),
       'kind': kind,
       'call_id': callId,
       'media': media,
+      // Lets the server ring only the admin(s) who claimed this
+      // conversation's ticket instead of every participant.
+      'conversation_id': conversationId.toString(),
       'payload': payload == null ? '' : jsonEncode(payload),
     });
     return res['success'] == true;

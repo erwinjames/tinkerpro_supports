@@ -198,6 +198,9 @@ class CallService extends ChangeNotifier {
           callId: callId!,
           media: _mediaWire(),
           payload: sdpOffer,
+          // Server rings only the admin(s) who claimed this conversation's
+          // ticket; offers to non-claimers are dropped server-side.
+          conversationId: conversationId,
         ));
       }
       _ringTimeout = Timer(const Duration(seconds: 45), () {
