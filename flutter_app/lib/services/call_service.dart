@@ -7,6 +7,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import '../models/chat_models.dart';
 import 'chat_realtime.dart';
 import 'chat_service.dart';
+import 'incoming_call_service.dart';
 import 'ringtone_service.dart';
 
 /// Phase of a call. Maps 1:1 with the JS `call.state` machine on the web side.
@@ -286,12 +287,14 @@ class CallService extends ChangeNotifier {
           '${_localStream!.getVideoTracks().length} video');
       localRenderer.srcObject = _localStream;
     } catch (_) {
-      await chat.signal(
+      // Fire-and-forget the decline so a slow signal POST can't wedge us in
+      // the connecting state — _fail() tears the call down immediately.
+      unawaited(chat.signal(
         peerId: peerId!,
         kind: 'decline',
         callId: callId!,
         media: _mediaWire(),
-      );
+      ));
       _fail('Could not access ${media == CallMedia.video ? 'camera/mic' : 'microphone'}');
       return;
     }
@@ -425,15 +428,22 @@ class CallService extends ChangeNotifier {
   /// Callee declines. Notifies caller and cleans up local state.
   Future<void> decline() async {
     unawaited(RingtoneService.instance.stop());
-    if (peerId != null && callId != null) {
-      await chat.signal(
-        peerId: peerId!,
-        kind: 'decline',
-        callId: callId!,
-        media: _mediaWire(),
-      );
-    }
+    // Capture peer/call/media BEFORE cleanup wipes them, then tear down the
+    // UI first so the incoming screen dismisses instantly — don't gate the
+    // user's escape on a slow/failed `decline` POST (the caller will hit
+    // their own ring timeout if the signal never lands).
+    final pid = peerId;
+    final cid = callId;
+    final wireMedia = _mediaWire();
     _cleanup(silent: true);
+    if (pid != null && cid != null) {
+      unawaited(chat.signal(
+        peerId: pid,
+        kind: 'decline',
+        callId: cid,
+        media: wireMedia,
+      ));
+    }
   }
 
   // ── Inbound signaling (offer/answer/ICE/control) ────────────────────
@@ -686,6 +696,14 @@ class CallService extends ChangeNotifier {
   }
 
   void _cleanup({required bool silent}) {
+    // Dismiss any native incoming-call sheet (Android CallKit shown from the
+    // FCM background path). Without this, a caller hanging up before we
+    // answer leaves the heads-up incoming UI stuck on screen. Idempotent and
+    // a no-op for outgoing calls / platforms without CallKit.
+    final dismissCallId = callId;
+    if (dismissCallId != null && dismissCallId.isNotEmpty) {
+      unawaited(dismissIncomingCall(dismissCallId));
+    }
     unawaited(RingtoneService.instance.stop());
     _ringTimeout?.cancel();
     _ringTimeout = null;
@@ -721,8 +739,14 @@ class CallService extends ChangeNotifier {
     }
 
     _remoteStream = null;
-    localRenderer.srcObject = null;
-    remoteRenderer.srcObject = null;
+    // Only touch the renderers if they were actually initialized. Declining
+    // an incoming call tears down before accept() ever calls _ensureRenderers,
+    // and setting srcObject on an uninitialized renderer throws
+    // "Call initialize before setting the stream".
+    if (_renderersReady) {
+      localRenderer.srcObject = null;
+      remoteRenderer.srcObject = null;
+    }
 
     phase = CallPhase.ended;
     role = null;

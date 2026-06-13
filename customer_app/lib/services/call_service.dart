@@ -37,6 +37,7 @@ class CallService extends ChangeNotifier {
     required this.realtime,
     required this.chat,
     required this.shadowUserId,
+    this.conversationId = 0,
     List<Map<String, dynamic>>? iceServers,
   }) : _iceServers = iceServers ??
             const [
@@ -55,6 +56,13 @@ class CallService extends ChangeNotifier {
   /// `chat.signal` POSTs to via `as_portal=1`). Useful for skipping
   /// echoes of our own signals if the channel ever gets noisy.
   final int shadowUserId;
+
+  /// The support-group conversation this call belongs to. Sent with the
+  /// offer so the server rings only the admin(s) who claimed the ticket
+  /// (see ChatFacade::signal / claimingAgentIdsForConversation). 0 = unknown,
+  /// in which case every admin rings as before.
+  final int conversationId;
+
   final List<Map<String, dynamic>> _iceServers;
   StreamSubscription<CallSignal>? _signalSub;
 
@@ -188,6 +196,7 @@ class CallService extends ChangeNotifier {
           callId: callId!,
           media: _mediaWire(),
           payload: sdpOffer,
+          conversationId: conversationId,
         ));
       }
       _ringTimeout = Timer(const Duration(seconds: 45), () {
@@ -335,15 +344,21 @@ class CallService extends ChangeNotifier {
   /// Reject an incoming call.
   Future<void> decline() async {
     unawaited(RingtoneService.instance.stop());
-    if (peerId != null && callId != null) {
-      await chat.signal(
-        peerId: peerId!,
-        kind: 'decline',
-        callId: callId!,
-        media: _mediaWire(),
-      );
-    }
+    // Tear down the UI first so the incoming screen dismisses instantly;
+    // capture peer/call/media before cleanup wipes them and fire the
+    // decline best-effort (don't block dismissal on a slow signal POST).
+    final pid = peerId;
+    final cid = callId;
+    final wireMedia = _mediaWire();
     _cleanup(silent: true);
+    if (pid != null && cid != null) {
+      unawaited(chat.signal(
+        peerId: pid,
+        kind: 'decline',
+        callId: cid,
+        media: wireMedia,
+      ));
+    }
   }
 
   // ── Inbound signaling ─────────────────────────────────────────────────
@@ -634,8 +649,14 @@ class CallService extends ChangeNotifier {
     }
 
     _remoteStream = null;
-    localRenderer.srcObject = null;
-    remoteRenderer.srcObject = null;
+    // Only touch the renderers if they were initialized — declining an
+    // incoming call cleans up before _ensureRenderers ever ran, and setting
+    // srcObject on an uninitialized renderer throws "Call initialize before
+    // setting the stream".
+    if (_renderersReady) {
+      localRenderer.srcObject = null;
+      remoteRenderer.srcObject = null;
+    }
 
     phase = CallPhase.ended;
     role = null;

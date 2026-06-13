@@ -9,6 +9,7 @@ import '../api_client.dart';
 import '../push_service.dart';
 import '../services/chat_prefs.dart';
 import '../services/services.dart';
+import '../services/theme_prefs.dart';
 import '../theme.dart';
 import '../widgets/premium.dart';
 import 'auth_screens.dart';
@@ -20,6 +21,7 @@ class SettingsScreen extends StatefulWidget {
     required this.auth,
     this.push,
     this.chatPrefs,
+    this.themePrefs,
   });
   final ApiClient api;
   final AuthService auth;
@@ -33,12 +35,17 @@ class SettingsScreen extends StatefulWidget {
   /// the bubble toggle + theme picker.
   final ChatPrefs? chatPrefs;
 
+  /// Optional — required for the post-logout LoginScreen push since
+  /// the auth screens now thread the theme-mode prefs through.
+  final ThemePrefs? themePrefs;
+
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
   bool _loggingOut = false;
+  bool _changingServer = false;
 
   @override
   void initState() {
@@ -83,19 +90,50 @@ class _SettingsScreenState extends State<SettingsScreen> {
     } catch (_) {}
     if (!mounted) return;
     final cp = widget.chatPrefs;
+    final tp = widget.themePrefs;
     Navigator.of(context).pushAndRemoveUntil(
       MaterialPageRoute<void>(
-        builder: (_) => cp == null
-            // Defensive — older callsites that don't supply chatPrefs would
-            // crash here, but the LoginScreen now requires it. We never
-            // hit this branch in practice; the cast keeps the analyzer
-            // happy until the optionality can be removed.
-            ? throw StateError('SettingsScreen.logout requires chatPrefs')
+        builder: (_) => (cp == null || tp == null)
+            // Defensive — older callsites that don't supply both prefs
+            // bundles would crash here. LoginScreen now requires both;
+            // surface a clear error so the call-site gets fixed instead
+            // of silently dropping the theme/chat state.
+            ? throw StateError(
+                'SettingsScreen.logout requires chatPrefs + themePrefs')
             : LoginScreen(
                 api: widget.api,
                 auth: widget.auth,
                 chatPrefs: cp,
+                themePrefs: tp,
               ),
+      ),
+      (_) => false,
+    );
+  }
+
+  /// Forget the saved server and return to the server-config screen so the
+  /// user can point the app at a different backend (e.g. switch off a stale
+  /// ngrok/dev URL onto the live server). A session cookie never crosses
+  /// servers, so we sign out first, then clear the base URL.
+  Future<void> _changeServer() async {
+    final cp = widget.chatPrefs;
+    final tp = widget.themePrefs;
+    if (cp == null || tp == null) return;
+    setState(() => _changingServer = true);
+    try {
+      await widget.push?.releaseCurrentDevice();
+      await widget.auth.logout();
+    } catch (_) {}
+    await widget.api.clearBaseUrl();
+    if (!mounted) return;
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute<void>(
+        builder: (_) => ServerConfigScreen(
+          api: widget.api,
+          auth: widget.auth,
+          chatPrefs: cp,
+          themePrefs: tp,
+        ),
       ),
       (_) => false,
     );
@@ -134,6 +172,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
           StationDataRow(
               label: 'SESSION',
               value: widget.api.hasSession ? 'ACTIVE' : 'NOT SIGNED IN'),
+          const SizedBox(height: 20),
+          SignalButton(
+            label: _changingServer ? 'Switching…' : 'Change server',
+            busy: _changingServer,
+            icon: Icons.dns_outlined,
+            onPressed: _changeServer,
+          ),
           if (cp != null) ...[
             const SizedBox(height: 40),
             Text('CHAT', style: Theme.of(context).textTheme.labelMedium),

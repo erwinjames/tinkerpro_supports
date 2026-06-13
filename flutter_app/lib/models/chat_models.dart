@@ -205,6 +205,124 @@ class Attachment {
 
 enum MessageStatus { sending, sent, failed }
 
+// ─────────────────────────────────────────────── tickets in chat ──────────
+// Mirrors the web chat (chat.php): system messages announce a ticket's
+// lifecycle, and staff can Accept (claim) / Resolve them inline. We detect
+// the ticket from the message body using the same emoji + "#<number>"
+// conventions the server writes, then fetch live status via getTicketsByIds.
+
+enum TicketKind { submitted, accepted, resolved }
+
+/// A ticket reference detected inside a chat message body. [id] is the public
+/// ticket number the server embeds (e.g. "Ticket #456789").
+class TicketRef {
+  const TicketRef(this.kind, this.id);
+  final TicketKind kind;
+  final int id;
+}
+
+// Same patterns as chat.php (TICKET_RE_SUBMITTED / _ACCEPTED / _RESOLVED).
+final RegExp _ticketReSubmitted =
+    RegExp(r'🎫\s*Ticket\s*#(\d+)\s+submitted', caseSensitive: false, unicode: true);
+final RegExp _ticketReResolved =
+    RegExp(r'✅[^\n]*ticket\s*#(\d+)', caseSensitive: false, unicode: true);
+final RegExp _ticketReAccepted =
+    RegExp(r'👋[^\n]*ticket\s*#(\d+)', caseSensitive: false, unicode: true);
+
+/// Detect a ticket reference in a message body, or null if none. Resolution
+/// order matches the web client: submitted → resolved → accepted.
+TicketRef? detectTicketRef(String? body) {
+  if (body == null || body.isEmpty) return null;
+  var m = _ticketReSubmitted.firstMatch(body);
+  if (m != null) return TicketRef(TicketKind.submitted, int.parse(m.group(1)!));
+  m = _ticketReResolved.firstMatch(body);
+  if (m != null) return TicketRef(TicketKind.resolved, int.parse(m.group(1)!));
+  m = _ticketReAccepted.firstMatch(body);
+  if (m != null) return TicketRef(TicketKind.accepted, int.parse(m.group(1)!));
+  return null;
+}
+
+/// Live status for a ticket, from `getTicketsByIds`. Keyed in the caller by
+/// the same public ticket number [detectTicketRef] returns.
+class TicketStatusInfo {
+  const TicketStatusInfo({
+    required this.status,
+    this.assignedAgentId,
+    this.agentName,
+    this.conversationId,
+  });
+
+  final String status; // new | in_progress | assigned | resolved | closed
+  final int? assignedAgentId;
+  final String? agentName;
+  final int? conversationId;
+
+  bool get isNew => status == 'new';
+  bool get isInProgress => status == 'in_progress' || status == 'assigned';
+  bool get isResolved => status == 'resolved';
+  bool get isClosed => status == 'closed';
+
+  factory TicketStatusInfo.fromJson(Map<String, dynamic> j) => TicketStatusInfo(
+        status: (j['status'] ?? 'new').toString(),
+        assignedAgentId:
+            j['assigned_agent_id'] == null ? null : _asInt(j['assigned_agent_id']),
+        agentName: (j['agent_name'] == null || j['agent_name'].toString().isEmpty)
+            ? null
+            : j['agent_name'].toString(),
+        conversationId:
+            j['conversation_id'] == null ? null : _asInt(j['conversation_id']),
+      );
+}
+
+/// Full ticket row from `chat.getTicketDetail`, shown in the detail sheet.
+class TicketDetail {
+  const TicketDetail({
+    required this.id,
+    required this.ticketNumber,
+    required this.subject,
+    required this.description,
+    required this.status,
+    required this.priority,
+    this.customerName,
+    this.businessName,
+    this.agentName,
+    this.createdAt,
+  });
+
+  final int id;
+  final int? ticketNumber;
+  final String subject;
+  final String description;
+  final String status;
+  final String priority;
+  final String? customerName;
+  final String? businessName;
+  final String? agentName;
+  final String? createdAt;
+
+  factory TicketDetail.fromJson(Map<String, dynamic> j) => TicketDetail(
+        id: _asInt(j['id']),
+        ticketNumber:
+            j['ticket_number'] == null ? null : _asInt(j['ticket_number']),
+        subject: (j['subject'] ?? '').toString(),
+        description: (j['description'] ?? '').toString(),
+        status: (j['status'] ?? 'new').toString(),
+        priority: (j['priority'] ?? 'medium').toString(),
+        customerName: (j['customer_name'] ?? '').toString().isEmpty
+            ? null
+            : j['customer_name'].toString(),
+        businessName: (j['business_name'] ?? '').toString().isEmpty
+            ? null
+            : j['business_name'].toString(),
+        agentName: (j['agent_name'] ?? '').toString().isEmpty
+            ? null
+            : j['agent_name'].toString(),
+        createdAt: (j['created_at'] ?? '').toString().isEmpty
+            ? null
+            : j['created_at'].toString(),
+      );
+}
+
 class MessagePage {
   MessagePage({required this.messages, required this.hasMore});
   final List<Message> messages;
@@ -375,6 +493,57 @@ class TypingEvent {
   final int conversationId;
   final int userId;
   final String username;
+}
+
+/// A message pinned to a conversation. Support agents pin messages so the
+/// next agent sees standing instructions at the top. Mirrors the server
+/// `chat.listPinned` / `chat.pinMessage` entry shape.
+class PinnedMessage {
+  PinnedMessage({
+    required this.conversationId,
+    required this.messageId,
+    required this.senderId,
+    required this.senderName,
+    required this.body,
+    required this.createdAt,
+    required this.pinnedBy,
+    required this.pinnedAt,
+  });
+
+  final int conversationId;
+  final int messageId;
+  final int senderId;
+  final String senderName;
+  final String body;
+  final String createdAt;
+  final int pinnedBy;
+  final String pinnedAt;
+
+  factory PinnedMessage.fromJson(Map<String, dynamic> j) => PinnedMessage(
+        conversationId: _asInt(j['conversation_id']),
+        messageId: _asInt(j['message_id']),
+        senderId: _asInt(j['sender_id']),
+        senderName: (j['sender_name'] ?? '').toString(),
+        body: (j['body'] ?? '').toString(),
+        createdAt: (j['created_at'] ?? '').toString(),
+        pinnedBy: _asInt(j['pinned_by']),
+        pinnedAt: (j['pinned_at'] ?? '').toString(),
+      );
+}
+
+/// Realtime pin/unpin delta forwarded from `message.pinned` /
+/// `message.unpinned`. [pinned] is the entry when a message was pinned, and
+/// null when it was unpinned.
+class PinUpdate {
+  PinUpdate({
+    required this.conversationId,
+    required this.messageId,
+    required this.pinned,
+  });
+  final int conversationId;
+  final int messageId;
+  final PinnedMessage? pinned;
+  bool get isPinned => pinned != null;
 }
 
 /// One frame of WebRTC signaling forwarded by the server. Wraps the raw

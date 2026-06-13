@@ -7,6 +7,7 @@ import 'api_client.dart';
 import 'push_service.dart';
 import 'services/chat_prefs.dart';
 import 'services/services.dart';
+import 'services/theme_prefs.dart';
 import 'theme.dart';
 import 'screens/auth_screens.dart';
 import 'screens/home_shell.dart';
@@ -30,7 +31,12 @@ Future<void> main() async {
   final api = await ApiClient.load();
   final prefs = await SharedPreferences.getInstance();
   final chatPrefs = ChatPrefs(prefs);
-  runApp(TinkerProApp(api: api, chatPrefs: chatPrefs));
+  final themePrefs = await ThemePrefs.load(prefs);
+  runApp(TinkerProApp(
+    api: api,
+    chatPrefs: chatPrefs,
+    themePrefs: themePrefs,
+  ));
 }
 
 class TinkerProApp extends StatelessWidget {
@@ -38,24 +44,35 @@ class TinkerProApp extends StatelessWidget {
     super.key,
     required this.api,
     required this.chatPrefs,
+    required this.themePrefs,
   });
   final ApiClient api;
   final ChatPrefs chatPrefs;
+  final ThemePrefs themePrefs;
 
   @override
   Widget build(BuildContext context) {
     final auth = AuthService(api);
     final push = PushService(api);
 
-    return MaterialApp(
-      title: 'TinkerPro Support',
-      debugShowCheckedModeBanner: false,
-      theme: buildTheme(),
-      home: _RootRouter(
-        api: api,
-        auth: auth,
-        push: push,
-        chatPrefs: chatPrefs,
+    // AnimatedBuilder listens to themePrefs (a ValueNotifier<ThemeMode>)
+    // and rebuilds MaterialApp when the user flips light/dark from the
+    // Menu tab — Material's themeMode then resolves to the right theme.
+    return AnimatedBuilder(
+      animation: themePrefs,
+      builder: (context, _) => MaterialApp(
+        title: 'TinkerPro Support',
+        debugShowCheckedModeBanner: false,
+        theme: lightTheme(),
+        darkTheme: darkTheme(),
+        themeMode: themePrefs.value,
+        home: _RootRouter(
+          api: api,
+          auth: auth,
+          push: push,
+          chatPrefs: chatPrefs,
+          themePrefs: themePrefs,
+        ),
       ),
     );
   }
@@ -71,17 +88,24 @@ class _RootRouter extends StatelessWidget {
     required this.auth,
     required this.push,
     required this.chatPrefs,
+    required this.themePrefs,
   });
 
   final ApiClient api;
   final AuthService auth;
   final PushService push;
   final ChatPrefs chatPrefs;
+  final ThemePrefs themePrefs;
 
   @override
   Widget build(BuildContext context) {
     if (!api.hasBaseUrl) {
-      return ServerConfigScreen(api: api, auth: auth, chatPrefs: chatPrefs);
+      return ServerConfigScreen(
+        api: api,
+        auth: auth,
+        chatPrefs: chatPrefs,
+        themePrefs: themePrefs,
+      );
     }
     if (api.hasSession) {
       return HomeShell(
@@ -93,8 +117,14 @@ class _RootRouter extends StatelessWidget {
         leads: LeadService(api),
         tickets: TicketService(api),
         chatPrefs: chatPrefs,
+        themePrefs: themePrefs,
       );
     }
-    return LoginScreen(api: api, auth: auth, chatPrefs: chatPrefs);
+    return LoginScreen(
+      api: api,
+      auth: auth,
+      chatPrefs: chatPrefs,
+      themePrefs: themePrefs,
+    );
   }
 }

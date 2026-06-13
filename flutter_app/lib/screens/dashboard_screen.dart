@@ -13,6 +13,7 @@ class DashboardScreen extends StatefulWidget {
     required this.dashboard,
     required this.notifications,
     required this.onNavigate,
+    required this.onOpenChat,
   });
 
   final DashboardService dashboard;
@@ -21,6 +22,10 @@ class DashboardScreen extends StatefulWidget {
   /// Callback for quick-action tiles that want to switch to a different
   /// bottom-nav tab (e.g. "view all tickets" jumps to tab 2).
   final ValueChanged<int> onNavigate;
+
+  /// Open the chat inbox. Chat is no longer a bottom-nav tab (its slot is
+  /// taken by Tasks), so it's pushed as its own screen — see HomeShell.
+  final VoidCallback onOpenChat;
 
   @override
   State<DashboardScreen> createState() => _DashboardScreenState();
@@ -210,11 +215,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   ),
                   const SizedBox(width: 12),
                   Expanded(
-                    // Tab index 2 is CHAT while the TICKET tab is parked. Restore
-                    // 'Open tickets' here once the ticket tab comes back.
+                    // Chat is parked off the bottom nav (Tasks took its slot),
+                    // so open the inbox as a pushed screen rather than a tab.
                     child: SignalButton(
                       label: 'Open chat',
-                      onPressed: () => widget.onNavigate(2),
+                      onPressed: widget.onOpenChat,
                     ),
                   ),
                 ],

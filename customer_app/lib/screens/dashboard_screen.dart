@@ -93,6 +93,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       realtime: _realtime,
       chat: _chat,
       shadowUserId: meId,
+      conversationId: info.conversationId,
     );
     _calls!.addListener(_onCallChange);
     // Ping on incoming chat messages even when the customer isn't on the

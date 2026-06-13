@@ -195,6 +195,47 @@ class ChatService {
     return null;
   }
 
+  /// Pinned messages for a conversation, newest pin first. Returns an empty
+  /// list on any failure.
+  Future<List<PinnedMessage>> listPinned(int conversationId) async {
+    try {
+      final res = await api.get(
+          'chat.listPinned', {'conversation_id': conversationId.toString()});
+      if (res['success'] == true && res['pinned'] is List) {
+        return [
+          for (final p in (res['pinned'] as List))
+            if (p is Map)
+              PinnedMessage.fromJson(Map<String, dynamic>.from(p)),
+        ];
+      }
+    } catch (_) {}
+    return const [];
+  }
+
+  /// Pin a message (staff-only server-side). Returns the created pin entry
+  /// on success, or null on failure.
+  Future<PinnedMessage?> pinMessage(int messageId) async {
+    try {
+      final res = await api
+          .post('chat.pinMessage', body: {'message_id': messageId.toString()});
+      if (res['success'] == true && res['pinned'] is Map) {
+        return PinnedMessage.fromJson(
+            Map<String, dynamic>.from(res['pinned'] as Map));
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  /// Unpin a message (staff-only server-side). Returns true on success.
+  Future<bool> unpinMessage(int messageId) async {
+    try {
+      final res = await api.post('chat.unpinMessage',
+          body: {'message_id': messageId.toString()});
+      return res['success'] == true;
+    } catch (_) {}
+    return false;
+  }
+
   /// URL for an attachment. Cookie-authed via [ApiClient.authHeaders] when
   /// passed to a network image / download client.
   String attachmentUrl(int attachmentId) {
@@ -471,6 +512,75 @@ class ChatService {
           }
         }
         return ConversationDetail(conversation: conv, participants: parts);
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  // ───────────────────────────────────────────────── tickets ──────────────
+  // These reuse the SAME backend actions the web chat uses (api.php). The
+  // server posts the 👋 / ✅ announcement bubble itself (via the chat
+  // pipeline + Soketi), so we only fire the action and refresh status.
+
+  /// Bulk status for the tickets referenced in a thread. Maps the public
+  /// ticket number → its live status. Empty on no ids / failure.
+  Future<Map<int, TicketStatusInfo>> ticketStatuses(List<int> ids) async {
+    if (ids.isEmpty) return const {};
+    try {
+      final res = await api.get('getTicketsByIds', {'ids': ids.join(',')});
+      final out = <int, TicketStatusInfo>{};
+      if (res['status'] == 'success' && res['tickets'] is Map) {
+        (res['tickets'] as Map).forEach((k, v) {
+          final id = int.tryParse(k.toString());
+          if (id != null && v is Map) {
+            out[id] =
+                TicketStatusInfo.fromJson(Map<String, dynamic>.from(v));
+          }
+        });
+      }
+      return out;
+    } catch (_) {
+      return const {};
+    }
+  }
+
+  /// Accept (claim) a ticket as [agentId]. Returns true on success. The
+  /// server moves it to in_progress and posts the 👋 announcement.
+  Future<bool> acceptTicket(int ticketId, int agentId) async {
+    try {
+      final res = await api.post('accept_ticket', body: {
+        'ticket_id': ticketId.toString(),
+        'agent_id': agentId.toString(),
+      });
+      return res['status'] == 'success';
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Mark a ticket resolved as [agentId]. Returns true on success. The
+  /// server moves it to resolved and posts the ✅ announcement.
+  Future<bool> resolveTicket(int ticketId, int agentId) async {
+    try {
+      final res = await api.post('markresolved', body: {
+        'ticketId': ticketId.toString(),
+        'agent_id': agentId.toString(),
+      });
+      return res['status'] == 'success';
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Full ticket row for the detail sheet, or null on failure.
+  Future<TicketDetail?> ticketDetail(int ticketId) async {
+    try {
+      final res = await api.get('chat.getTicketDetail', {
+        'id': ticketId.toString(),
+      });
+      if (res['success'] == true && res['ticket'] is Map) {
+        return TicketDetail.fromJson(
+            Map<String, dynamic>.from(res['ticket'] as Map));
       }
     } catch (_) {}
     return null;

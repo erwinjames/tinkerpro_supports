@@ -4,6 +4,7 @@ import '../api_client.dart';
 import '../push_service.dart';
 import '../services/chat_prefs.dart';
 import '../services/services.dart';
+import '../services/theme_prefs.dart';
 import '../theme.dart';
 import '../widgets/premium.dart';
 import 'home_shell.dart';
@@ -14,11 +15,13 @@ class ServerConfigScreen extends StatefulWidget {
     required this.api,
     required this.auth,
     required this.chatPrefs,
+    required this.themePrefs,
   });
 
   final ApiClient api;
   final AuthService auth;
   final ChatPrefs chatPrefs;
+  final ThemePrefs themePrefs;
 
   @override
   State<ServerConfigScreen> createState() => _ServerConfigScreenState();
@@ -57,6 +60,7 @@ class _ServerConfigScreenState extends State<ServerConfigScreen> {
             api: widget.api,
             auth: widget.auth,
             chatPrefs: widget.chatPrefs,
+            themePrefs: widget.themePrefs,
           ),
         ),
       );
@@ -115,6 +119,7 @@ class LoginScreen extends StatefulWidget {
     required this.api,
     required this.auth,
     required this.chatPrefs,
+    required this.themePrefs,
   });
 
   final ApiClient api;
@@ -123,6 +128,10 @@ class LoginScreen extends StatefulWidget {
   /// Forwarded to HomeShell after a successful login so chat-tab
   /// preferences (bubble toggle, theme) are available immediately.
   final ChatPrefs chatPrefs;
+
+  /// Forwarded to HomeShell + the Menu screen's appearance toggle so
+  /// the user's theme choice persists across auth boundaries.
+  final ThemePrefs themePrefs;
 
   @override
   State<LoginScreen> createState() => _LoginScreenState();
@@ -156,6 +165,7 @@ class _LoginScreenState extends State<LoginScreen> {
             leads: LeadService(widget.api),
             tickets: TicketService(widget.api),
             chatPrefs: widget.chatPrefs,
+            themePrefs: widget.themePrefs,
           ),
         ),
       );
@@ -184,6 +194,7 @@ class _LoginScreenState extends State<LoginScreen> {
                 api: widget.api,
                 auth: widget.auth,
                 chatPrefs: widget.chatPrefs,
+                themePrefs: widget.themePrefs,
               ),
             ),
           );

@@ -172,6 +172,9 @@ class ChatThread extends ChangeNotifier {
     _typingSub = _realtime.typingEvents
         .where((e) => e.conversationId == conversationId)
         .listen(_applyTyping);
+    _pinSub = _realtime.pinEvents
+        .where((e) => e.conversationId == conversationId)
+        .listen(_applyPin);
     _realtime.subscribeConversation(conversationId);
     _hydrateReadCursors();
     _startPolling();
@@ -211,6 +214,7 @@ class ChatThread extends ChangeNotifier {
   StreamSubscription<Message>? _messageSub;
   StreamSubscription<MessageRead>? _readSub;
   StreamSubscription<TypingEvent>? _typingSub;
+  StreamSubscription<PinUpdate>? _pinSub;
 
   /// Other participants currently typing, keyed by user id. Value is an
   /// (expiry timestamp, display name) pair — expired entries are swept
@@ -262,6 +266,14 @@ class ChatThread extends ChangeNotifier {
   bool get loading => _loading;
   bool get hasMore => _hasMore;
 
+  /// Pinned messages for this conversation, newest pin first. Hydrated by
+  /// [loadInitial] and kept live via `message.pinned` / `message.unpinned`.
+  List<PinnedMessage> _pinned = const [];
+  List<PinnedMessage> get pinned => _pinned;
+
+  bool isPinned(int? messageId) =>
+      messageId != null && _pinned.any((p) => p.messageId == messageId);
+
   Future<void> loadInitial() async {
     if (_loading) return;
     _loading = true;
@@ -270,6 +282,51 @@ class ChatThread extends ChangeNotifier {
     _messages = page.messages;
     _hasMore = page.hasMore;
     _loading = false;
+    notifyListeners();
+    unawaited(_loadPinned());
+  }
+
+  Future<void> _loadPinned() async {
+    final pins = await _service.listPinned(conversationId);
+    _pinned = pins;
+    notifyListeners();
+  }
+
+  /// Pin [messageId]. Updates locally on success; the realtime broadcast is
+  /// de-duped by [_applyPin] so a double-apply is harmless.
+  Future<bool> pin(int messageId) async {
+    final entry = await _service.pinMessage(messageId);
+    if (entry == null) return false;
+    _applyPin(PinUpdate(
+      conversationId: conversationId,
+      messageId: messageId,
+      pinned: entry,
+    ));
+    return true;
+  }
+
+  /// Unpin [messageId].
+  Future<bool> unpin(int messageId) async {
+    final ok = await _service.unpinMessage(messageId);
+    if (!ok) return false;
+    _applyPin(PinUpdate(
+      conversationId: conversationId,
+      messageId: messageId,
+      pinned: null,
+    ));
+    return true;
+  }
+
+  void _applyPin(PinUpdate e) {
+    if (e.isPinned) {
+      if (_pinned.any((p) => p.messageId == e.messageId)) return;
+      _pinned = [e.pinned!, ..._pinned];
+    } else {
+      final next =
+          _pinned.where((p) => p.messageId != e.messageId).toList();
+      if (next.length == _pinned.length) return;
+      _pinned = next;
+    }
     notifyListeners();
   }
 
@@ -468,6 +525,7 @@ class ChatThread extends ChangeNotifier {
     _messageSub?.cancel();
     _readSub?.cancel();
     _typingSub?.cancel();
+    _pinSub?.cancel();
     _typingSweep?.cancel();
     _markReadTimer?.cancel();
     _pollTimer?.cancel();

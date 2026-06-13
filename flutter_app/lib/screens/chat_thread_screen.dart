@@ -3,7 +3,8 @@ import 'dart:io';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart' show PlatformException;
+import 'package:flutter/services.dart'
+    show Clipboard, ClipboardData, PlatformException;
 import 'package:image_picker/image_picker.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:path_provider/path_provider.dart';
@@ -65,6 +66,13 @@ class _ChatThreadScreenState extends State<ChatThreadScreen> {
   /// when the user taps Send.
   final List<_PendingAttachment> _pending = [];
 
+  /// Live status for any ticket referenced in this thread, keyed by public
+  /// ticket number. Drives the inline Accept (claim) / Resolve footer that
+  /// mirrors the web chat. Empty for ordinary conversations.
+  final Map<int, TicketStatusInfo> _ticketStatuses = {};
+  final Set<int> _ticketBusy = {};
+  bool _ticketRefreshing = false;
+
   @override
   void initState() {
     super.initState();
@@ -75,7 +83,10 @@ class _ChatThreadScreenState extends State<ChatThreadScreen> {
       realtime: widget.realtime,
     );
     _thread.addListener(_onThreadChange);
-    _thread.loadInitial().then((_) => _markNewestRead());
+    _thread.loadInitial().then((_) {
+      _markNewestRead();
+      _refreshTicketStatuses();
+    });
     _scroll.addListener(_maybeLoadOlder);
     _composer.addListener(_onComposerChanged);
 
@@ -111,7 +122,96 @@ class _ChatThreadScreenState extends State<ChatThreadScreen> {
     if (mounted) {
       setState(() {});
       _markNewestRead();
+      // A new 👋/✅ ticket bubble may have arrived (or a new ticket was
+      // submitted) — re-pull live statuses so the footer stays accurate.
+      _refreshTicketStatuses();
     }
+  }
+
+  /// Scan the thread for ticket references and refresh their live status via
+  /// getTicketsByIds. No-op (and clears) when the thread has no tickets, so
+  /// ordinary DMs never hit the endpoint.
+  Future<void> _refreshTicketStatuses() async {
+    if (_ticketRefreshing) return;
+    final ids = <int>{};
+    for (final m in _thread.messages) {
+      final ref = detectTicketRef(m.body);
+      if (ref != null) ids.add(ref.id);
+    }
+    if (ids.isEmpty) {
+      if (_ticketStatuses.isNotEmpty && mounted) {
+        setState(() => _ticketStatuses.clear());
+      }
+      return;
+    }
+    _ticketRefreshing = true;
+    final map = await widget.service.ticketStatuses(ids.toList());
+    _ticketRefreshing = false;
+    if (!mounted || map.isEmpty) return;
+    setState(() {
+      _ticketStatuses
+        ..clear()
+        ..addAll(map);
+    });
+  }
+
+  Future<void> _acceptTicket(int ticketId) async {
+    if (_ticketBusy.contains(ticketId)) return;
+    setState(() => _ticketBusy.add(ticketId));
+    final ok = await widget.service.acceptTicket(ticketId, widget.myUserId);
+    if (!mounted) return;
+    setState(() => _ticketBusy.remove(ticketId));
+    _toast(ok ? 'Ticket #$ticketId accepted' : 'Could not accept ticket');
+    if (ok) await _refreshTicketStatuses();
+  }
+
+  Future<void> _resolveTicket(int ticketId) async {
+    if (_ticketBusy.contains(ticketId)) return;
+    setState(() => _ticketBusy.add(ticketId));
+    final ok = await widget.service.resolveTicket(ticketId, widget.myUserId);
+    if (!mounted) return;
+    setState(() => _ticketBusy.remove(ticketId));
+    _toast(ok ? 'Ticket #$ticketId resolved' : 'Could not resolve ticket');
+    if (ok) await _refreshTicketStatuses();
+  }
+
+  Future<void> _openTicketDetail(int ticketId) async {
+    final detail = await widget.service.ticketDetail(ticketId);
+    if (!mounted) return;
+    if (detail == null) {
+      _toast('Ticket details unavailable');
+      return;
+    }
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Brand.surface,
+      isScrollControlled: true,
+      builder: (_) => _TicketDetailSheet(detail: detail),
+    );
+  }
+
+  /// The ticket to surface in the header: the most recent non-closed ticket
+  /// referenced in this thread whose live status we know. Null when the
+  /// conversation has no actionable ticket. Mirrors the web's
+  /// activeHeaderTicket(), but also surfaces NEW tickets so they can be
+  /// claimed straight from the header.
+  ({int id, TicketStatusInfo status})? _activeTicket() {
+    for (final m in _thread.messages) {
+      // messages are newest-first, so the first hit is the latest ticket.
+      final ref = detectTicketRef(m.body);
+      if (ref == null) continue;
+      final st = _ticketStatuses[ref.id];
+      if (st == null || st.isClosed) continue;
+      return (id: ref.id, status: st);
+    }
+    return null;
+  }
+
+  String _ticketStatusLabel(TicketStatusInfo st) {
+    if (st.isNew) return 'NEW';
+    if (st.isInProgress) return 'IN PROGRESS';
+    if (st.isResolved) return 'RESOLVED';
+    return 'CLOSED';
   }
 
   /// Fire a debounced markRead for the newest known message id. Called
@@ -133,9 +233,42 @@ class _ChatThreadScreenState extends State<ChatThreadScreen> {
   }
 
   bool get _canSend {
+    if (_chatLocked) return false;
     if (_pending.any((p) => p.status == _UploadStatus.uploading)) return false;
     final hasReady = _pending.any((p) => p.status == _UploadStatus.ready);
     return _composer.text.trim().isNotEmpty || hasReady;
+  }
+
+  /// True when this is a customer/guest portal support thread that has no
+  /// filed ticket at all. Staff can't message the customer until a ticket
+  /// exists in the thread; once any ticket has been filed (whatever its
+  /// status — including resolved / closed) the composer stays open. Internal
+  /// staff DMs, ordinary staff groups, and channels are never locked.
+  bool get _chatLocked {
+    final conv = widget.conversation;
+    if (conv == null) return false;
+    if (!_isCustomerSupportThread(conv)) return false;
+    return !_hasFiledTicket();
+  }
+
+  /// Customer / guest portal support threads are server-created groups whose
+  /// `topic` is keyed `customer:<id>` or `guest:<id>` (see ChatFacade —
+  /// addCustomer / createGuestSupportConversation). Ordinary staff groups
+  /// have a null topic, DMs carry a peer instead, so the topic prefix is the
+  /// reliable signal that the other side is a portal customer.
+  bool _isCustomerSupportThread(Conversation conv) {
+    final topic = conv.topic?.trim().toLowerCase() ?? '';
+    return topic.startsWith('customer:') || topic.startsWith('guest:');
+  }
+
+  /// True when the thread contains at least one filed ticket, in any status.
+  /// Detected purely from the ticket system-messages already in the thread,
+  /// so it doesn't depend on live ticket-status loading.
+  bool _hasFiledTicket() {
+    for (final m in _thread.messages) {
+      if (detectTicketRef(m.body) != null) return true;
+    }
+    return false;
   }
 
   Future<void> _handleSend() async {
@@ -169,14 +302,31 @@ class _ChatThreadScreenState extends State<ChatThreadScreen> {
     }
   }
 
+  /// Roles allowed to place / receive voice & video calls. Customer (and any
+  /// other non-staff) DMs don't get call buttons — calling is a staff-to-staff
+  /// feature. Compared case-insensitively against the peer's `role`.
+  static const _callableRoles = {'admin', 'super_admin', 'user'};
+
+  /// True when the DM peer is a staff member eligible for calls. Drives both
+  /// the header buttons and the [_placeCall] guard so the two never disagree.
+  bool get _peerCallable {
+    final role = widget.conversation?.peer?.role.trim().toLowerCase();
+    return role != null && _callableRoles.contains(role);
+  }
+
   /// Group/channel calls require an SFU — for the MVP we only place
-  /// two-party DM calls. The button is hidden in non-DM threads.
+  /// two-party DM calls. The button is hidden in non-DM threads and in DMs
+  /// with a non-callable peer (see [_callableRoles]).
   Future<void> _placeCall(CallMedia media) async {
     final calls = widget.calls;
     final conv = widget.conversation;
     if (calls == null) return;
     if (conv == null || conv.type != 'dm' || conv.peer == null) {
       _toast('CALLS ARE DM-ONLY FOR NOW');
+      return;
+    }
+    if (!_peerCallable) {
+      _toast('CALLS AREN\'T AVAILABLE FOR THIS USER');
       return;
     }
 
@@ -208,10 +358,47 @@ class _ChatThreadScreenState extends State<ChatThreadScreen> {
   }
 
   Widget? _buildHeaderActions({required bool isDm, required bool peerOnline}) {
-    final canCall = widget.calls != null && isDm;
-    if (!canCall && isDm) return null;
+    final canCall = widget.calls != null && isDm && _peerCallable;
     final children = <Widget>[];
+
+    // Ticket controls live in the upper-right header so staff can see at a
+    // glance that the conversation has a ticket and Claim / Resolve it
+    // without scrolling. Shown only when there's an active, non-closed
+    // ticket. The orange button is the primary action; the ticket icon
+    // opens full details.
+    final ticket = _activeTicket();
+    if (ticket != null) {
+      final st = ticket.status;
+      final id = ticket.id;
+      if (_ticketBusy.contains(id)) {
+        children.add(const _HeaderTicketButton(
+          icon: Icons.hourglass_top,
+          tooltip: 'Working…',
+        ));
+      } else if (st.isNew) {
+        children.add(_HeaderTicketButton(
+          icon: Icons.check,
+          tooltip: 'Claim ticket #$id',
+          onTap: () => _acceptTicket(id),
+        ));
+      } else if (st.isInProgress && st.assignedAgentId == widget.myUserId) {
+        children.add(_HeaderTicketButton(
+          icon: Icons.flag_outlined,
+          tooltip: 'Resolve ticket #$id',
+          onTap: () => _resolveTicket(id),
+        ));
+      }
+      children
+        ..add(const SizedBox(width: 6))
+        ..add(StationAction(
+          icon: Icons.confirmation_number_outlined,
+          tooltip: 'Ticket #$id details',
+          onPressed: () => _openTicketDetail(id),
+        ));
+    }
+
     if (canCall) {
+      if (children.isNotEmpty) children.add(const SizedBox(width: 6));
       children
         ..add(StationAction(
           icon: Icons.call,
@@ -225,7 +412,9 @@ class _ChatThreadScreenState extends State<ChatThreadScreen> {
           onPressed: () => _placeCall(CallMedia.video),
         ));
     }
-    if (!isDm) {
+    // Members icon — hidden while a ticket is active so the ticket controls
+    // have room in the header (the ticket-details sheet lists participants).
+    if (!isDm && ticket == null) {
       if (children.isNotEmpty) children.add(const SizedBox(width: 6));
       children.add(StationAction(
         icon: Icons.group_outlined,
@@ -235,6 +424,49 @@ class _ChatThreadScreenState extends State<ChatThreadScreen> {
     }
     if (children.isEmpty) return null;
     return Row(mainAxisSize: MainAxisSize.min, children: children);
+  }
+
+  /// Long-press menu on a message: pin / unpin (staff action) + copy.
+  Future<void> _showMessageMenu(Message m) async {
+    final id = m.id;
+    if (id == null) return;
+    final isPinned = _thread.isPinned(id);
+    final choice = await showModalBottomSheet<_MsgAction>(
+      context: context,
+      backgroundColor: Brand.surface,
+      builder: (_) => _MessageActionSheet(
+        isPinned: isPinned,
+        hasBody: m.body.trim().isNotEmpty,
+      ),
+    );
+    if (!mounted || choice == null) return;
+    switch (choice) {
+      case _MsgAction.pin:
+        final ok = await _thread.pin(id);
+        if (mounted && !ok) _toast('COULD NOT PIN MESSAGE');
+        break;
+      case _MsgAction.unpin:
+        final ok = await _thread.unpin(id);
+        if (mounted && !ok) _toast('COULD NOT UNPIN MESSAGE');
+        break;
+      case _MsgAction.copy:
+        await Clipboard.setData(ClipboardData(text: m.body));
+        if (mounted) _toast('COPIED');
+        break;
+    }
+  }
+
+  /// Bottom sheet listing every pinned message, with an unpin action on each.
+  Future<void> _showPinnedSheet() async {
+    final toUnpin = await showModalBottomSheet<int>(
+      context: context,
+      backgroundColor: Brand.surface,
+      isScrollControlled: true,
+      builder: (_) => _PinnedListSheet(pinned: _thread.pinned),
+    );
+    if (!mounted || toUnpin == null) return;
+    final ok = await _thread.unpin(toUnpin);
+    if (mounted && !ok) _toast('COULD NOT UNPIN MESSAGE');
   }
 
   Future<void> _showAttachmentSheet() async {
@@ -366,13 +598,19 @@ class _ChatThreadScreenState extends State<ChatThreadScreen> {
     final peerLastSeen = peer == null
         ? null
         : formatLastSeen(online: peerOnline, lastSeenAt: peer.lastSeenAt);
-    final subLabel = conv == null
-        ? 'DIRECT MESSAGE'
-        : isDm
-            ? 'DM · ${peerLastSeen ?? (peerOnline ? 'ONLINE' : 'OFFLINE')}'
-            : isChannel
-                ? 'CHANNEL · ${conv.visibility.toUpperCase()}'
-                : 'GROUP · ${conv.participantCount} MEMBERS';
+    // When the conversation has an active ticket, the header reads as a
+    // ticket workspace (TICKET #id · STATUS) rather than "GROUP · N MEMBERS",
+    // so the ticket is obvious at a glance and the members chrome steps aside.
+    final headerTicket = _activeTicket();
+    final subLabel = headerTicket != null
+        ? 'TICKET #${headerTicket.id} · ${_ticketStatusLabel(headerTicket.status)}'
+        : conv == null
+            ? 'DIRECT MESSAGE'
+            : isDm
+                ? 'DM · ${peerLastSeen ?? (peerOnline ? 'ONLINE' : 'OFFLINE')}'
+                : isChannel
+                    ? 'CHANNEL · ${conv.visibility.toUpperCase()}'
+                    : 'GROUP · ${conv.participantCount} MEMBERS';
 
     return StationScaffold(
       stationNumber: '05',
@@ -383,6 +621,13 @@ class _ChatThreadScreenState extends State<ChatThreadScreen> {
       trailing: _buildHeaderActions(isDm: isDm, peerOnline: peerOnline),
       child: Column(
         children: [
+          if (_thread.pinned.isNotEmpty) ...[
+            _PinnedBanner(
+              pinned: _thread.pinned,
+              onTap: _showPinnedSheet,
+            ),
+            const Hairline(),
+          ],
           Expanded(
             child: _thread.messages.isEmpty && _thread.loading
                 ? const Center(
@@ -447,12 +692,13 @@ class _ChatThreadScreenState extends State<ChatThreadScreen> {
                           final isOldestOfDay = i == msgs.length - 1 ||
                               !_sameDay(m.createdAt, msgs[i + 1].createdAt);
 
-                          final bubble = _MessageBubble(
+                          Widget bubble = _MessageBubble(
                             message: m,
                             mine: mine,
                             isNewestMine: isNewestMine,
                             suppressMeta: groupedBelow && !isNewestMine,
                             grouped: groupedBelow,
+                            pinned: _thread.isPinned(m.id),
                             readCursors: _thread.readCursors,
                             otherParticipantCount:
                                 (_thread.totalParticipants - 1).clamp(0, 1000),
@@ -463,6 +709,16 @@ class _ChatThreadScreenState extends State<ChatThreadScreen> {
                                 ? () => _thread.retry(m)
                                 : null,
                           );
+
+                          // Long-press a persisted message to pin/unpin it.
+                          // Optimistic (id == null) messages can't be pinned.
+                          if (m.id != null) {
+                            bubble = GestureDetector(
+                              behavior: HitTestBehavior.opaque,
+                              onLongPress: () => _showMessageMenu(m),
+                              child: bubble,
+                            );
+                          }
 
                           if (!isOldestOfDay) return bubble;
                           return Column(
@@ -492,6 +748,7 @@ class _ChatThreadScreenState extends State<ChatThreadScreen> {
             controller: _composer,
             focusNode: _composerFocus,
             canSend: _canSend,
+            locked: _chatLocked,
             onSend: _handleSend,
             onAttach: _showAttachmentSheet,
           ),
@@ -658,6 +915,188 @@ class _PendingChip extends StatelessWidget {
 
 enum _PickerChoice { camera, gallery, file }
 
+enum _MsgAction { pin, unpin, copy }
+
+/// Compact banner pinned above the message list. Shows the most recent pin
+/// (single-line) plus a "+N more" hint; tapping opens the full list.
+class _PinnedBanner extends StatelessWidget {
+  const _PinnedBanner({required this.pinned, required this.onTap});
+
+  final List<PinnedMessage> pinned;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final text = Theme.of(context).textTheme;
+    final latest = pinned.first;
+    final extra = pinned.length - 1;
+    final preview = latest.body.trim().isEmpty
+        ? '[attachment]'
+        : latest.body.trim().replaceAll('\n', ' ');
+    return Material(
+      color: Brand.surface,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+          child: Row(
+            children: [
+              const Icon(Icons.push_pin, size: 16, color: Brand.signal),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      extra > 0
+                          ? 'PINNED · ${pinned.length}'
+                          : 'PINNED',
+                      style: text.labelSmall
+                          ?.copyWith(color: Brand.signal, letterSpacing: 0.5),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      preview,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: text.bodySmall,
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              const Icon(Icons.chevron_right,
+                  size: 18, color: Brand.paperDim),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Long-press action sheet for a single message.
+class _MessageActionSheet extends StatelessWidget {
+  const _MessageActionSheet({required this.isPinned, required this.hasBody});
+
+  final bool isPinned;
+  final bool hasBody;
+
+  @override
+  Widget build(BuildContext context) {
+    final text = Theme.of(context).textTheme;
+    return SafeArea(
+      child: Container(
+        decoration: const BoxDecoration(
+          color: Brand.surface,
+          border: Border(top: BorderSide(color: Brand.signal, width: 2)),
+        ),
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text('MESSAGE', style: text.labelLarge),
+            const SizedBox(height: 8),
+            const Hairline(),
+            if (isPinned)
+              ListTile(
+                leading: const Icon(Icons.push_pin_outlined,
+                    color: Brand.paper, size: 20),
+                title: const Text('Unpin message'),
+                onTap: () => Navigator.of(context).pop(_MsgAction.unpin),
+              )
+            else
+              ListTile(
+                leading:
+                    const Icon(Icons.push_pin, color: Brand.paper, size: 20),
+                title: const Text('Pin message'),
+                onTap: () => Navigator.of(context).pop(_MsgAction.pin),
+              ),
+            if (hasBody)
+              ListTile(
+                leading: const Icon(Icons.copy_outlined,
+                    color: Brand.paper, size: 20),
+                title: const Text('Copy text'),
+                onTap: () => Navigator.of(context).pop(_MsgAction.copy),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Full list of pinned messages. Returns the message id to unpin (or null).
+class _PinnedListSheet extends StatelessWidget {
+  const _PinnedListSheet({required this.pinned});
+
+  final List<PinnedMessage> pinned;
+
+  @override
+  Widget build(BuildContext context) {
+    final text = Theme.of(context).textTheme;
+    return SafeArea(
+      child: Container(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.of(context).size.height * 0.6,
+        ),
+        decoration: const BoxDecoration(
+          color: Brand.surface,
+          border: Border(top: BorderSide(color: Brand.signal, width: 2)),
+        ),
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Icon(Icons.push_pin, size: 14, color: Brand.signal),
+                const SizedBox(width: 6),
+                Text('PINNED MESSAGES', style: text.labelLarge),
+              ],
+            ),
+            const SizedBox(height: 8),
+            const Hairline(),
+            Flexible(
+              child: ListView.separated(
+                shrinkWrap: true,
+                padding: EdgeInsets.zero,
+                itemCount: pinned.length,
+                separatorBuilder: (_, __) => const Hairline(),
+                itemBuilder: (_, i) {
+                  final p = pinned[i];
+                  final body = p.body.trim().isEmpty
+                      ? '[attachment]'
+                      : p.body.trim();
+                  return ListTile(
+                    title: Text(
+                      body,
+                      maxLines: 3,
+                      overflow: TextOverflow.ellipsis,
+                      style: text.bodyMedium,
+                    ),
+                    subtitle: Text(
+                      p.senderName.isEmpty ? '—' : p.senderName,
+                      style: text.labelSmall?.copyWith(color: Brand.paperDim),
+                    ),
+                    trailing: IconButton(
+                      tooltip: 'Unpin',
+                      icon: const Icon(Icons.push_pin_outlined,
+                          color: Brand.signal, size: 20),
+                      onPressed: () => Navigator.of(context).pop(p.messageId),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _AttachmentPickerSheet extends StatelessWidget {
   const _AttachmentPickerSheet();
 
@@ -709,6 +1148,7 @@ class _Composer extends StatelessWidget {
     required this.controller,
     required this.focusNode,
     required this.canSend,
+    required this.locked,
     required this.onSend,
     required this.onAttach,
   });
@@ -716,6 +1156,10 @@ class _Composer extends StatelessWidget {
   final TextEditingController controller;
   final FocusNode focusNode;
   final bool canSend;
+
+  /// When true the customer hasn't filed (an open) ticket yet, so the whole
+  /// composer — input, attach, and send — is disabled and a hint is shown.
+  final bool locked;
   final VoidCallback onSend;
   final VoidCallback onAttach;
 
@@ -726,33 +1170,64 @@ class _Composer extends StatelessWidget {
         top: 8,
         bottom: MediaQuery.of(context).viewInsets.bottom > 0 ? 8 : 12,
       ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.end,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          IconButton(
-            tooltip: 'Attach',
-            onPressed: onAttach,
-            icon: const Icon(Icons.add, color: Brand.paper),
-          ),
-          Expanded(
-            child: TextField(
-              controller: controller,
-              focusNode: focusNode,
-              maxLines: 4,
-              minLines: 1,
-              textInputAction: TextInputAction.newline,
-              decoration: const InputDecoration(labelText: 'MESSAGE'),
-              style: Theme.of(context).textTheme.bodyMedium,
+          if (locked)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+              child: Row(
+                children: [
+                  const Icon(Icons.lock_outline,
+                      size: 14, color: Brand.paperDim),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      'WAITING FOR A TICKET — MESSAGING UNLOCKS ONCE THE '
+                      'CUSTOMER FILES ONE',
+                      style: Theme.of(context)
+                          .textTheme
+                          .labelSmall
+                          ?.copyWith(color: Brand.paperDim, letterSpacing: 0.5),
+                    ),
+                  ),
+                ],
+              ),
             ),
-          ),
-          const SizedBox(width: 12),
-          IconButton(
-            tooltip: 'Send',
-            onPressed: canSend ? onSend : null,
-            icon: Icon(
-              Icons.arrow_upward,
-              color: canSend ? Brand.signal : Brand.paperDim,
-            ),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              IconButton(
+                tooltip: 'Attach',
+                onPressed: locked ? null : onAttach,
+                icon: Icon(Icons.add,
+                    color: locked ? Brand.paperDim : Brand.paper),
+              ),
+              Expanded(
+                child: TextField(
+                  controller: controller,
+                  focusNode: focusNode,
+                  enabled: !locked,
+                  maxLines: 4,
+                  minLines: 1,
+                  textInputAction: TextInputAction.newline,
+                  decoration: InputDecoration(
+                    labelText: locked ? 'MESSAGING LOCKED' : 'MESSAGE',
+                  ),
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
+              ),
+              const SizedBox(width: 12),
+              IconButton(
+                tooltip: 'Send',
+                onPressed: canSend ? onSend : null,
+                icon: Icon(
+                  Icons.arrow_upward,
+                  color: canSend ? Brand.signal : Brand.paperDim,
+                ),
+              ),
+            ],
           ),
         ],
       ),
@@ -772,6 +1247,7 @@ class _MessageBubble extends StatelessWidget {
     this.isNewestMine = false,
     this.suppressMeta = false,
     this.grouped = false,
+    this.pinned = false,
     this.readCursors = const {},
     this.otherParticipantCount = 0,
     this.onRetry,
@@ -781,6 +1257,10 @@ class _MessageBubble extends StatelessWidget {
   final bool mine;
   final ChatTheme theme;
   final bool isNewestMine;
+
+  /// Whether this message is currently pinned in the conversation. Drives a
+  /// small pin marker in the meta line.
+  final bool pinned;
 
   /// Suppress the timestamp / seen-by line under this bubble. Used when
   /// the bubble below is from the same sender within 2 min — that newer
@@ -859,6 +1339,20 @@ class _MessageBubble extends StatelessWidget {
                 child: Text(message.body, style: text.bodyMedium),
               ),
             ),
+          if (pinned)
+            Padding(
+              padding: const EdgeInsets.only(top: 3),
+              child: Row(
+                mainAxisAlignment:
+                    mine ? MainAxisAlignment.end : MainAxisAlignment.start,
+                children: [
+                  Icon(Icons.push_pin, size: 11, color: theme.accent),
+                  const SizedBox(width: 3),
+                  Text('PINNED',
+                      style: text.labelSmall?.copyWith(color: theme.accent)),
+                ],
+              ),
+            ),
           if (!suppressMeta) ...[
             const SizedBox(height: 4),
             Row(
@@ -887,6 +1381,192 @@ class _MessageBubble extends StatelessWidget {
               ],
             ),
           ],
+        ],
+      ),
+    );
+  }
+}
+
+/// Prominent orange circular header button for the primary ticket action
+/// (Claim / Resolve). Sits in the chat header's trailing row beside the
+/// members icon so the ticket is impossible to miss. Footprint (32×32)
+/// matches [StationAction] so they line up. [onTap] null → disabled look.
+class _HeaderTicketButton extends StatelessWidget {
+  const _HeaderTicketButton({
+    required this.icon,
+    required this.tooltip,
+    this.onTap,
+  });
+
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: tooltip,
+      child: Material(
+        color: onTap == null ? Brand.surfaceHi : Brand.signal,
+        shape: const CircleBorder(),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: SizedBox(
+            width: 32,
+            height: 32,
+            child: Icon(
+              icon,
+              size: 18,
+              color: onTap == null ? Brand.paperDim : Brand.canvas,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Status pill: NEW · IN PROGRESS (· agent) · RESOLVED · CLOSED. Falls back
+/// to a neutral "Ticket #" chip while the live status is still loading.
+class _TicketPill extends StatelessWidget {
+  const _TicketPill({required this.status});
+  final TicketStatusInfo? status;
+
+  @override
+  Widget build(BuildContext context) {
+    final st = status;
+    late final String label;
+    late final Color bg;
+    late final Color fg;
+    Color? border;
+
+    if (st == null) {
+      label = 'TICKET';
+      bg = Brand.surfaceHi;
+      fg = Brand.paperDim;
+    } else if (st.isNew) {
+      label = 'NEW';
+      bg = Brand.signal;
+      fg = Brand.canvas;
+    } else if (st.isInProgress) {
+      label = st.agentName != null && st.agentName!.isNotEmpty
+          ? 'IN PROGRESS · ${st.agentName!.toUpperCase()}'
+          : 'IN PROGRESS';
+      bg = Colors.transparent;
+      fg = Brand.signal;
+      border = Brand.signal;
+    } else if (st.isResolved) {
+      label = 'RESOLVED';
+      bg = Brand.surfaceHi;
+      fg = Brand.paperDim;
+    } else {
+      label = 'CLOSED';
+      bg = Brand.surfaceHi;
+      fg = Brand.paperDim;
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(999),
+        border: border == null ? null : Border.all(color: border, width: 1),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          color: fg,
+          fontSize: 9,
+          fontWeight: FontWeight.w700,
+          letterSpacing: 1.2,
+        ),
+      ),
+    );
+  }
+}
+
+/// Bottom sheet showing the full ticket row (chat.getTicketDetail).
+class _TicketDetailSheet extends StatelessWidget {
+  const _TicketDetailSheet({required this.detail});
+  final TicketDetail detail;
+
+  String _fmtNo() {
+    final n = detail.ticketNumber ?? detail.id;
+    return '#$n';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final text = Theme.of(context).textTheme;
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.confirmation_number_outlined,
+                    size: 18, color: Brand.signal),
+                const SizedBox(width: 8),
+                Text('TICKET ${_fmtNo()}', style: text.labelLarge),
+                const Spacer(),
+                _TicketPill(
+                  status: TicketStatusInfo(
+                    status: detail.status,
+                    agentName: detail.agentName,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            const Hairline(),
+            const SizedBox(height: 16),
+            if (detail.subject.isNotEmpty) ...[
+              Text(detail.subject,
+                  style: text.titleMedium ?? text.bodyLarge),
+              const SizedBox(height: 8),
+            ],
+            if (detail.description.isNotEmpty)
+              Text(detail.description, style: text.bodyMedium),
+            const SizedBox(height: 16),
+            _DetailRow(label: 'PRIORITY', value: detail.priority.toUpperCase()),
+            if (detail.businessName != null)
+              _DetailRow(label: 'BUSINESS', value: detail.businessName!),
+            if (detail.customerName != null)
+              _DetailRow(label: 'CUSTOMER', value: detail.customerName!),
+            if (detail.agentName != null)
+              _DetailRow(label: 'AGENT', value: detail.agentName!),
+            if (detail.createdAt != null)
+              _DetailRow(label: 'CREATED', value: detail.createdAt!),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _DetailRow extends StatelessWidget {
+  const _DetailRow({required this.label, required this.value});
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    final text = Theme.of(context).textTheme;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 90,
+            child: Text(label, style: text.labelMedium),
+          ),
+          const SizedBox(width: 12),
+          Expanded(child: Text(value, style: text.bodyMedium)),
         ],
       ),
     );

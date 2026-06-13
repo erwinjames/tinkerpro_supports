@@ -3,6 +3,15 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
+/// Default API base URL used on a fresh install (no server stored in prefs
+/// yet). Points at the live server; override at build time with
+///   flutter run --dart-define=TPS_BASE_URL=https://support.tinkerpro.io
+/// A value the user enters on the connect screen always takes precedence.
+const String _kDefaultBaseUrl = String.fromEnvironment(
+  'TPS_BASE_URL',
+  defaultValue: 'https://support.tinkerpro.io',
+);
+
 /// Thin wrapper around `api.php` on the TinkerPro Support backend.
 ///
 /// The backend identifies authenticated users via the PHP session cookie, so
@@ -32,7 +41,7 @@ class ApiClient {
     final prefs = await SharedPreferences.getInstance();
     return ApiClient._(
       prefs,
-      prefs.getString(_kBaseUrlKey) ?? '',
+      prefs.getString(_kBaseUrlKey) ?? _kDefaultBaseUrl,
       prefs.getString(_kCookieKey) ?? '',
       prefs.getInt(_kUserIdKey),
       prefs.getString(_kUsernameKey),
@@ -56,6 +65,15 @@ class ApiClient {
   Future<void> setBaseUrl(String value) async {
     _baseUrl = value.trim().replaceAll(RegExp(r'/+$'), '');
     await _prefs.setString(_kBaseUrlKey, _baseUrl);
+  }
+
+  /// Forget the configured server so the app returns to the server-config
+  /// screen and the live default applies on next entry. Device-scoped, so
+  /// deliberately kept out of [clearSession]. Pair with [clearSession] when
+  /// switching servers, since a session cookie never crosses servers.
+  Future<void> clearBaseUrl() async {
+    _baseUrl = '';
+    await _prefs.remove(_kBaseUrlKey);
   }
 
   /// Persist the authenticated user id. Called by AuthService.login after
@@ -178,6 +196,40 @@ class ApiClient {
       headers: _headers(),
       body: body,
     );
+    await _absorbCookie(response);
+    return _decode(response);
+  }
+
+  /// POST to a non-`api.php` script (e.g. `task.php`, `projects.php`). The
+  /// admin webapp exposes most of the task-feature endpoints as AJAX POSTs
+  /// against those files (not via the api.php action dispatcher), so this
+  /// is the entry point the Flutter TaskService uses for them. Same
+  /// cookie auth + JSON decode as `post()`.
+  Future<Map<String, dynamic>> postPath(
+    String path, {
+    Map<String, String>? body,
+  }) async {
+    final cleanPath = path.replaceAll(RegExp(r'^/+'), '');
+    final response = await http.post(
+      Uri.parse('$_baseUrl/$cleanPath'),
+      headers: _headers(),
+      body: body,
+    );
+    await _absorbCookie(response);
+    return _decode(response);
+  }
+
+  /// GET a non-`api.php` script. Some admin endpoints (e.g. `task-poll.php`)
+  /// live outside the action dispatcher; this is the GET counterpart to
+  /// [postPath]. Same cookie auth + JSON decode.
+  Future<Map<String, dynamic>> getPath(
+    String path, [
+    Map<String, String>? query,
+  ]) async {
+    final cleanPath = path.replaceAll(RegExp(r'^/+'), '');
+    final uri = Uri.parse('$_baseUrl/$cleanPath')
+        .replace(queryParameters: query);
+    final response = await http.get(uri, headers: _headers());
     await _absorbCookie(response);
     return _decode(response);
   }

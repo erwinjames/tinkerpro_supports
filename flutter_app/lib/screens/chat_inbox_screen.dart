@@ -24,6 +24,7 @@ class ChatInboxScreen extends StatefulWidget {
     required this.chatPrefs,
     required this.onSignOut,
     this.calls,
+    this.onBack,
   });
 
   final ChatService service;
@@ -41,6 +42,11 @@ class ChatInboxScreen extends StatefulWidget {
   /// HomeShell wires this to the full-logout path that wipes FCM,
   /// caches, and routes to the LoginScreen.
   final VoidCallback onSignOut;
+
+  /// Optional back affordance. Set when this screen is *pushed* (so the
+  /// header shows a back arrow); left null when it's a root bottom-nav tab,
+  /// where the nav bar itself is the way out.
+  final VoidCallback? onBack;
 
   @override
   State<ChatInboxScreen> createState() => _ChatInboxScreenState();
@@ -224,14 +230,16 @@ class _ChatInboxScreenState extends State<ChatInboxScreen> {
     final conversations = widget.inbox.conversations;
 
     final activeName = widget.api.username;
-    final you = activeName == null || activeName.isEmpty
-        ? 'YOU=ID ${widget.myUserId}'
-        : 'YOU=${activeName.toUpperCase()} (ID ${widget.myUserId})';
+    final displayName =
+        (activeName == null || activeName.isEmpty) ? null : activeName;
+    final you =
+        displayName == null ? 'YOU' : 'YOU=${displayName.toUpperCase()}';
     return StationScaffold(
       stationNumber: '05',
       stationLabel: 'CHAT · INBOX · $you',
       title: 'Direct messages.',
       showBottomBrand: false,
+      onBack: widget.onBack,
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -262,38 +270,30 @@ class _ChatInboxScreenState extends State<ChatInboxScreen> {
                 physics: const AlwaysScrollableScrollPhysics(),
                 children: [
                   const SizedBox(height: 48),
-                  widget.inbox.loading
-                      ? const Center(
-                          child: SizedBox(
-                            width: 20,
-                            height: 20,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: Brand.signal,
-                            ),
-                          ),
-                        )
-                      : Column(
-                          children: [
-                            const EmptyState(
-                              label: 'No conversations',
-                              hint:
-                                  'Start a direct message by tapping the pencil above.',
-                            ),
-                            const SizedBox(height: 28),
-                            Padding(
-                              padding:
-                                  const EdgeInsets.symmetric(horizontal: 32),
-                              child: Text(
-                                'Wrong account? You are signed in as user '
-                                'id ${widget.myUserId}. Tap the logout icon '
-                                'in the header (top right) to switch.',
-                                style: Theme.of(context).textTheme.bodySmall,
-                                textAlign: TextAlign.center,
-                              ),
-                            ),
-                          ],
+                  // No loading spinner here on purpose — the inbox is warmed
+                  // at app startup, so by the time this screen opens it's
+                  // already hydrated. Show the empty state directly; pull to
+                  // refresh shows the RefreshIndicator if the user wants it.
+                  Column(
+                    children: [
+                      const EmptyState(
+                        label: 'No conversations',
+                        hint:
+                            'Start a direct message by tapping the pencil above.',
+                      ),
+                      const SizedBox(height: 28),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 32),
+                        child: Text(
+                          'Wrong account? You are signed in as '
+                          '${displayName ?? 'this account'}. Tap the logout '
+                          'icon in the header (top right) to switch.',
+                          style: Theme.of(context).textTheme.bodySmall,
+                          textAlign: TextAlign.center,
                         ),
+                      ),
+                    ],
+                  ),
                 ],
               )
             : ListView.separated(

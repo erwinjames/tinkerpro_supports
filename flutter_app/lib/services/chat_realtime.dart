@@ -7,16 +7,24 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import '../api_client.dart';
 import '../models/chat_models.dart';
 
-/// Soketi connection config. Overrideable at build time via
-/// `--dart-define=CHAT_SOKETI_HOST=...`; the defaults target a local dev
-/// Soketi on `127.0.0.1:6001`. All build-env constants live here so the
-/// rest of the chat layer never touches `String.fromEnvironment`.
+/// Soketi connection config. By default the host is derived from the API
+/// base URL so a single `--dart-define=TPS_BASE_URL=https://support.tinkerpro.io`
+/// configures both HTTP and WebSocket. Override only the bits that genuinely
+/// differ from the API host:
+///
+///   --dart-define=CHAT_SOKETI_PORT=6001       # default 6001 (use 443 on live)
+///   --dart-define=CHAT_SOKETI_KEY=…           # default tinkerpro-chat-key
+///   --dart-define=CHAT_SOKETI_TLS=true        # default: matches API scheme
+///   --dart-define=CHAT_SOKETI_PATH=/soketi    # nginx proxy prefix on live
+///   --dart-define=CHAT_SOKETI_HOST=…          # only if Soketi runs on a
+///                                             # different host than the API
 class ChatRealtimeConfig {
   const ChatRealtimeConfig({
     required this.apiKey,
     required this.host,
     required this.port,
     required this.useTls,
+    this.path = '',
   });
 
   final String apiKey;
@@ -24,31 +32,59 @@ class ChatRealtimeConfig {
   final int port;
   final bool useTls;
 
-  factory ChatRealtimeConfig.fromEnv() {
+  /// Optional URL path prefix Soketi is proxied under (e.g. `/soketi` when
+  /// nginx fronts it on the main 443 vhost). Empty when Soketi is reached
+  /// at the host root (direct port, or a dedicated subdomain).
+  final String path;
+
+  /// Build a config given the API base URL the rest of the app already uses.
+  /// If [CHAT_SOKETI_HOST] is set, that wins — useful when Soketi runs on a
+  /// different host than PHP.
+  factory ChatRealtimeConfig.fromBaseUrl(String baseUrl) {
     const apiKey = String.fromEnvironment(
       'CHAT_SOKETI_KEY',
       defaultValue: 'tinkerpro-chat-key',
     );
-    const host = String.fromEnvironment(
-      'CHAT_SOKETI_HOST',
-      defaultValue: '127.0.0.1',
-    );
     const port = int.fromEnvironment('CHAT_SOKETI_PORT', defaultValue: 6001);
-    const useTls = bool.fromEnvironment('CHAT_SOKETI_TLS', defaultValue: false);
-    return const ChatRealtimeConfig(
+    const path = String.fromEnvironment('CHAT_SOKETI_PATH', defaultValue: '');
+    const hostOverride =
+        String.fromEnvironment('CHAT_SOKETI_HOST', defaultValue: '');
+    const tlsOverride =
+        String.fromEnvironment('CHAT_SOKETI_TLS', defaultValue: '');
+
+    String host = hostOverride;
+    bool useTls = false;
+    try {
+      final u = Uri.parse(baseUrl);
+      if (u.host.isNotEmpty) {
+        if (host.isEmpty) host = u.host;
+        useTls = u.scheme == 'https';
+      }
+    } catch (_) {}
+    if (host.isEmpty) host = '127.0.0.1';
+    if (tlsOverride.isNotEmpty) {
+      useTls = tlsOverride.toLowerCase() == 'true';
+    }
+
+    return ChatRealtimeConfig(
       apiKey: apiKey,
       host: host,
       port: port,
       useTls: useTls,
+      path: path,
     );
   }
 
   /// Wire URL per the Pusher protocol v7:
-  ///   ws://host:port/app/{key}?protocol=7&client=tinkerpro&version=1.0
+  ///   ws(s)://host:port[/prefix]/app/{key}?protocol=7&client=tinkerpro&version=1.0
   Uri wsUri() {
     final scheme = useTls ? 'wss' : 'ws';
+    // Normalise the optional proxy prefix: '' → none; 'soketi' or '/soketi/'
+    // → '/soketi'. The '/app/...' Pusher path is appended after it.
+    final prefix =
+        path.isEmpty ? '' : '/${path.replaceAll(RegExp(r'^/+|/+$'), '')}';
     return Uri.parse(
-      '$scheme://$host:$port/app/$apiKey?protocol=7&client=tinkerpro&version=1.0&flash=false',
+      '$scheme://$host:$port$prefix/app/$apiKey?protocol=7&client=tinkerpro&version=1.0&flash=false',
     );
   }
 }
@@ -67,7 +103,7 @@ class ChatRealtimeConfig {
 /// that runs on [resume] — see ChatInbox.reload and ChatThread.loadInitial.
 class ChatRealtimeService {
   ChatRealtimeService(this.api, {ChatRealtimeConfig? config})
-      : _config = config ?? ChatRealtimeConfig.fromEnv();
+      : _config = config ?? ChatRealtimeConfig.fromBaseUrl(api.baseUrl);
 
   final ApiClient api;
   final ChatRealtimeConfig _config;
@@ -91,6 +127,7 @@ class ChatRealtimeService {
   final _readEvents = StreamController<MessageRead>.broadcast();
   final _typingEvents = StreamController<TypingEvent>.broadcast();
   final _callSignalEvents = StreamController<CallSignal>.broadcast();
+  final _pinEvents = StreamController<PinUpdate>.broadcast();
 
   Stream<ConversationActivity> get inboxEvents => _inboxEvents.stream;
   Stream<Message> get messageEvents => _messageEvents.stream;
@@ -111,6 +148,11 @@ class ChatRealtimeService {
   /// Fires whenever a participant's read cursor advances. Drives the
   /// "Seen by N" UI re-render in open threads.
   Stream<MessageRead> get readEvents => _readEvents.stream;
+
+  /// Fires when a message is pinned (`pinned` non-null) or unpinned
+  /// (`pinned` null) in a subscribed conversation. The open thread filters
+  /// by conversation id.
+  Stream<PinUpdate> get pinEvents => _pinEvents.stream;
 
   /// Conversation id the user currently has on screen. PushService consults
   /// this to decide whether to suppress an FCM notification for a chat
@@ -185,6 +227,7 @@ class ChatRealtimeService {
     await _readEvents.close();
     await _typingEvents.close();
     await _callSignalEvents.close();
+    await _pinEvents.close();
     currentlyViewedConv.dispose();
   }
 
@@ -312,6 +355,12 @@ class ChatRealtimeService {
       case 'message.read':
         _forwardRead(data);
         break;
+      case 'message.pinned':
+        _forwardPin(data, pinned: true);
+        break;
+      case 'message.unpinned':
+        _forwardPin(data, pinned: false);
+        break;
       case 'typing':
         _forwardTyping(channel, data);
         break;
@@ -425,6 +474,19 @@ class ChatRealtimeService {
   void _forwardCallSignal(Map<String, dynamic>? data) {
     if (data == null || _callSignalEvents.isClosed) return;
     _callSignalEvents.add(CallSignal.fromJson(data));
+  }
+
+  void _forwardPin(Map<String, dynamic>? data, {required bool pinned}) {
+    if (data == null || _pinEvents.isClosed) return;
+    final convId =
+        int.tryParse((data['conversation_id'] ?? '').toString()) ?? 0;
+    final msgId = int.tryParse((data['message_id'] ?? '').toString()) ?? 0;
+    if (convId <= 0 || msgId <= 0) return;
+    _pinEvents.add(PinUpdate(
+      conversationId: convId,
+      messageId: msgId,
+      pinned: pinned ? PinnedMessage.fromJson(data) : null,
+    ));
   }
 
   void _forwardTyping(String channelName, Map<String, dynamic>? data) {

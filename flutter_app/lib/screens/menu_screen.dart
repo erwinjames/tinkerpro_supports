@@ -4,6 +4,7 @@ import '../api_client.dart';
 import '../push_service.dart';
 import '../services/chat_prefs.dart';
 import '../services/services.dart';
+import '../services/theme_prefs.dart';
 import '../theme.dart';
 import '../widgets/premium.dart';
 import 'coming_soon_screen.dart';
@@ -18,12 +19,14 @@ class MenuScreen extends StatelessWidget {
     required this.auth,
     required this.push,
     required this.chatPrefs,
+    required this.themePrefs,
   });
 
   final ApiClient api;
   final AuthService auth;
   final PushService push;
   final ChatPrefs chatPrefs;
+  final ThemePrefs themePrefs;
 
   @override
   Widget build(BuildContext context) {
@@ -43,6 +46,7 @@ class MenuScreen extends StatelessWidget {
                 auth: auth,
                 push: push,
                 chatPrefs: chatPrefs,
+                themePrefs: themePrefs,
               ),
             ),
           );
@@ -50,6 +54,8 @@ class MenuScreen extends StatelessWidget {
       ),
       child: ListView(
         children: [
+          _AppearanceSection(themePrefs: themePrefs),
+          const SizedBox(height: 32),
           _Group(
             label: 'Operations',
             // Chat lives in the bottom nav now; Task is disabled on the
@@ -148,6 +154,7 @@ class MenuScreen extends StatelessWidget {
                 auth: auth,
                 push: push,
                 chatPrefs: chatPrefs,
+                themePrefs: themePrefs,
               ),
                     ),
                   );
@@ -212,6 +219,7 @@ class _MenuTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final c = context.brand;
     final size = (MediaQuery.of(context).size.width - 24 * 2 - 12) / 2;
     return SizedBox(
       width: size,
@@ -220,13 +228,13 @@ class _MenuTile extends StatelessWidget {
         child: Container(
           padding: const EdgeInsets.fromLTRB(16, 18, 16, 16),
           decoration: BoxDecoration(
-            color: Brand.surface,
-            border: Border.all(color: Brand.rule, width: 1),
+            color: c.surface,
+            border: Border.all(color: c.rule, width: 1),
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Icon(icon, color: Brand.paper, size: 22),
+              Icon(icon, color: c.paper, size: 22),
               const SizedBox(height: 28),
               Text(label,
                   style: Theme.of(context).textTheme.titleSmall,
@@ -235,11 +243,122 @@ class _MenuTile extends StatelessWidget {
               const SizedBox(height: 2),
               Text('OPEN →',
                   style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                        color: Brand.signal,
+                        color: c.signal,
                         letterSpacing: 2.4,
                         fontSize: 9,
                       )),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Theme-mode chooser. Three segmented chips: System / Light / Dark.
+/// Listens to the [ThemePrefs] ValueNotifier so the active chip stays
+/// in sync if the mode is changed from somewhere else later (e.g. an
+/// OS-level setting via ThemeMode.system).
+class _AppearanceSection extends StatelessWidget {
+  const _AppearanceSection({required this.themePrefs});
+
+  final ThemePrefs themePrefs;
+
+  @override
+  Widget build(BuildContext context) {
+    final text = Theme.of(context).textTheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('APPEARANCE', style: text.labelLarge),
+        const SizedBox(height: 10),
+        const Hairline(),
+        const SizedBox(height: 12),
+        AnimatedBuilder(
+          animation: themePrefs,
+          builder: (context, _) {
+            return Row(
+              children: [
+                _ThemeChip(
+                  label: 'SYSTEM',
+                  icon: Icons.brightness_auto_outlined,
+                  active: themePrefs.value == ThemeMode.system,
+                  onTap: () => themePrefs.setMode(ThemeMode.system),
+                ),
+                const SizedBox(width: 8),
+                _ThemeChip(
+                  label: 'LIGHT',
+                  icon: Icons.light_mode_outlined,
+                  active: themePrefs.value == ThemeMode.light,
+                  onTap: () => themePrefs.setMode(ThemeMode.light),
+                ),
+                const SizedBox(width: 8),
+                _ThemeChip(
+                  label: 'DARK',
+                  icon: Icons.dark_mode_outlined,
+                  active: themePrefs.value == ThemeMode.dark,
+                  onTap: () => themePrefs.setMode(ThemeMode.dark),
+                ),
+              ],
+            );
+          },
+        ),
+      ],
+    );
+  }
+}
+
+class _ThemeChip extends StatelessWidget {
+  const _ThemeChip({
+    required this.label,
+    required this.icon,
+    required this.active,
+    required this.onTap,
+  });
+
+  final String label;
+  final IconData icon;
+  final bool active;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    // Pull live tokens from the active theme so this widget flips
+    // colors correctly when the user themselves toggles the mode.
+    final c = context.brand;
+    return Expanded(
+      child: Material(
+        color: Colors.transparent,
+        borderRadius: BorderRadius.circular(10),
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(10),
+          child: Container(
+            padding: const EdgeInsets.symmetric(vertical: 14),
+            decoration: BoxDecoration(
+              color: active ? c.signalGlow(0.12) : c.surface,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(
+                color: active ? c.signal : c.rule,
+                width: active ? 1.5 : 1,
+              ),
+            ),
+            child: Column(
+              children: [
+                Icon(icon,
+                    size: 18, color: active ? c.signal : c.paperDim),
+                const SizedBox(height: 6),
+                Text(
+                  label,
+                  style: TextStyle(
+                    color: active ? c.signal : c.paperDim,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 10,
+                    letterSpacing: 2.0,
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),
