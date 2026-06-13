@@ -6,6 +6,15 @@ employee_app/tinker-chat/
 employee_app/google-cloud-sdk/
 employee_app/google-cloud-cli-*.tar.gz
 
+# ── Windows build artifacts (CI output / locally-downloaded) ──
+# These are produced by the build-windows workflow (zip + Inno installer);
+# the .exe / .zip blow past GitHub's 100 MB file limit and must never be
+# committed. Keep them local-only.
+employee_app/TpSupport-Setup/
+employee_app/TpSupport-windows-x64/
+employee_app/TpSupport-windows-x64.zip
+employee_app/installer-out/
+
 # Stray secrets, just in case any .env lands in the tree
 **/.env
 **/.env.*
