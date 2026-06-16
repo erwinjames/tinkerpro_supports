@@ -773,29 +773,21 @@ class _DesktopSidebar extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             // ── Brand header ──────────────────────────────────────────
-            // The login logo (a navy+orange wordmark) sits on a white chip so
-            // its dark half stays visible on the deep-teal sidebar.
+            // Full-width white version of the login logo (navy half recolored
+            // to white so it reads on the deep-teal sidebar — no chip needed).
             Padding(
               padding: const EdgeInsets.fromLTRB(20, 22, 20, 18),
               child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 12, vertical: 9),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: 0.96),
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: Image.asset(
-                      'assets/brand/logo.png',
-                      height: 26,
-                      fit: BoxFit.contain,
-                      errorBuilder: (_, _, _) => const Icon(
-                          Icons.public, color: Brand.signal, size: 22),
-                    ),
+                  Image.asset(
+                    'assets/brand/logo_white.png',
+                    width: double.infinity,
+                    fit: BoxFit.contain,
+                    errorBuilder: (_, _, _) => const Icon(
+                        Icons.public, color: Brand.signal, size: 22),
                   ),
-                  const SizedBox(height: 10),
+                  const SizedBox(height: 12),
                   Text('CONTROL SUITE',
                       style: text.labelSmall?.copyWith(
                           color: Brand.paperDim, letterSpacing: 2.2)),
