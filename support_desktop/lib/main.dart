@@ -773,32 +773,32 @@ class _DesktopSidebar extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             // ── Brand header ──────────────────────────────────────────
+            // The login logo (a navy+orange wordmark) sits on a white chip so
+            // its dark half stays visible on the deep-teal sidebar.
             Padding(
               padding: const EdgeInsets.fromLTRB(20, 22, 20, 18),
-              child: Row(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Container(
-                    width: 36,
-                    height: 36,
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 9),
                     decoration: BoxDecoration(
-                      color: Brand.signalGlow(0.14),
-                      borderRadius: BorderRadius.circular(9),
+                      color: Colors.white.withValues(alpha: 0.96),
+                      borderRadius: BorderRadius.circular(10),
                     ),
-                    child: const Icon(Icons.public,
-                        color: Brand.signal, size: 20),
+                    child: Image.asset(
+                      'assets/brand/logo.png',
+                      height: 26,
+                      fit: BoxFit.contain,
+                      errorBuilder: (_, _, _) => const Icon(
+                          Icons.public, color: Brand.signal, size: 22),
+                    ),
                   ),
-                  const SizedBox(width: 11),
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text('TinkerPro',
-                          style: text.titleMedium
-                              ?.copyWith(height: 1.0, letterSpacing: 0.2)),
-                      Text('CONTROL SUITE',
-                          style: text.labelSmall?.copyWith(
-                              color: Brand.paperDim, letterSpacing: 2.2)),
-                    ],
-                  ),
+                  const SizedBox(height: 10),
+                  Text('CONTROL SUITE',
+                      style: text.labelSmall?.copyWith(
+                          color: Brand.paperDim, letterSpacing: 2.2)),
                 ],
               ),
             ),
