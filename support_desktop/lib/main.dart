@@ -773,34 +773,29 @@ class _DesktopSidebar extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             // ── Brand header ──────────────────────────────────────────
-            // Full-width white panel behind the original (navy+orange) logo so
-            // the navy bracket + wordmark are fully visible on the teal sidebar.
-            Padding(
-              padding: const EdgeInsets.fromLTRB(20, 22, 20, 18),
+            // The whole header section is a full-width white band so the
+            // original (navy+orange) logo and its eyebrow read clearly; the
+            // eyebrow is recolored dark since it now sits on white.
+            Container(
+              width: double.infinity,
+              color: Colors.white,
+              padding: const EdgeInsets.fromLTRB(20, 22, 20, 16),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Container(
+                  Image.asset(
+                    'assets/brand/logo.png',
                     width: double.infinity,
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 16, vertical: 12),
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Image.asset(
-                      'assets/brand/logo.png',
-                      width: double.infinity,
-                      fit: BoxFit.contain,
-                      errorBuilder: (_, _, _) => const Icon(
-                          Icons.public, color: Brand.signal, size: 22),
-                    ),
+                    fit: BoxFit.contain,
+                    errorBuilder: (_, _, _) => const Icon(
+                        Icons.public, color: Brand.signal, size: 22),
                   ),
                   const SizedBox(height: 12),
                   Text('CONTROL SUITE',
                       textAlign: TextAlign.center,
                       style: text.labelSmall?.copyWith(
-                          color: Brand.paperDim, letterSpacing: 2.2)),
+                          color: const Color(0xFF0C233E),
+                          letterSpacing: 2.2)),
                 ],
               ),
             ),
