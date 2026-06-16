@@ -1,0 +1,117 @@
+name: Build Windows .exe (support_desktop)
+
+# Triggers:
+#   - manual via the Actions tab ("Run workflow")
+#   - automatic on tags like sd-v1.2.3 (namespaced so it doesn't collide
+#     with employee_app's v* tag trigger)
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: 'TPS_BASE_URL (support backend)'
+        required: true
+        default: 'https://support.tinkerpro.io'
+      soketi_host:
+        description: 'CHAT_SOKETI_HOST (WebSocket host — usually the base_url host)'
+        required: true
+        default: 'support.tinkerpro.io'
+  push:
+    tags:
+      - 'sd-v*'
+
+jobs:
+  build:
+    # Pin to VS2022. windows-latest redirects to VS2026 (MSVC 14.51) which
+    # removed <experimental/coroutine> + /await that flutter_webrtc's Windows
+    # native code still needs — that breaks the build (STL1011 / C2338).
+    # windows-2022 ships VS2022 (MSVC 14.4x) which still supports it.
+    runs-on: windows-2022
+    defaults:
+      run:
+        working-directory: support_desktop
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Show toolchain versions (debug)
+        run: |
+          flutter --version
+          flutter doctor -v
+        shell: pwsh
+
+      - name: Enable Windows desktop
+        run: flutter config --enable-windows-desktop
+        shell: pwsh
+
+      - name: Resolve dependencies
+        run: flutter pub get
+        shell: pwsh
+
+      - name: Build Windows release
+        env:
+          BASE_URL:    ${{ github.event.inputs.base_url    || 'https://support.tinkerpro.io' }}
+          SOKETI_HOST: ${{ github.event.inputs.soketi_host || 'support.tinkerpro.io' }}
+        run: |
+          flutter build windows --release `
+            --dart-define="TPS_BASE_URL=$env:BASE_URL" `
+            --dart-define="CHAT_SOKETI_HOST=$env:SOKETI_HOST" `
+            --dart-define="CHAT_SOKETI_PORT=443" `
+            --dart-define="CHAT_SOKETI_TLS=true" `
+            --dart-define="CHAT_SOKETI_PATH=/soketi" `
+            --dart-define="CHAT_SOKETI_KEY=tinkerpro-chat-key"
+        shell: pwsh
+
+      - name: Zip the Release folder
+        # Ship the WHOLE folder — the .exe alone won't run without the DLLs
+        # and data\flutter_assets\ next to it.
+        run: |
+          Compress-Archive `
+            -Path build\windows\x64\runner\Release\* `
+            -DestinationPath support_desktop-windows-x64.zip
+        shell: pwsh
+
+      - name: Build installer with Inno Setup
+        # windows-2022 images ship Inno Setup 6 at the standard path. Version
+        # is parsed from pubspec.yaml and passed via /D AppVersion=...
+        run: |
+          $line = (Select-String -Path pubspec.yaml -Pattern '^version:' | Select-Object -First 1).Line
+          $appVer = ($line -replace 'version:\s*', '').Trim().Split('+')[0]
+          if ([string]::IsNullOrWhiteSpace($appVer)) { $appVer = '1.0.0' }
+          Write-Host "Installer version: $appVer"
+
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            Write-Host "ISCC not found at expected path; falling back to PATH"
+            $iscc = "iscc.exe"
+          }
+          & $iscc `
+            "/Qp" `
+            "/DAppVersion=$appVer" `
+            "/DSourceDir=..\build\windows\x64\runner\Release" `
+            "/DOutputDir=..\installer-out" `
+            installer\tinkerpro-support-desktop.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Host "Installer files produced:"
+          Get-ChildItem installer-out
+        shell: pwsh
+
+      - name: Upload zip artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: support_desktop-windows-x64
+          path: support_desktop/support_desktop-windows-x64.zip
+          retention-days: 14
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TinkerProSupport-Setup
+          path: support_desktop/installer-out/*.exe
+          retention-days: 14
