@@ -789,6 +789,7 @@ class _DesktopSidebar extends StatelessWidget {
                   ),
                   const SizedBox(height: 12),
                   Text('CONTROL SUITE',
+                      textAlign: TextAlign.center,
                       style: text.labelSmall?.copyWith(
                           color: Brand.paperDim, letterSpacing: 2.2)),
                 ],
