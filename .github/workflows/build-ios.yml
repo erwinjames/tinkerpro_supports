@@ -67,6 +67,14 @@ jobs:
           flutter doctor -v
           xcodebuild -version
 
+      # Force CocoaPods-based plugin integration. Recent Flutter enables Swift
+      # Package Manager, whose plugin-copy step fails on a clean CI checkout
+      # ("rsync ... build/ios/SourcePackages/... No such file or directory")
+      # because no iOS build has created build/ios yet. We use `pod install`
+      # below, so SPM isn't needed.
+      - name: Disable Swift Package Manager
+        run: flutter config --no-enable-swift-package-manager
+
       - name: Resolve Dart dependencies
         run: flutter pub get
 
