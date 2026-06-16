@@ -245,7 +245,7 @@ class _LoginScreenState extends State<LoginScreen> {
     return InputDecoration(
       labelText: label,
       filled: true,
-      fillColor: Colors.white.withValues(alpha: 0.7),
+      fillColor: Colors.white.withValues(alpha: 0.6),
       suffixIcon: suffix,
       labelStyle: const TextStyle(color: Color(0xCC1A1A1A)),
       floatingLabelStyle: const TextStyle(color: _orange),
@@ -280,18 +280,32 @@ class _LoginScreenState extends State<LoginScreen> {
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(24),
                   child: BackdropFilter(
-                    filter: ImageFilter.blur(sigmaX: 22, sigmaY: 22),
+                    // Strong blur is the frosted-glass signature: the
+                    // background shows through, softened.
+                    filter: ImageFilter.blur(sigmaX: 30, sigmaY: 30),
                     child: Container(
                       decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.82),
+                        // Translucent diagonal sheen instead of a flat fill —
+                        // brighter top-left, fading out, like real glass.
+                        gradient: LinearGradient(
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                          colors: [
+                            Colors.white.withValues(alpha: 0.50),
+                            Colors.white.withValues(alpha: 0.22),
+                          ],
+                        ),
                         borderRadius: BorderRadius.circular(24),
+                        // Bright edge highlight defines the pane against the
+                        // busy backdrop.
                         border: Border.all(
-                            color: Colors.white.withValues(alpha: 0.6)),
+                            color: Colors.white.withValues(alpha: 0.7),
+                            width: 1.5),
                         boxShadow: [
                           BoxShadow(
-                            color: Colors.black.withValues(alpha: 0.25),
-                            blurRadius: 45,
-                            offset: const Offset(0, 12),
+                            color: Colors.black.withValues(alpha: 0.28),
+                            blurRadius: 40,
+                            offset: const Offset(0, 14),
                           ),
                         ],
                       ),
@@ -328,7 +342,7 @@ class _LoginScreenState extends State<LoginScreen> {
                           Text(kLiveServerUrl,
                               textAlign: TextAlign.center,
                               style: text.bodySmall?.copyWith(
-                                  color: _navy.withValues(alpha: 0.55))),
+                                  color: _navy.withValues(alpha: 0.7))),
                           const SizedBox(height: 28),
                           TextField(
                             controller: _email,
