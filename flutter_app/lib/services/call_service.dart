@@ -347,10 +347,37 @@ class CallService extends ChangeNotifier {
     required String callerName,
     required String media,
   }) async {
-    if (this.callId == callId && isActive) {
-      debugPrint('[call] acceptIncomingFromPush — already handling $callId');
+    // Same call already negotiating or connected → a duplicate Accept (e.g.
+    // CallKit firing twice, or tapping both the in-app and notification
+    // accept) is a no-op.
+    if (this.callId == callId && isInLiveCall) {
+      debugPrint('[call] acceptIncomingFromPush — already live $callId');
       return;
     }
+
+    // Foreground path: the in-app Soketi `offer` already arrived and seeded
+    // the ringing state with the real SDP. The Accept tap on the CallKit
+    // notification lands here — answer the offer we already hold instead of
+    // bailing out (which left the call stuck "ringing" and never connected).
+    if (this.callId == callId &&
+        role == CallRole.callee &&
+        phase == CallPhase.ringing &&
+        _pendingOffer != null) {
+      debugPrint('[call] acceptIncomingFromPush — answering in-flight ringing $callId');
+      await accept();
+      return;
+    }
+
+    // A duplicate Accept while the cold-start path is still fetching the
+    // cached offer for this same call (already seeded ringing, no SDP yet)
+    // → no-op, don't re-seed or double-fetch.
+    if (this.callId == callId &&
+        role == CallRole.callee &&
+        phase == CallPhase.ringing) {
+      debugPrint('[call] acceptIncomingFromPush — seed already in progress $callId');
+      return;
+    }
+
     if (isActive) {
       // Some other call is in flight — politely busy out the new one.
       await chat.signal(
