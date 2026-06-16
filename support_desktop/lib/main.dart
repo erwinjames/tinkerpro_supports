@@ -106,7 +106,9 @@ class SupportDesktopApp extends StatelessWidget {
         debugShowCheckedModeBanner: false,
         theme: lightTheme(),
         darkTheme: darkTheme(),
-        themeMode: themePrefs.value,
+        // Web parity: the console is a light theme (navy sidebar + light
+        // content), so we pin to light rather than following the OS.
+        themeMode: ThemeMode.light,
         // App-wide keyboard shortcuts (Esc = back/close). See [GlobalShortcuts].
         builder: (context, child) => GlobalShortcuts(child: child ?? const SizedBox.shrink()),
         home: api.hasSession
@@ -787,7 +789,7 @@ class _DesktopSidebar extends StatelessWidget {
           child: Text(
             s.group.toUpperCase(),
             style: text.labelSmall?.copyWith(
-              color: Brand.paperDim,
+              color: Brand.navyMuted,
               letterSpacing: 1.6,
               fontWeight: FontWeight.w700,
             ),
@@ -804,7 +806,7 @@ class _DesktopSidebar extends StatelessWidget {
     return SizedBox(
       width: 256,
       child: Container(
-        color: Brand.canvas,
+        color: Brand.navy,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
@@ -835,7 +837,7 @@ class _DesktopSidebar extends StatelessWidget {
                 ],
               ),
             ),
-            const Divider(height: 1, thickness: 1, color: Brand.rule),
+            const Divider(height: 1, thickness: 1, color: Brand.navyRule),
             // ── Grouped navigation ────────────────────────────────────
             Expanded(
               child: ListView(
@@ -844,7 +846,7 @@ class _DesktopSidebar extends StatelessWidget {
               ),
             ),
             // ── User footer ───────────────────────────────────────────
-            const Divider(height: 1, thickness: 1, color: Brand.rule),
+            const Divider(height: 1, thickness: 1, color: Brand.navyRule),
             Padding(
               padding: const EdgeInsets.fromLTRB(14, 12, 10, 14),
               child: Row(
@@ -868,12 +870,13 @@ class _DesktopSidebar extends StatelessWidget {
                         Text(username,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: text.bodyMedium
-                                ?.copyWith(fontWeight: FontWeight.w600)),
+                            style: text.bodyMedium?.copyWith(
+                                fontWeight: FontWeight.w600,
+                                color: Brand.navyText)),
                         Text(role,
                             maxLines: 1,
                             style: text.labelSmall
-                                ?.copyWith(color: Brand.paperDim)),
+                                ?.copyWith(color: Brand.navyMuted)),
                       ],
                     ),
                   ),
@@ -882,7 +885,7 @@ class _DesktopSidebar extends StatelessWidget {
                     onPressed: onLogout,
                     splashRadius: 18,
                     icon: const Icon(Icons.logout,
-                        color: Brand.paperDim, size: 18),
+                        color: Brand.navyMuted, size: 18),
                   ),
                 ],
               ),
@@ -916,12 +919,14 @@ class _NavTileState extends State<_NavTile> {
   Widget build(BuildContext context) {
     final selected = widget.selected;
     final text = Theme.of(context).textTheme;
+    // Navy sidebar: active = solid orange fill + white text; hover = lighter
+    // navy; idle = muted blue-grey (like the web admin nav).
     final fg = selected
-        ? Brand.signal
-        : (_hover ? Brand.paper : Brand.paperDim);
+        ? Colors.white
+        : (_hover ? Brand.navyText : Brand.navyMuted);
     final bg = selected
-        ? Brand.signalGlow(0.12)
-        : (_hover ? Brand.surfaceHi : Colors.transparent);
+        ? Brand.signal
+        : (_hover ? Brand.navyHi : Colors.transparent);
 
     return MouseRegion(
       cursor: SystemMouseCursors.click,
@@ -941,17 +946,7 @@ class _NavTileState extends State<_NavTile> {
             ),
             child: Row(
               children: [
-                // Accent bar for the active item.
-                AnimatedContainer(
-                  duration: const Duration(milliseconds: 140),
-                  width: 3,
-                  height: selected ? 18 : 0,
-                  margin: const EdgeInsets.only(right: 9),
-                  decoration: BoxDecoration(
-                    color: Brand.signal,
-                    borderRadius: BorderRadius.circular(99),
-                  ),
-                ),
+                const SizedBox(width: 12),
                 Icon(selected ? widget.section.selectedIcon : widget.section.icon,
                     size: 19, color: fg),
                 const SizedBox(width: 12),

@@ -37,24 +37,31 @@ class Brand {
   static const Color _darkRule        = Color(0xFF2C6576);
   static const Color _signal          = Color(0xFFFF7D00);
 
-  // Light palette — warm paper edition. Canvas is a hair cream so it
-  // doesn't read as a clinical Material default; rules + paperDim are
-  // boosted toward slate so contrast on the bright canvas stays high.
-  static const Color _lightCanvas     = Color(0xFFFAF7F1);
+  // Light palette — matches the web admin (light content, navy text, orange).
+  // Content is a cool off-white; cards are pure white; text is brand navy.
+  static const Color _lightCanvas     = Color(0xFFF4F6F9);
   static const Color _lightSurface    = Color(0xFFFFFFFF);
-  static const Color _lightSurfaceHi  = Color(0xFFF3EFE7);
-  static const Color _lightPaper      = Color(0xFF1A1815);
-  static const Color _lightPaperDim   = Color(0xFF5F5C55);
-  static const Color _lightRule       = Color(0xFFE3DED4);
+  static const Color _lightSurfaceHi  = Color(0xFFF8FAFC);
+  static const Color _lightPaper      = Color(0xFF0C233E);
+  static const Color _lightPaperDim   = Color(0xFF5A6B7B);
+  static const Color _lightRule       = Color(0xFFE5E9F0);
 
-  // Legacy const accessors — point at the dark palette so existing
-  // code paths compile unchanged. Migrate to context.brand.* over time.
-  static const Color canvas      = _darkCanvas;
-  static const Color surface     = _darkSurface;
-  static const Color surfaceHi   = _darkSurfaceHi;
-  static const Color paper       = _darkPaper;
-  static const Color paperDim    = _darkPaperDim;
-  static const Color rule        = _darkRule;
+  // Brand navy — the sidebar surface (dark sidebar on light content, like
+  // the web). Sidebar widgets reference these directly.
+  static const Color navy        = Color(0xFF0C233E);
+  static const Color navyHi      = Color(0xFF14304A);
+  static const Color navyRule    = Color(0xFF1E3A56);
+  static const Color navyText    = Color(0xFFFFFFFF);
+  static const Color navyMuted   = Color(0xFF8DA0B5);
+
+  // Legacy const accessors — now point at the LIGHT palette so the app reads
+  // as the web's light theme (content area). The sidebar overrides to navy.
+  static const Color canvas      = _lightCanvas;
+  static const Color surface     = _lightSurface;
+  static const Color surfaceHi   = _lightSurfaceHi;
+  static const Color paper       = _lightPaper;
+  static const Color paperDim    = _lightPaperDim;
+  static const Color rule        = _lightRule;
   static const Color signal      = _signal;
 
   static Color signalGlow([double alpha = 0.12]) =>
