@@ -37,7 +37,8 @@ jobs:
           sudo apt-get install -y \
             clang cmake ninja-build pkg-config \
             libgtk-3-dev liblzma-dev libstdc++-12-dev \
-            libsecret-1-dev libfuse2
+            libsecret-1-dev libfuse2 \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
         shell: bash
 
       - name: Set up Flutter
