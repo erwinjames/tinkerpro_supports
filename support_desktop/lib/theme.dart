@@ -25,13 +25,16 @@ const String _kMonoFamily = 'JetBrainsMono';
 class Brand {
   Brand._();
 
-  // Dark palette (canonical / matches the original constants).
-  static const Color _darkCanvas      = Color(0xFF0A0908);
-  static const Color _darkSurface     = Color(0xFF141311);
-  static const Color _darkSurfaceHi   = Color(0xFF1C1B18);
-  static const Color _darkPaper       = Color(0xFFF5F2EB);
-  static const Color _darkPaperDim    = Color(0xFFA8A59D);
-  static const Color _darkRule        = Color(0xFF2A2824);
+  // Dark palette — teal edition (#2596BE base, per request). The base
+  // background is the brand teal; cards/surfaces are deeper teals so panels
+  // recede, with a lighter teal rule for dividers. Text stays near-white and
+  // the signal accent stays orange (a strong complement to teal).
+  static const Color _darkCanvas      = Color(0xFF2596BE);
+  static const Color _darkSurface     = Color(0xFF1C7C9E);
+  static const Color _darkSurfaceHi   = Color(0xFF2289AE);
+  static const Color _darkPaper       = Color(0xFFFFFFFF);
+  static const Color _darkPaperDim    = Color(0xFFCDE7F1);
+  static const Color _darkRule        = Color(0xFF4FA9CB);
   static const Color _signal          = Color(0xFFFF7D00);
 
   // Light palette — warm paper edition. Canvas is a hair cream so it
