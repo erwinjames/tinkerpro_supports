@@ -773,19 +773,28 @@ class _DesktopSidebar extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             // ── Brand header ──────────────────────────────────────────
-            // Full-width white version of the login logo (navy half recolored
-            // to white so it reads on the deep-teal sidebar — no chip needed).
+            // Full-width white panel behind the original (navy+orange) logo so
+            // the navy bracket + wordmark are fully visible on the teal sidebar.
             Padding(
               padding: const EdgeInsets.fromLTRB(20, 22, 20, 18),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Image.asset(
-                    'assets/brand/logo_white.png',
+                  Container(
                     width: double.infinity,
-                    fit: BoxFit.contain,
-                    errorBuilder: (_, _, _) => const Icon(
-                        Icons.public, color: Brand.signal, size: 22),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 16, vertical: 12),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Image.asset(
+                      'assets/brand/logo.png',
+                      width: double.infinity,
+                      fit: BoxFit.contain,
+                      errorBuilder: (_, _, _) => const Icon(
+                          Icons.public, color: Brand.signal, size: 22),
+                    ),
                   ),
                   const SizedBox(height: 12),
                   Text('CONTROL SUITE',
