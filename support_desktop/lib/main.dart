@@ -188,6 +188,7 @@ class _LoginScreenState extends State<LoginScreen> {
   final _password = TextEditingController();
   bool _busy = false;
   bool _obscure = true;
+  bool _remember = true;
   String? _error;
 
   @override
@@ -280,32 +281,20 @@ class _LoginScreenState extends State<LoginScreen> {
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(24),
                   child: BackdropFilter(
-                    // Strong blur is the frosted-glass signature: the
-                    // background shows through, softened.
-                    filter: ImageFilter.blur(sigmaX: 30, sigmaY: 30),
+                    // Frosted glass — same recipe as the web .glass-card
+                    // (blur 22 + ~75% white fill): clean and readable.
+                    filter: ImageFilter.blur(sigmaX: 22, sigmaY: 22),
                     child: Container(
                       decoration: BoxDecoration(
-                        // Translucent diagonal sheen instead of a flat fill —
-                        // brighter top-left, fading out, like real glass.
-                        gradient: LinearGradient(
-                          begin: Alignment.topLeft,
-                          end: Alignment.bottomRight,
-                          colors: [
-                            Colors.white.withValues(alpha: 0.50),
-                            Colors.white.withValues(alpha: 0.22),
-                          ],
-                        ),
+                        color: Colors.white.withValues(alpha: 0.78),
                         borderRadius: BorderRadius.circular(24),
-                        // Bright edge highlight defines the pane against the
-                        // busy backdrop.
                         border: Border.all(
-                            color: Colors.white.withValues(alpha: 0.7),
-                            width: 1.5),
+                            color: Colors.white.withValues(alpha: 0.6)),
                         boxShadow: [
                           BoxShadow(
-                            color: Colors.black.withValues(alpha: 0.28),
-                            blurRadius: 40,
-                            offset: const Offset(0, 14),
+                            color: Colors.black.withValues(alpha: 0.25),
+                            blurRadius: 45,
+                            offset: const Offset(0, 12),
                           ),
                         ],
                       ),
@@ -374,15 +363,47 @@ class _LoginScreenState extends State<LoginScreen> {
                             ),
                             onSubmitted: (_) => _submit(),
                           ),
+                          const SizedBox(height: 14),
+                          // "Keep me signed in" — mirrors the web remember-me.
+                          InkWell(
+                            onTap: () =>
+                                setState(() => _remember = !_remember),
+                            borderRadius: BorderRadius.circular(6),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(vertical: 4),
+                              child: Row(
+                                children: [
+                                  SizedBox(
+                                    width: 20,
+                                    height: 20,
+                                    child: Checkbox(
+                                      value: _remember,
+                                      onChanged: (v) => setState(
+                                          () => _remember = v ?? false),
+                                      activeColor: _orange,
+                                      visualDensity: VisualDensity.compact,
+                                      materialTapTargetSize:
+                                          MaterialTapTargetSize.shrinkWrap,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 10),
+                                  Text('Keep me signed in',
+                                      style: text.bodyMedium?.copyWith(
+                                          color:
+                                              _navy.withValues(alpha: 0.8))),
+                                ],
+                              ),
+                            ),
+                          ),
                           if (_error != null) ...[
-                            const SizedBox(height: 16),
+                            const SizedBox(height: 14),
                             Text(_error!,
                                 textAlign: TextAlign.center,
                                 style: text.bodySmall?.copyWith(
                                     color: const Color(0xFFDC2626),
                                     fontWeight: FontWeight.w500)),
                           ],
-                          const SizedBox(height: 26),
+                          const SizedBox(height: 22),
                           _GradientButton(
                             label:
                                 _busy ? 'UNLOCKING…' : 'UNLOCK DASHBOARD',
