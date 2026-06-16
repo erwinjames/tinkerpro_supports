@@ -273,13 +273,24 @@ class _LoginScreenState extends State<LoginScreen> {
             fit: BoxFit.cover,
             errorBuilder: (_, _, _) => const SizedBox.shrink(),
           ),
-          Center(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.all(32),
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 420),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(24),
+          LayoutBuilder(
+            builder: (context, c) {
+              // Match the web login: the form sits left-of-center so it clears
+              // the branding on the right of the artwork.
+              // (login.php → padding-left: clamp(160px, 27vw, 520px)).
+              final leftPad = (c.maxWidth * 0.27).clamp(160.0, 520.0);
+              return SingleChildScrollView(
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(minHeight: c.maxHeight),
+                  child: Padding(
+                    padding: EdgeInsets.only(
+                        left: leftPad, right: 24, top: 24, bottom: 24),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 420),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(24),
                   child: BackdropFilter(
                     // Frosted glass — same recipe as the web .glass-card
                     // (blur 22 + ~75% white fill): clean and readable.
@@ -414,9 +425,13 @@ class _LoginScreenState extends State<LoginScreen> {
                     ),
                   ),
                 ),
-              ),
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              },
             ),
-          ),
         ],
       ),
     );
