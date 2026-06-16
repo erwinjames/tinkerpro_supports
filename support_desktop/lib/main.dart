@@ -6,6 +6,8 @@
 // screens) but drops the mobile-only chat / call / push stack and the
 // Analyze, Pricing, and Offer pages.
 
+import 'dart:ui' show ImageFilter;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -228,72 +230,211 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
+  // Brand palette pulled from the web login (login.php) so the desktop
+  // sign-in matches it: navy artwork backdrop + frosted-white glass card +
+  // orange CTA — independent of the app's dark theme.
+  static const _navy = Color(0xFF0C233E);
+  static const _orange = Color(0xFFF5690B);
+  static const _orange2 = Color(0xFFFF8C3B);
+
+  InputDecoration _glassField(String label, {Widget? suffix}) {
+    OutlineInputBorder border(Color c, [double w = 1]) => OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide(color: c, width: w),
+        );
+    return InputDecoration(
+      labelText: label,
+      filled: true,
+      fillColor: Colors.white.withValues(alpha: 0.7),
+      suffixIcon: suffix,
+      labelStyle: const TextStyle(color: Color(0xCC1A1A1A)),
+      floatingLabelStyle: const TextStyle(color: _orange),
+      contentPadding:
+          const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+      enabledBorder: border(Colors.black.withValues(alpha: 0.12)),
+      border: border(Colors.black.withValues(alpha: 0.12)),
+      focusedBorder: border(_orange, 1.6),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
     return Scaffold(
-      backgroundColor: Brand.canvas,
-      body: Center(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(32),
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 420),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Text('TINKERPRO · CONTROL SUITE',
-                    style: text.labelMedium, textAlign: TextAlign.center),
-                const SizedBox(height: 10),
-                Text('Support Access',
-                    style: text.headlineSmall, textAlign: TextAlign.center),
-                const SizedBox(height: 6),
-                Text(kLiveServerUrl,
-                    style: text.bodySmall?.copyWith(color: Brand.paperDim),
-                    textAlign: TextAlign.center),
-                const SizedBox(height: 28),
-                const Hairline(),
-                const SizedBox(height: 24),
-                TextField(
-                  controller: _email,
-                  autofocus: true,
-                  keyboardType: TextInputType.emailAddress,
-                  decoration: const InputDecoration(
-                    labelText: 'Email address',
-                    prefixIcon: Icon(Icons.alternate_email, size: 18),
-                  ),
-                  onSubmitted: (_) => _submit(),
-                ),
-                const SizedBox(height: 16),
-                TextField(
-                  controller: _password,
-                  obscureText: _obscure,
-                  decoration: InputDecoration(
-                    labelText: 'Key password',
-                    prefixIcon: const Icon(Icons.lock_outline, size: 18),
-                    suffixIcon: IconButton(
-                      icon: Icon(
-                          _obscure ? Icons.visibility : Icons.visibility_off,
-                          size: 18),
-                      onPressed: () => setState(() => _obscure = !_obscure),
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          // Full-bleed background artwork (navy fallback if the asset or
+          // its manifest is momentarily unavailable).
+          const ColoredBox(color: _navy),
+          Image.asset(
+            'assets/brand/login_background.png',
+            fit: BoxFit.cover,
+            errorBuilder: (_, _, _) => const SizedBox.shrink(),
+          ),
+          Center(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(32),
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 420),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(24),
+                  child: BackdropFilter(
+                    filter: ImageFilter.blur(sigmaX: 22, sigmaY: 22),
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: Colors.white.withValues(alpha: 0.82),
+                        borderRadius: BorderRadius.circular(24),
+                        border: Border.all(
+                            color: Colors.white.withValues(alpha: 0.6)),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.25),
+                            blurRadius: 45,
+                            offset: const Offset(0, 12),
+                          ),
+                        ],
+                      ),
+                      padding: const EdgeInsets.all(40),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          // Logo — matches the web login wordmark, with the
+                          // same warm glow.
+                          Center(
+                            child: DecoratedBox(
+                              decoration: BoxDecoration(boxShadow: [
+                                BoxShadow(
+                                  color: _orange.withValues(alpha: 0.3),
+                                  blurRadius: 15,
+                                ),
+                              ]),
+                              child: Image.asset(
+                                'assets/brand/logo.png',
+                                height: 60,
+                                fit: BoxFit.contain,
+                                errorBuilder: (_, _, _) => const Icon(
+                                    Icons.public, color: _orange, size: 48),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 22),
+                          Text('Support Access',
+                              textAlign: TextAlign.center,
+                              style: text.headlineSmall?.copyWith(
+                                  color: _navy, fontWeight: FontWeight.w700)),
+                          const SizedBox(height: 6),
+                          Text(kLiveServerUrl,
+                              textAlign: TextAlign.center,
+                              style: text.bodySmall?.copyWith(
+                                  color: _navy.withValues(alpha: 0.55))),
+                          const SizedBox(height: 28),
+                          TextField(
+                            controller: _email,
+                            autofocus: true,
+                            style: const TextStyle(color: _navy),
+                            cursorColor: _orange,
+                            keyboardType: TextInputType.emailAddress,
+                            decoration: _glassField('Email address'),
+                            onSubmitted: (_) => _submit(),
+                          ),
+                          const SizedBox(height: 16),
+                          TextField(
+                            controller: _password,
+                            obscureText: _obscure,
+                            style: const TextStyle(color: _navy),
+                            cursorColor: _orange,
+                            decoration: _glassField(
+                              'Key password',
+                              suffix: IconButton(
+                                icon: Icon(
+                                    _obscure
+                                        ? Icons.visibility
+                                        : Icons.visibility_off,
+                                    size: 18,
+                                    color: _navy.withValues(alpha: 0.5)),
+                                onPressed: () =>
+                                    setState(() => _obscure = !_obscure),
+                              ),
+                            ),
+                            onSubmitted: (_) => _submit(),
+                          ),
+                          if (_error != null) ...[
+                            const SizedBox(height: 16),
+                            Text(_error!,
+                                textAlign: TextAlign.center,
+                                style: text.bodySmall?.copyWith(
+                                    color: const Color(0xFFDC2626),
+                                    fontWeight: FontWeight.w500)),
+                          ],
+                          const SizedBox(height: 26),
+                          _GradientButton(
+                            label:
+                                _busy ? 'UNLOCKING…' : 'UNLOCK DASHBOARD',
+                            onPressed: _busy ? null : _submit,
+                          ),
+                        ],
+                      ),
                     ),
                   ),
-                  onSubmitted: (_) => _submit(),
                 ),
-                if (_error != null) ...[
-                  const SizedBox(height: 16),
-                  Text(_error!,
-                      style: text.bodySmall?.copyWith(
-                          color: Theme.of(context).colorScheme.error),
-                      textAlign: TextAlign.center),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The orange gradient sign-in CTA, mirroring the web login button.
+class _GradientButton extends StatelessWidget {
+  const _GradientButton({required this.label, required this.onPressed});
+  final String label;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = onPressed != null;
+    return Opacity(
+      opacity: enabled ? 1 : 0.7,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          gradient: const LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [_LoginScreenState._orange, _LoginScreenState._orange2],
+          ),
+          borderRadius: BorderRadius.circular(12),
+          boxShadow: [
+            BoxShadow(
+              color: _LoginScreenState._orange.withValues(alpha: 0.35),
+              blurRadius: 18,
+              offset: const Offset(0, 6),
+            ),
+          ],
+        ),
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(12),
+            onTap: onPressed,
+            child: Container(
+              height: 52,
+              alignment: Alignment.center,
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text(label,
+                      style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 2)),
+                  const SizedBox(width: 10),
+                  const Icon(Icons.login, color: Colors.white, size: 18),
                 ],
-                const SizedBox(height: 24),
-                SignalButton(
-                  label: _busy ? 'Unlocking…' : 'Unlock dashboard',
-                  icon: Icons.login,
-                  onPressed: _busy ? null : _submit,
-                ),
-              ],
+              ),
             ),
           ),
         ),
