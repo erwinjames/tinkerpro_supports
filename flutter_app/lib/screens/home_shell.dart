@@ -21,6 +21,7 @@ import '../services/notification_center.dart';
 import '../services/services.dart';
 import '../services/task_service.dart';
 import '../services/theme_prefs.dart';
+import '../services/update_service.dart';
 import '../theme.dart';
 import '../widgets/premium.dart';
 import 'auth_screens.dart';
@@ -28,6 +29,7 @@ import 'call_screen.dart';
 import 'chat_inbox_screen.dart';
 import 'chat_thread_screen.dart';
 import 'dashboard_screen.dart';
+import 'update_dialog.dart';
 import 'customer_list_screen.dart';
 import 'file_list_screen.dart';
 import 'lead_list_screen.dart';
@@ -125,6 +127,16 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       _bootstrapChat();
     }
     _syncPermissions();
+    _checkForUpdate();
+  }
+
+  /// On launch, check the published manifest for a newer APK and prompt the
+  /// user with the changelog. Android-only + best-effort (silent on failure).
+  Future<void> _checkForUpdate() async {
+    final service = UpdateService(widget.api);
+    final update = await service.check();
+    if (!mounted || update == null) return;
+    await UpdateDialog.show(context, update, service);
   }
 
   /// Pull fresh feature permissions in the background so the Menu's

@@ -1,7 +1,7 @@
 name: tinkerpro_support_flutter
 description: "TinkerPro Support companion app"
 publish_to: 'none'
-version: 1.0.0+1
+version: 1.1.0+2
 
 environment:
   sdk: ^3.11.4
@@ -17,6 +17,10 @@ dependencies:
 
   # Persistent storage for server URL and session cookie.
   shared_preferences: ^2.3.2
+
+  # Reads the running app's version/build number to compare against the
+  # published manifest for the in-app "Update available" check (Android).
+  package_info_plus: ^8.0.0
 
   # Firebase Cloud Messaging.
   firebase_core: ^4.6.0
