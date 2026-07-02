@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../api_client.dart';
 import '../models/models.dart';
 import '../services/notification_center.dart';
 import '../services/services.dart';
@@ -10,21 +11,26 @@ import 'notification_panel.dart';
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({
     super.key,
+    required this.api,
     required this.dashboard,
     required this.notifications,
-    required this.onNavigate,
+    required this.onOpenLeads,
     required this.onOpenChat,
   });
 
+  /// Source of the signed-in user's feature permissions — drives which
+  /// metric tiles and quick actions are shown (mirrors the web sidebar).
+  final ApiClient api;
   final DashboardService dashboard;
   final NotificationCenter notifications;
 
-  /// Callback for quick-action tiles that want to switch to a different
-  /// bottom-nav tab (e.g. "view all tickets" jumps to tab 2).
-  final ValueChanged<int> onNavigate;
+  /// Jump to the Leads tab. The bottom nav is permission-driven and its tab
+  /// order is dynamic, so quick actions navigate by intent — HomeShell
+  /// resolves this to the Leads tab's current position (or no-ops if the
+  /// user can't reach it).
+  final VoidCallback onOpenLeads;
 
-  /// Open the chat inbox. Chat is no longer a bottom-nav tab (its slot is
-  /// taken by Tasks), so it's pushed as its own screen — see HomeShell.
+  /// Jump to the Chat tab (resolved the same way as [onOpenLeads]).
   final VoidCallback onOpenChat;
 
   @override
@@ -107,63 +113,42 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 ),
               ),
             if (s != null) ...[
-              Row(
-                children: [
-                  Expanded(
-                    child: MetricTile(
-                      label: 'CUSTOMERS',
-                      value:
-                          s.byLabel('Customers').toString().padLeft(2, '0'),
-                    ),
+              // Each tile is shown only when the user holds the matching
+              // permission (mirrors the web sidebar gates). The surviving
+              // tiles reflow into two-up rows so there are never gaps.
+              ..._metricRows([
+                if (widget.api.hasPermission('customer'))
+                  MetricTile(
+                    label: 'CUSTOMERS',
+                    value: s.byLabel('Customers').toString().padLeft(2, '0'),
                   ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: MetricTile(
-                      label: 'TICKETS',
-                      value: s.byLabel('Tickets').toString().padLeft(2, '0'),
-                    ),
+                if (widget.api.hasPermission('ticket'))
+                  MetricTile(
+                    label: 'TICKETS',
+                    value: s.byLabel('Tickets').toString().padLeft(2, '0'),
                   ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              Row(
-                children: [
-                  Expanded(
-                    child: MetricTile(
-                      label: 'LEADS',
-                      value: s.byLabel('Leads').toString().padLeft(2, '0'),
-                    ),
+                if (widget.api.hasPermission('clientOffer'))
+                  MetricTile(
+                    label: 'LEADS',
+                    value: s.byLabel('Leads').toString().padLeft(2, '0'),
                   ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: MetricTile(
-                      label: 'CLIENTS',
-                      value: s.byLabel('Clients').toString().padLeft(2, '0'),
-                    ),
+                if (widget.api.hasPermission('client'))
+                  MetricTile(
+                    label: 'CLIENTS',
+                    value: s.byLabel('Clients').toString().padLeft(2, '0'),
                   ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              Row(
-                children: [
-                  Expanded(
-                    child: MetricTile(
-                      label: 'POSTS',
-                      value: s.byLabel('Posts').toString().padLeft(2, '0'),
-                    ),
+                if (widget.api.hasPermission('blogposts'))
+                  MetricTile(
+                    label: 'POSTS',
+                    value: s.byLabel('Posts').toString().padLeft(2, '0'),
                   ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: MetricTile(
-                      label: 'LICENSE KEYS',
-                      value: s
-                          .byLabel('License Keys')
-                          .toString()
-                          .padLeft(2, '0'),
-                    ),
+                if (widget.api.hasPermission('licensekey'))
+                  MetricTile(
+                    label: 'LICENSE KEYS',
+                    value:
+                        s.byLabel('License Keys').toString().padLeft(2, '0'),
                   ),
-                ],
-              ),
+              ]),
               const SizedBox(height: 40),
               Row(
                 children: [
@@ -205,31 +190,61 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   ),
                 ),
               const SizedBox(height: 32),
-              Row(
-                children: [
-                  Expanded(
-                    child: GhostButton(
-                      label: 'View all leads',
-                      onPressed: () => widget.onNavigate(3),
+              // Quick actions, each gated by the same permission as its
+              // destination so we never offer a jump the user can't take.
+              Builder(builder: (context) {
+                final actions = <Widget>[
+                  if (widget.api.hasPermission('clientOffer'))
+                    Expanded(
+                      child: GhostButton(
+                        label: 'View all leads',
+                        onPressed: widget.onOpenLeads,
+                      ),
                     ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    // Chat is parked off the bottom nav (Tasks took its slot),
-                    // so open the inbox as a pushed screen rather than a tab.
-                    child: SignalButton(
-                      label: 'Open chat',
-                      onPressed: widget.onOpenChat,
+                  if (widget.api.hasPermission('chat'))
+                    Expanded(
+                      child: SignalButton(
+                        label: 'Open chat',
+                        onPressed: widget.onOpenChat,
+                      ),
                     ),
-                  ),
-                ],
-              ),
+                ];
+                if (actions.isEmpty) return const SizedBox.shrink();
+                return Row(
+                  children: [
+                    for (var i = 0; i < actions.length; i++) ...[
+                      if (i > 0) const SizedBox(width: 12),
+                      actions[i],
+                    ],
+                  ],
+                );
+              }),
             ],
           ],
         ),
       ),
     );
   }
+}
+
+/// Lay out the permitted metric tiles two-per-row. A trailing odd tile is
+/// padded with an empty Expanded so it keeps its half-width instead of
+/// stretching across the whole row.
+List<Widget> _metricRows(List<Widget> tiles) {
+  final rows = <Widget>[];
+  for (var i = 0; i < tiles.length; i += 2) {
+    if (i > 0) rows.add(const SizedBox(height: 12));
+    rows.add(Row(
+      children: [
+        Expanded(child: tiles[i]),
+        const SizedBox(width: 12),
+        Expanded(
+          child: i + 1 < tiles.length ? tiles[i + 1] : const SizedBox(),
+        ),
+      ],
+    ));
+  }
+  return rows;
 }
 
 String _weekday(DateTime d) {

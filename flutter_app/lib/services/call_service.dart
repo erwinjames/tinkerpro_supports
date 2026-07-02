@@ -790,8 +790,11 @@ class CallService extends ChangeNotifier {
     notifyListeners();
 
     // Settle to idle on the next tick so the UI can fade out the "ended"
-    // state if it wants to.
+    // state if it wants to. Guard on _disposed: dispose() calls _cleanup and
+    // then super.dispose() synchronously, so this timer would otherwise fire
+    // notifyListeners() on an already-disposed notifier (e.g. on hot restart).
     Future<void>.delayed(const Duration(milliseconds: 50), () {
+      if (_disposed) return;
       if (phase == CallPhase.ended) {
         phase = CallPhase.idle;
         notifyListeners();
@@ -828,8 +831,11 @@ class CallService extends ChangeNotifier {
     return s.toString();
   }
 
+  bool _disposed = false;
+
   @override
   Future<void> dispose() async {
+    _disposed = true;
     await _signalSub?.cancel();
     _signalSub = null;
     _cleanup(silent: true);

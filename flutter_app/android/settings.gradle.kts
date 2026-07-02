@@ -18,6 +18,9 @@ pluginManagement {
 }
 
 plugins {
+    // Lets Gradle auto-provision the JDK 17 toolchain that some plugins
+    // (e.g. flutter_callkit_incoming) require when it isn't installed locally.
+    id("org.gradle.toolchains.foojay-resolver-convention") version "0.8.0"
     id("dev.flutter.flutter-plugin-loader") version "1.0.0"
     id("com.android.application") version "8.11.1" apply false
     id("org.jetbrains.kotlin.android") version "2.2.20" apply false

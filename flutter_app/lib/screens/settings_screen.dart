@@ -3,11 +3,14 @@ import 'dart:io';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../api_client.dart';
+import '../models/profile_models.dart';
 import '../push_service.dart';
 import '../services/chat_prefs.dart';
+import '../services/profile_service.dart';
 import '../services/services.dart';
 import '../services/theme_prefs.dart';
 import '../theme.dart';
@@ -47,10 +50,82 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _loggingOut = false;
   bool _changingServer = false;
 
+  late final ProfileService _profile = ProfileService(widget.api);
+  ProfileInfo? _account;
+  bool _loadingProfile = true;
+  bool _avatarBusy = false;
+
   @override
   void initState() {
     super.initState();
     widget.chatPrefs?.addListener(_onPrefsChanged);
+    _loadProfile();
+  }
+
+  Future<void> _loadProfile() async {
+    final info = await _profile.load();
+    if (!mounted) return;
+    setState(() {
+      _account = info;
+      _loadingProfile = false;
+    });
+  }
+
+  /// Pick an image from the gallery and upload it as the new avatar. The
+  /// server returns a fresh filename each time, so the CachedNetworkImage URL
+  /// changes and no cache-busting is needed.
+  Future<void> _pickAndUploadAvatar() async {
+    final XFile? file = await ImagePicker().pickImage(
+      source: ImageSource.gallery,
+      maxWidth: 1024,
+      maxHeight: 1024,
+      imageQuality: 85,
+    );
+    if (file == null || !mounted) return;
+    setState(() => _avatarBusy = true);
+    final res = await _profile.uploadPicture(file.path);
+    if (!mounted) return;
+    setState(() {
+      _avatarBusy = false;
+      if (res.ok && res.profilePicture != null) {
+        _account =
+            _account?.copyWith(profilePicture: res.profilePicture);
+      }
+    });
+    if (!res.ok) _toast(res.message ?? 'Could not update your photo.');
+  }
+
+  Future<void> _removeAvatar() async {
+    setState(() => _avatarBusy = true);
+    final res = await _profile.removePicture();
+    if (!mounted) return;
+    setState(() {
+      _avatarBusy = false;
+      if (res.ok) _account = _account?.copyWith(clearPicture: true);
+    });
+    if (!res.ok) _toast(res.message ?? 'Could not remove your photo.');
+  }
+
+  /// Bottom-sheet actions for the avatar: change, and (when set) remove.
+  Future<void> _openAvatarActions() async {
+    if (_avatarBusy) return;
+    final hasPhoto = _account?.profilePicture != null;
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: Brand.surface,
+      builder: (_) => _AvatarActionSheet(canRemove: hasPhoto),
+    );
+    if (!mounted || action == null) return;
+    if (action == 'pick') {
+      await _pickAndUploadAvatar();
+    } else if (action == 'remove') {
+      await _removeAvatar();
+    }
+  }
+
+  void _toast(String msg) {
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(msg.toUpperCase())));
   }
 
   @override
@@ -162,6 +237,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
       showBottomBrand: false,
       child: ListView(
         children: [
+          Text('PROFILE', style: Theme.of(context).textTheme.labelMedium),
+          const SizedBox(height: 6),
+          const Hairline(),
+          const SizedBox(height: 16),
+          _ProfileRow(
+            account: _account,
+            loading: _loadingProfile,
+            busy: _avatarBusy,
+            avatarUrl: _profile.avatarUrl(_account?.profilePicture),
+            imageHeaders: _profile.imageHeaders,
+            onEdit: _openAvatarActions,
+          ),
+          const SizedBox(height: 40),
           Text('CONNECTION',
               style: Theme.of(context).textTheme.labelMedium),
           const SizedBox(height: 6),
@@ -216,6 +304,199 @@ class _SettingsScreenState extends State<SettingsScreen> {
             style: Theme.of(context).textTheme.bodySmall,
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Profile header: an editable circular avatar (tap to change / remove) beside
+/// the user's name and email. Mirrors the web Settings page avatar control.
+class _ProfileRow extends StatelessWidget {
+  const _ProfileRow({
+    required this.account,
+    required this.loading,
+    required this.busy,
+    required this.avatarUrl,
+    required this.imageHeaders,
+    required this.onEdit,
+  });
+
+  final ProfileInfo? account;
+  final bool loading;
+  final bool busy;
+  final String? avatarUrl;
+  final Map<String, String> imageHeaders;
+  final VoidCallback onEdit;
+
+  static String _initials(String name) {
+    final parts = name
+        .trim()
+        .split(RegExp(r'\s+'))
+        .where((p) => p.isNotEmpty)
+        .toList();
+    String first(String s) => s.isEmpty ? '' : s.substring(0, 1).toUpperCase();
+    if (parts.isEmpty) return 'U';
+    if (parts.length == 1) return first(parts.first);
+    return first(parts.first) + first(parts.last);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final text = Theme.of(context).textTheme;
+    final name = account?.displayName ?? '';
+    final url = avatarUrl;
+
+    return Row(
+      children: [
+        // Tappable avatar with a hover-style camera badge + busy overlay.
+        InkWell(
+          onTap: busy ? null : onEdit,
+          customBorder: const CircleBorder(),
+          child: SizedBox(
+            width: 68,
+            height: 68,
+            child: Stack(
+              children: [
+                Container(
+                  width: 64,
+                  height: 64,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: Brand.surfaceHi,
+                    border: Border.all(color: Brand.rule, width: 1),
+                  ),
+                  clipBehavior: Clip.antiAlias,
+                  child: url != null
+                      ? CachedNetworkImage(
+                          imageUrl: url,
+                          httpHeaders: imageHeaders,
+                          fit: BoxFit.cover,
+                          placeholder: (_, _) => _initialsFallback(name, text),
+                          errorWidget: (_, _, _) =>
+                              _initialsFallback(name, text),
+                        )
+                      : _initialsFallback(name, text),
+                ),
+                if (busy)
+                  Positioned.fill(
+                    child: Container(
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: Brand.canvas.withValues(alpha: 0.55),
+                      ),
+                      child: const Center(
+                        child: SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2, color: Brand.signal),
+                        ),
+                      ),
+                    ),
+                  ),
+                // Camera badge, bottom-right.
+                Positioned(
+                  right: 0,
+                  bottom: 0,
+                  child: Container(
+                    width: 24,
+                    height: 24,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: Brand.signal,
+                      border: Border.all(color: Brand.canvas, width: 2),
+                    ),
+                    child: const Icon(Icons.photo_camera,
+                        size: 12, color: Brand.canvas),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(width: 16),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                loading
+                    ? 'Loading…'
+                    : (name.isEmpty ? 'Your account' : name),
+                style: text.titleMedium,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              const SizedBox(height: 3),
+              Text(
+                account?.email.isNotEmpty == true
+                    ? account!.email
+                    : (account?.username ?? ''),
+                style: text.bodySmall,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              const SizedBox(height: 6),
+              Text(
+                busy ? 'UPDATING…' : 'TAP PHOTO TO CHANGE',
+                style: text.labelMedium?.copyWith(color: Brand.paperDim),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _initialsFallback(String name, TextTheme text) {
+    return Center(
+      child: Text(
+        _initials(name),
+        style: text.titleLarge?.copyWith(color: Brand.paperDim),
+      ),
+    );
+  }
+}
+
+/// Action sheet shown when the avatar is tapped.
+class _AvatarActionSheet extends StatelessWidget {
+  const _AvatarActionSheet({required this.canRemove});
+  final bool canRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    final text = Theme.of(context).textTheme;
+    return SafeArea(
+      child: Container(
+        decoration: const BoxDecoration(
+          color: Brand.surface,
+          border: Border(top: BorderSide(color: Brand.signal, width: 2)),
+        ),
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.photo_library_outlined,
+                  color: Brand.paper),
+              title: Text('Choose from gallery', style: text.titleSmall),
+              onTap: () => Navigator.of(context).pop('pick'),
+            ),
+            if (canRemove)
+              ListTile(
+                leading: const Icon(Icons.delete_outline, color: Brand.signal),
+                title: Text('Remove photo',
+                    style: text.titleSmall?.copyWith(color: Brand.signal)),
+                onTap: () => Navigator.of(context).pop('remove'),
+              ),
+            ListTile(
+              leading: const Icon(Icons.close, color: Brand.paperDim),
+              title: Text('Cancel',
+                  style: text.titleSmall?.copyWith(color: Brand.paperDim)),
+              onTap: () => Navigator.of(context).pop(),
+            ),
+          ],
+        ),
       ),
     );
   }

@@ -161,11 +161,11 @@ class _StationScaffoldState extends State<StationScaffold>
                   const SizedBox(height: 12),
                   AnimatedBuilder(
                     animation: _ruleDraw,
-                    builder: (_, __) => Align(
+                    builder: (_, _) => Align(
                       alignment: Alignment.centerLeft,
                       child: FractionallySizedBox(
                         widthFactor: _ruleDraw.value,
-                        child: Container(height: 1, color: Brand.paper),
+                        child: Container(height: 1, color: context.brand.paper),
                       ),
                     ),
                   ),
@@ -214,7 +214,7 @@ class _SquareIconButton extends StatelessWidget {
         width: 32,
         height: 32,
         decoration: const BoxDecoration(color: Colors.transparent),
-        child: Icon(icon, size: 18, color: Brand.paper),
+        child: Icon(icon, size: 18, color: context.brand.paper),
       ),
     );
     return tooltip == null ? button : Tooltip(message: tooltip!, child: button);
@@ -239,7 +239,7 @@ class StationAction extends StatelessWidget {
     return IconButton(
       tooltip: tooltip,
       onPressed: onPressed,
-      icon: Icon(icon, size: 20, color: Brand.paper),
+      icon: Icon(icon, size: 20, color: context.brand.paper),
       style: IconButton.styleFrom(
         padding: EdgeInsets.zero,
         minimumSize: const Size(32, 32),
@@ -277,11 +277,11 @@ class NotificationBell extends StatelessWidget {
           child: Stack(
             clipBehavior: Clip.none,
             children: [
-              const Center(
+              Center(
                 child: Icon(
                   Icons.notifications_none_outlined,
                   size: 20,
-                  color: Brand.paper,
+                  color: context.brand.paper,
                 ),
               ),
               if (hasUnseen)
@@ -296,7 +296,7 @@ class NotificationBell extends StatelessWidget {
                     decoration: BoxDecoration(
                       color: Brand.signal,
                       borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: Brand.canvas, width: 1.2),
+                      border: Border.all(color: context.brand.canvas, width: 1.2),
                     ),
                     child: Text(
                       count > 99 ? '99+' : count.toString(),
@@ -348,12 +348,14 @@ class _SignalButtonState extends State<SignalButton> {
   @override
   Widget build(BuildContext context) {
     final disabled = widget.onPressed == null || widget.busy;
+    // `Brand.canvas` (dark) stays the fg on the orange fill so the label reads
+    // as dark-on-orange in BOTH themes; pressed/disabled surfaces follow theme.
     final bg = _pressed
-        ? Brand.canvas
-        : (disabled ? Brand.surfaceHi : Brand.signal);
+        ? context.brand.canvas
+        : (disabled ? context.brand.surfaceHi : Brand.signal);
     final fg = _pressed
         ? Brand.signal
-        : (disabled ? Brand.paperDim : Brand.canvas);
+        : (disabled ? context.brand.paperDim : Brand.canvas);
     return GestureDetector(
       onTapDown: disabled ? null : (_) => setState(() => _pressed = true),
       onTapCancel: () => setState(() => _pressed = false),
@@ -416,7 +418,7 @@ class GhostButton extends StatelessWidget {
         height: 52,
         alignment: Alignment.center,
         decoration: BoxDecoration(
-          border: Border.all(color: Brand.rule, width: 1),
+          border: Border.all(color: context.brand.rule, width: 1),
         ),
         child: Text(
           label.toUpperCase(),
@@ -424,7 +426,7 @@ class GhostButton extends StatelessWidget {
                 fontSize: 12,
                 letterSpacing: 3,
                 fontWeight: FontWeight.w500,
-                color: Brand.paperDim,
+                color: context.brand.paperDim,
               ),
         ),
       ),
@@ -465,7 +467,7 @@ class StationDataRow extends StatelessWidget {
     final text = Theme.of(context).textTheme;
     final effectiveValueStyle = valueStyle ??
         text.bodyMedium?.copyWith(
-          color: onTap != null ? Brand.signal : Brand.paper,
+          color: onTap != null ? Brand.signal : context.brand.paper,
           decoration: onTap != null ? TextDecoration.underline : null,
           decorationColor: Brand.signal,
           decorationThickness: 1,
@@ -491,7 +493,7 @@ class StationDataRow extends StatelessWidget {
           ],
         ),
         const SizedBox(height: 10),
-        Container(height: 1, color: Brand.rule),
+        Container(height: 1, color: context.brand.rule),
       ],
     );
 
@@ -521,8 +523,8 @@ class MetricTile extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
-        color: Brand.surface,
-        border: Border.all(color: Brand.rule, width: 1),
+        color: context.brand.surface,
+        border: Border.all(color: context.brand.rule, width: 1),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -593,7 +595,7 @@ class ActivityRow extends StatelessWidget {
               margin: const EdgeInsets.only(top: 6, right: 12),
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: showSignalDot ? Brand.signal : Brand.rule,
+                color: showSignalDot ? Brand.signal : context.brand.rule,
               ),
             ),
             Expanded(
@@ -635,7 +637,7 @@ class Hairline extends StatelessWidget {
   const Hairline({super.key});
   @override
   Widget build(BuildContext context) =>
-      Container(height: 1, color: Brand.rule);
+      Container(height: 1, color: context.brand.rule);
 }
 
 /// Empty-state placeholder shown when a list has no results.

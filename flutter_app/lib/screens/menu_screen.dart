@@ -2,13 +2,40 @@ import 'package:flutter/material.dart';
 
 import '../api_client.dart';
 import '../push_service.dart';
+import '../services/activity_service.dart';
+import '../services/blog_service.dart';
 import '../services/chat_prefs.dart';
+import '../services/client_service.dart';
+import '../services/credential_service.dart';
+import '../services/email_service.dart';
+import '../services/file_service.dart';
+import '../services/help_service.dart';
+import '../services/license_service.dart';
+import '../services/offer_service.dart';
+import '../services/posversion_service.dart';
+import '../services/pricing_service.dart';
+import '../services/releasenotes_service.dart';
 import '../services/services.dart';
+import '../services/task_service.dart';
 import '../services/theme_prefs.dart';
+import '../services/user_admin_service.dart';
 import '../theme.dart';
 import '../widgets/premium.dart';
-import 'coming_soon_screen.dart';
+import 'activity_list_screen.dart';
+import 'blog_list_screen.dart';
+import 'client_list_screen.dart';
+import 'credentials_screen.dart';
+import 'email_list_screen.dart';
+import 'file_list_screen.dart';
+import 'help_list_screen.dart';
+import 'license_list_screen.dart';
+import 'offer_list_screen.dart';
+import 'posversion_list_screen.dart';
+import 'pricing_list_screen.dart';
+import 'releasenotes_list_screen.dart';
 import 'settings_screen.dart';
+import 'task_list_screen.dart';
+import 'user_admin_list_screen.dart';
 
 /// The "everything else" grid. Organised into three bands so the eye has
 /// a hierarchy instead of facing twenty equally-weighted tiles.
@@ -52,97 +79,126 @@ class MenuScreen extends StatelessWidget {
           );
         },
       ),
-      child: ListView(
-        children: [
-          _AppearanceSection(themePrefs: themePrefs),
-          const SizedBox(height: 32),
+      child: Builder(builder: (context) {
+        // Each entry is gated by the same permission key the web sidebar
+        // uses (e.g. BIR → customer, Leads → clientOffer). A group whose
+        // every tile is gated out is dropped entirely so we don't leave a
+        // floating header over empty space. Offers / Pricing have no
+        // permission concept on the backend and Settings is the universal
+        // escape hatch (theme + sign out), so those stay unconditional.
+        final groups = <_Group>[
           _Group(
             label: 'Operations',
-            // Chat lives in the bottom nav now; Task is disabled on the
-            // web side and intentionally hidden here too.
             items: [
-              _MenuTile(
-                label: 'Email',
-                icon: Icons.email_outlined,
-                onTap: () => _openSoon(context, 'Email', 'emails'),
-              ),
-              _MenuTile(
-                label: 'Files',
-                icon: Icons.folder_outlined,
-                onTap: () =>
-                    _openSoon(context, 'Files Management', 'files-management'),
-              ),
+              if (api.hasPermission('task'))
+                _MenuTile(
+                  label: 'Task',
+                  icon: Icons.task_alt_outlined,
+                  onTap: () => _openTask(context),
+                ),
+              if (api.hasPermission('emails'))
+                _MenuTile(
+                  label: 'Email',
+                  icon: Icons.email_outlined,
+                  onTap: () =>
+                      _push(context, EmailListScreen(service: EmailService(api))),
+                ),
+              if (api.hasPermission('files'))
+                _MenuTile(
+                  label: 'Files',
+                  icon: Icons.folder_outlined,
+                  onTap: () =>
+                      _push(context, FileListScreen(service: FileService(api))),
+                ),
+              if (api.hasPermission('client'))
+                _MenuTile(
+                  label: 'Client',
+                  icon: Icons.badge_outlined,
+                  onTap: () =>
+                      _push(context, ClientListScreen(service: ClientService(api))),
+                ),
             ],
           ),
-          const SizedBox(height: 32),
           _Group(
             label: 'Commerce',
             items: [
               _MenuTile(
                 label: 'Offers',
                 icon: Icons.sell_outlined,
-                onTap: () => _openSoon(context, 'Offers', 'offers'),
+                onTap: () => _push(
+                    context, OfferListScreen(service: OfferService(api), api: api)),
               ),
               _MenuTile(
                 label: 'Pricing',
                 icon: Icons.price_check_outlined,
-                onTap: () => _openSoon(context, 'Pricing', 'pricing'),
+                onTap: () => _push(context,
+                    PricingListScreen(service: PricingService(api), api: api)),
               ),
-              _MenuTile(
-                label: 'License',
-                icon: Icons.verified_outlined,
-                onTap: () => _openSoon(context, 'License Key', 'license'),
-              ),
-              _MenuTile(
-                label: 'POS Version',
-                icon: Icons.storage_outlined,
-                onTap: () =>
-                    _openSoon(context, 'POS Version', 'pos-version'),
-              ),
+              if (api.hasPermission('licensekey'))
+                _MenuTile(
+                  label: 'License',
+                  icon: Icons.verified_outlined,
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) =>
+                          LicenseListScreen(service: LicenseService(api)),
+                    ),
+                  ),
+                ),
+              if (api.hasPermission('posversion'))
+                _MenuTile(
+                  label: 'POS Version',
+                  icon: Icons.storage_outlined,
+                  onTap: () => _push(context,
+                      PosVersionListScreen(service: PosVersionService(api))),
+                ),
             ],
           ),
-          const SizedBox(height: 32),
           _Group(
             label: 'Knowledge · Admin',
             items: [
-              _MenuTile(
-                label: 'Release Notes',
-                icon: Icons.article_outlined,
-                onTap: () =>
-                    _openSoon(context, 'Release Notes', 'release_notes'),
-              ),
-              _MenuTile(
-                label: 'Blog',
-                icon: Icons.edit_note,
-                onTap: () => _openSoon(context, 'Blog Posts', 'blog'),
-              ),
-              _MenuTile(
-                label: 'Credentials',
-                icon: Icons.vpn_key_outlined,
-                onTap: () => _openSoon(
-                    context, 'Credentials Storage', 'client-credentials'),
-              ),
-              _MenuTile(
-                label: 'Users',
-                icon: Icons.group_outlined,
-                onTap: () => _openSoon(context, 'User', 'user'),
-              ),
-              _MenuTile(
-                label: 'Activity',
-                icon: Icons.timeline_outlined,
-                onTap: () =>
-                    _openSoon(context, 'Activity Logs', 'activity_logs'),
-              ),
-              _MenuTile(
-                label: 'Help',
-                icon: Icons.help_outline,
-                onTap: () => _openSoon(context, 'Help Page', 'help'),
-              ),
-              _MenuTile(
-                label: 'Analyze',
-                icon: Icons.query_stats,
-                onTap: () => _openSoon(context, 'Analyze', 'analyze'),
-              ),
+              if (api.hasPermission('releasenotes'))
+                _MenuTile(
+                  label: 'Release Notes',
+                  icon: Icons.article_outlined,
+                  onTap: () => _push(context,
+                      ReleaseNotesListScreen(service: ReleaseNotesService(api))),
+                ),
+              if (api.hasPermission('blogposts'))
+                _MenuTile(
+                  label: 'Blog',
+                  icon: Icons.edit_note,
+                  onTap: () =>
+                      _push(context, BlogListScreen(service: BlogService(api))),
+                ),
+              if (api.hasPermission('credentials'))
+                _MenuTile(
+                  label: 'Credentials',
+                  icon: Icons.vpn_key_outlined,
+                  onTap: () => _push(context,
+                      CredentialsScreen(service: CredentialService(api))),
+                ),
+              if (api.hasPermission('user'))
+                _MenuTile(
+                  label: 'Users',
+                  icon: Icons.group_outlined,
+                  onTap: () => _push(context,
+                      UserAdminListScreen(service: UserAdminService(api))),
+                ),
+              if (api.hasPermission('activitylogs'))
+                _MenuTile(
+                  label: 'Activity',
+                  icon: Icons.timeline_outlined,
+                  onTap: () => _push(
+                      context, ActivityListScreen(service: ActivityService(api))),
+                ),
+              if (api.hasPermission('helpPage'))
+                _MenuTile(
+                  label: 'Help',
+                  icon: Icons.help_outline,
+                  onTap: () =>
+                      _push(context, HelpListScreen(service: HelpService(api))),
+                ),
               _MenuTile(
                 label: 'Settings',
                 icon: Icons.settings_outlined,
@@ -150,35 +206,50 @@ class MenuScreen extends StatelessWidget {
                   Navigator.of(context).push(
                     MaterialPageRoute<void>(
                       builder: (_) => SettingsScreen(
-                api: api,
-                auth: auth,
-                push: push,
-                chatPrefs: chatPrefs,
-                themePrefs: themePrefs,
-              ),
+                        api: api,
+                        auth: auth,
+                        push: push,
+                        chatPrefs: chatPrefs,
+                        themePrefs: themePrefs,
+                      ),
                     ),
                   );
                 },
               ),
             ],
           ),
-          const SizedBox(height: 40),
-        ],
+        ].where((g) => g.items.isNotEmpty).toList();
+
+        return ListView(
+          children: [
+            _AppearanceSection(themePrefs: themePrefs),
+            for (final group in groups) ...[
+              const SizedBox(height: 32),
+              group,
+            ],
+            const SizedBox(height: 40),
+          ],
+        );
+      }),
+    );
+  }
+
+  void _openTask(BuildContext context) {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => TaskListScreen(service: TaskService(api)),
       ),
     );
   }
 
-  void _openSoon(BuildContext context, String title, String path) {
+  /// Push a native feature screen. Each menu tile now opens a real Flutter
+  /// surface backed by the JSON API instead of the web-link placeholder.
+  void _push(BuildContext context, Widget screen) {
     Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => ComingSoonScreen(
-          title: title,
-          webPath: path,
-          baseUrl: api.baseUrl,
-        ),
-      ),
+      MaterialPageRoute<void>(builder: (_) => screen),
     );
   }
+
 }
 
 class _Group extends StatelessWidget {

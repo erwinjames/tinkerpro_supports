@@ -46,6 +46,10 @@ dependencies:
   path_provider: ^2.1.4
   open_filex: ^4.5.0
 
+  # Native Google sign-in on the login screen. The ID token is verified
+  # server-side by api.php?action=mobileOAuthLogin (link-to-existing only).
+  google_sign_in: ^6.2.1
+
   # WebRTC for voice + video calls. Signaling rides on the existing
   # Soketi/Pusher channels (chat.signal API).
   flutter_webrtc: ^0.12.0

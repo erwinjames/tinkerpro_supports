@@ -2,63 +2,49 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
-import '../models/models.dart';
-import '../services/notification_center.dart';
-import '../services/services.dart';
+import '../models/client_models.dart';
+import '../services/client_service.dart';
 import '../theme.dart';
 import '../widgets/premium.dart';
-import 'customer_detail_screen.dart';
-import 'customer_form_screen.dart';
-import 'invoice_lookup_dialog.dart';
-import 'notification_panel.dart';
+import 'client_detail_screen.dart';
+import 'client_form_screen.dart';
 
-class CustomerListScreen extends StatefulWidget {
-  const CustomerListScreen({
-    super.key,
-    required this.service,
-    required this.notifications,
-  });
-  final CustomerService service;
-  final NotificationCenter notifications;
+/// Client & Data Sheet list — POS/hardware bundle records (web `client.php`).
+class ClientListScreen extends StatefulWidget {
+  const ClientListScreen({super.key, required this.service});
+  final ClientService service;
 
   @override
-  State<CustomerListScreen> createState() => _CustomerListScreenState();
+  State<ClientListScreen> createState() => _ClientListScreenState();
 }
 
-class _CustomerListScreenState extends State<CustomerListScreen> {
+class _ClientListScreenState extends State<ClientListScreen> {
   final _searchController = TextEditingController();
   Timer? _debounce;
-  List<CustomerBrief> _rows = const [];
+  List<ClientBrief> _rows = const [];
   bool _loading = true;
 
   @override
   void initState() {
     super.initState();
     _load();
-    widget.notifications.addListener(_onNotificationsChanged);
   }
 
   @override
   void dispose() {
     _debounce?.cancel();
     _searchController.dispose();
-    widget.notifications.removeListener(_onNotificationsChanged);
     super.dispose();
-  }
-
-  void _onNotificationsChanged() {
-    if (mounted) setState(() {});
   }
 
   Future<void> _load({String? search}) async {
     setState(() => _loading = true);
-    final rows = await widget.service.list(search: search);
+    final res = await widget.service.list(search: search);
     if (!mounted) return;
     setState(() {
-      _rows = rows;
+      _rows = res.rows;
       _loading = false;
     });
-    widget.notifications.refresh();
   }
 
   void _onSearchChanged(String value) {
@@ -69,15 +55,9 @@ class _CustomerListScreenState extends State<CustomerListScreen> {
   }
 
   Future<void> _openCreate() async {
-    // Step 1: "Find Your Invoice" — null means cancelled, '' means skipped.
-    final invoice = await InvoiceLookupDialog.show(context, widget.service);
-    if (!mounted || invoice == null) return;
     final created = await Navigator.of(context).push<bool>(
       MaterialPageRoute<bool>(
-        builder: (_) => CustomerFormScreen(
-          service: widget.service,
-          initialInvoiceNumber: invoice,
-        ),
+        builder: (_) => ClientFormScreen(service: widget.service),
       ),
     );
     if (created == true) _load(search: _searchController.text);
@@ -86,31 +66,15 @@ class _CustomerListScreenState extends State<CustomerListScreen> {
   @override
   Widget build(BuildContext context) {
     return StationScaffold(
-      stationNumber: '04',
-      stationLabel: 'BIR REGISTRATION',
+      stationNumber: '15',
+      stationLabel: 'CLIENT DATA SHEET',
       title: 'Clients.',
       showBottomBrand: false,
-      trailing: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          StationAction(
-            icon: Icons.add,
-            tooltip: 'New client',
-            onPressed: _openCreate,
-          ),
-          const SizedBox(width: 4),
-          StationAction(
-            icon: Icons.refresh,
-            tooltip: 'Refresh',
-            onPressed: () => _load(search: _searchController.text),
-          ),
-        ],
-      ),
-      belowRule: NotificationBell(
-        count: widget.notifications.unseenCount,
-        onPressed: () =>
-            NotificationPanel.show(context, widget.notifications),
-        tooltip: 'New leads & customers',
+      onBack: () => Navigator.of(context).pop(),
+      trailing: StationAction(
+        icon: Icons.add,
+        tooltip: 'New client',
+        onPressed: _openCreate,
       ),
       child: Column(
         children: [
@@ -118,7 +82,7 @@ class _CustomerListScreenState extends State<CustomerListScreen> {
             controller: _searchController,
             onChanged: _onSearchChanged,
             decoration: InputDecoration(
-              labelText: 'SEARCH · TIN · COMPANY · OWNER',
+              labelText: 'SEARCH · NAME · INVOICE',
               suffixIcon: _searchController.text.isEmpty
                   ? null
                   : IconButton(
@@ -144,9 +108,7 @@ class _CustomerListScreenState extends State<CustomerListScreen> {
                         width: 20,
                         height: 20,
                         child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: Brand.signal,
-                        ),
+                            strokeWidth: 2, color: Brand.signal),
                       ),
                     )
                   : _rows.isEmpty
@@ -157,7 +119,7 @@ class _CustomerListScreenState extends State<CustomerListScreen> {
                             EmptyState(
                               label: 'No clients',
                               hint:
-                                  'Nothing matched your search. Pull down to refresh.',
+                                  'Nothing matched. Tap + to add a data sheet, or pull to refresh.',
                             ),
                           ],
                         )
@@ -167,13 +129,13 @@ class _CustomerListScreenState extends State<CustomerListScreen> {
                           separatorBuilder: (_, _) => const Hairline(),
                           itemBuilder: (_, i) {
                             final c = _rows[i];
-                            return _CustomerRow(
-                              customer: c,
+                            return _ClientRow(
+                              client: c,
                               onTap: () async {
                                 final changed =
                                     await Navigator.of(context).push<bool>(
                                   MaterialPageRoute<bool>(
-                                    builder: (_) => CustomerDetailScreen(
+                                    builder: (_) => ClientDetailScreen(
                                       service: widget.service,
                                       brief: c,
                                     ),
@@ -194,14 +156,15 @@ class _CustomerListScreenState extends State<CustomerListScreen> {
   }
 }
 
-class _CustomerRow extends StatelessWidget {
-  const _CustomerRow({required this.customer, required this.onTap});
-  final CustomerBrief customer;
+class _ClientRow extends StatelessWidget {
+  const _ClientRow({required this.client, required this.onTap});
+  final ClientBrief client;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
+    final hasInvoice = client.invoiceNumber.trim().isNotEmpty;
     return InkWell(
       onTap: onTap,
       child: Padding(
@@ -215,44 +178,24 @@ class _CustomerRow extends StatelessWidget {
               margin: const EdgeInsets.only(top: 7, right: 12),
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: customer.status == 'Processed'
-                    ? Brand.signal
-                    : Brand.rule,
+                color: hasInvoice ? Brand.signal : Brand.rule,
               ),
             ),
             Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(customer.companyName,
-                      style: text.titleSmall,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis),
-                  const SizedBox(height: 3),
-                  Text(
-                    customer.ownerName.isEmpty ? '—' : customer.ownerName,
-                    style: text.bodySmall,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ],
+              child: Text(
+                client.name.isEmpty ? 'Untitled client' : client.name,
+                style: text.titleSmall,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
               ),
             ),
             const SizedBox(width: 12),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                Text(customer.tin.isEmpty ? '—' : customer.tin,
-                    style: text.labelMedium),
-                const SizedBox(height: 4),
-                Text(customer.status.toUpperCase(),
-                    style: text.labelMedium?.copyWith(
-                      color: customer.status == 'Processed'
-                          ? Brand.signal
-                          : Brand.paperDim,
-                      letterSpacing: 2.2,
-                    )),
-              ],
+            Text(
+              hasInvoice ? client.invoiceNumber : '—',
+              style: text.labelMedium?.copyWith(
+                color: hasInvoice ? Brand.signal : Brand.paperDim,
+                letterSpacing: 1.5,
+              ),
             ),
           ],
         ),

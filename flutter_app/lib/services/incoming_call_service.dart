@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_callkit_incoming/entities/android_params.dart';
@@ -47,6 +48,11 @@ class IncomingCallEvents {
   /// than once; later calls are no-ops.
   void start() {
     if (_sub != null) return;
+    // flutter_callkit_incoming only has a native implementation on Android and
+    // iOS. On desktop/web the `flutter_callkit_incoming_events` EventChannel
+    // has no handler, so subscribing throws MissingPluginException (reported
+    // by the services library, not deliverable to onError). Skip it entirely.
+    if (!Platform.isAndroid && !Platform.isIOS) return;
     _sub = FlutterCallkitIncoming.onEvent.listen((event) {
       if (event == null) return;
       final body = event.body;
@@ -74,6 +80,13 @@ class IncomingCallEvents {
         callerName: (extra['caller_name'] ?? '').toString(),
         media: (extra['media'] ?? 'voice').toString(),
       ));
+    }, onError: (Object e) {
+      // The CallKit EventChannel can throw MissingPluginException while it's
+      // (re)activating — most commonly right after a hot restart, when the
+      // Dart side re-subscribes before the native channel is re-registered,
+      // or on platforms with no native CallKit implementation. It's transient
+      // and non-fatal, so swallow it instead of letting it surface uncaught.
+      debugPrint('[incoming_call] CallKit event stream error: $e');
     });
   }
 

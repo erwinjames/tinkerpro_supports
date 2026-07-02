@@ -24,18 +24,21 @@ class ApiClient {
     this._cookie,
     this._userId,
     this._username,
+    this._permissions,
   );
 
   static const _kBaseUrlKey = 'server_base_url';
   static const _kCookieKey = 'session_cookie';
   static const _kUserIdKey = 'session_user_id';
   static const _kUsernameKey = 'session_username';
+  static const _kPermissionsKey = 'session_permissions';
 
   final SharedPreferences _prefs;
   String _baseUrl;
   String _cookie;
   int? _userId;
   String? _username;
+  Map<String, bool> _permissions;
 
   static Future<ApiClient> load() async {
     final prefs = await SharedPreferences.getInstance();
@@ -45,7 +48,20 @@ class ApiClient {
       prefs.getString(_kCookieKey) ?? '',
       prefs.getInt(_kUserIdKey),
       prefs.getString(_kUsernameKey),
+      _decodePermissions(prefs.getString(_kPermissionsKey)),
     );
+  }
+
+  static Map<String, bool> _decodePermissions(String? stored) {
+    if (stored == null || stored.isEmpty) return <String, bool>{};
+    try {
+      final decoded = jsonDecode(stored);
+      if (decoded is Map) {
+        return decoded
+            .map((k, v) => MapEntry(k.toString(), v == true));
+      }
+    } catch (_) {}
+    return <String, bool>{};
   }
 
   String get baseUrl => _baseUrl;
@@ -61,6 +77,18 @@ class ApiClient {
   /// chat header so the active identity is unambiguous when an admin
   /// switches accounts on the device.
   String? get username => _username;
+
+  /// Feature permissions captured at login (and refreshed via
+  /// `getMobileAuthSession`). Mirrors the web app's
+  /// `$_SESSION['permissions']` map so the UI can hide features the user
+  /// isn't entitled to — e.g. the Task screen. Persists across launches so
+  /// a warm start doesn't have to wait on the network to gate the UI.
+  Map<String, bool> get permissions => Map.unmodifiable(_permissions);
+
+  /// Whether the signed-in user is entitled to [feature] (e.g. `'task'`).
+  /// Unknown / absent features are treated as not-permitted, matching the
+  /// web sidebar's `permissions['task'] == 1` checks.
+  bool hasPermission(String feature) => _permissions[feature] == true;
 
   Future<void> setBaseUrl(String value) async {
     _baseUrl = value.trim().replaceAll(RegExp(r'/+$'), '');
@@ -96,6 +124,18 @@ class ApiClient {
     }
   }
 
+  /// Persist the user's feature permissions. Called by AuthService after a
+  /// successful login and whenever `getMobileAuthSession` returns a fresh
+  /// map, so client-side gating stays in step with the server.
+  Future<void> setPermissions(Map<String, bool> perms) async {
+    _permissions = Map<String, bool>.from(perms);
+    if (_permissions.isEmpty) {
+      await _prefs.remove(_kPermissionsKey);
+    } else {
+      await _prefs.setString(_kPermissionsKey, jsonEncode(_permissions));
+    }
+  }
+
   /// User-scoped SharedPreferences keys that must be wiped when an account
   /// changes. Anything device-scoped (e.g. `server_base_url`) is excluded.
   /// Centralised here so a future feature can register its keys without
@@ -105,6 +145,7 @@ class ApiClient {
     _kCookieKey,
     _kUserIdKey,
     _kUsernameKey,
+    _kPermissionsKey,
     'notif_last_lead_id',
     'notif_last_customer_id',
   ];
@@ -117,6 +158,7 @@ class ApiClient {
     _cookie = '';
     _userId = null;
     _username = null;
+    _permissions = <String, bool>{};
     for (final key in _kUserScopedKeys) {
       await _prefs.remove(key);
     }
@@ -230,6 +272,100 @@ class ApiClient {
     final uri = Uri.parse('$_baseUrl/$cleanPath')
         .replace(queryParameters: query);
     final response = await http.get(uri, headers: _headers());
+    await _absorbCookie(response);
+    return _decode(response);
+  }
+
+  /// POST a raw JSON body to an `api.php?action=...` endpoint, for handlers
+  /// that read `json_decode(file_get_contents('php://input'))` instead of
+  /// `$_POST` (e.g. file_delete_collection / file_delete_item). Sends
+  /// `Content-Type: application/json`. Cookie auth + JSON decode as [post].
+  Future<Map<String, dynamic>> postJson(
+    String action, {
+    Map<String, dynamic>? body,
+  }) async {
+    final response = await http.post(
+      _uri(action),
+      headers: {
+        ..._headers(),
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode(body ?? const {}),
+    );
+    await _absorbCookie(response);
+    return _decode(response);
+  }
+
+  /// Multipart POST to an `api.php?action=...` endpoint, for handlers that
+  /// expect `multipart/form-data` (image / file uploads). [fields] are the
+  /// plain text form fields; [files] maps a form field name to a local file
+  /// path. Cookie auth + JSON decode match [post].
+  Future<Map<String, dynamic>> postMultipart(
+    String action, {
+    Map<String, String>? fields,
+    Map<String, String>? files,
+  }) async {
+    return _sendMultipart(_uri(action), fields: fields, files: files);
+  }
+
+  /// Multipart POST to a non-`api.php` script (e.g. the pricing facade).
+  Future<Map<String, dynamic>> postPathMultipart(
+    String path, {
+    Map<String, String>? query,
+    Map<String, String>? fields,
+    Map<String, String>? files,
+  }) async {
+    final cleanPath = path.replaceAll(RegExp(r'^/+'), '');
+    final uri = Uri.parse('$_baseUrl/$cleanPath')
+        .replace(queryParameters: query);
+    return _sendMultipart(uri, fields: fields, files: files);
+  }
+
+  /// Multipart POST that can attach several files under the SAME field name
+  /// (e.g. `files[]`), which PHP receives as an array in `$_FILES`. Used by the
+  /// BIR document-extraction endpoint (`client-multidoc-extract.php`). [files]
+  /// is a list of (field, localPath) pairs.
+  Future<Map<String, dynamic>> postPathMultipartFiles(
+    String path, {
+    Map<String, String>? query,
+    Map<String, String>? fields,
+    List<({String field, String path})> files = const [],
+  }) async {
+    final cleanPath = path.replaceAll(RegExp(r'^/+'), '');
+    final uri = Uri.parse('$_baseUrl/$cleanPath')
+        .replace(queryParameters: query);
+    final request = http.MultipartRequest('POST', uri);
+    if (_cookie.isNotEmpty) request.headers['Cookie'] = _cookie;
+    request.headers['Accept'] = 'application/json';
+    if (fields != null) request.fields.addAll(fields);
+    for (final f in files) {
+      if (f.path.isEmpty) continue;
+      request.files.add(await http.MultipartFile.fromPath(f.field, f.path));
+    }
+    final streamed = await request.send();
+    final response = await http.Response.fromStream(streamed);
+    await _absorbCookie(response);
+    return _decode(response);
+  }
+
+  Future<Map<String, dynamic>> _sendMultipart(
+    Uri uri, {
+    Map<String, String>? fields,
+    Map<String, String>? files,
+  }) async {
+    final request = http.MultipartRequest('POST', uri);
+    if (_cookie.isNotEmpty) request.headers['Cookie'] = _cookie;
+    request.headers['Accept'] = 'application/json';
+    if (fields != null) request.fields.addAll(fields);
+    if (files != null) {
+      for (final entry in files.entries) {
+        if (entry.value.isEmpty) continue;
+        request.files
+            .add(await http.MultipartFile.fromPath(entry.key, entry.value));
+      }
+    }
+    final streamed = await request.send();
+    final response = await http.Response.fromStream(streamed);
     await _absorbCookie(response);
     return _decode(response);
   }
