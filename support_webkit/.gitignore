@@ -1,0 +1,6 @@
+/target
+/dist
+/appimage-build
+/appimage-thin
+*.AppImage
+appimagetool

@@ -1,0 +1,14 @@
+[package]
+name = "tinkerpro-support"
+version = "0.1.0"
+edition = "2021"
+description = "TinkerPro Support desktop client (bare WebKitGTK)"
+authors = ["TinkerPro"]
+
+[[bin]]
+name = "tinkerpro-support"
+path = "src/main.rs"
+
+[dependencies]
+gtk = "0.18"
+webkit2gtk = { version = "2.0", features = ["v2_40"] }
