@@ -91,6 +91,16 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
   bool _setupBusy = false;
   String? _setupError;
 
+  // Standalone install (installer "Standalone" mode): this PC is both
+  // the POS server and the only register. We only ever look at the
+  // local XAMPP; when there isn't one we ask for the shop name alone —
+  // no host/port, no VAT/TIN — and remember it.
+  late final bool _standalone = widget.store.isPosStandalone;
+  bool _needsShopName = false;
+  final _shopName = TextEditingController();
+  bool _shopNameBusy = false;
+  String? _shopNameError;
+
   /// Periodic silent retry while we're sitting on cached / fallback data.
   /// Heals a transient LAN / DB hiccup without forcing the user to tap
   /// Retry. Cancelled the moment we hit live POS data or the screen is
@@ -120,6 +130,32 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
     }
     final cached = widget.store.cachedShop;
     final hasManual = widget.store.hasPosManualTarget;
+
+    // Standalone: only ever probe the local XAMPP. Show cached shop
+    // instantly if we have one (and silently re-read the local DB),
+    // otherwise run the local-only lookup which either finds the local
+    // POS, reuses a previously-typed shop name, or asks for one.
+    if (_standalone) {
+      if (cached != null) {
+        _shop = ShopInfo(
+          businessName: cached.businessName.isNotEmpty
+              ? cached.businessName
+              : (widget.store.storeName ?? ''),
+          vatReg: cached.vatReg,
+          vatLabel: cached.vatLabel,
+          tin: cached.tin,
+          email: cached.email,
+          fullName: cached.fullName,
+        );
+        _shopSource = 'cache';
+        _loadingShop = false;
+        _loadShop(silent: true);
+      } else {
+        _loadShop();
+      }
+      return;
+    }
+
     if (cached != null) {
       _shop = ShopInfo(
         businessName: cached.businessName.isNotEmpty
@@ -152,6 +188,7 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
     _description.dispose();
     _setupHost.dispose();
     _setupPort.dispose();
+    _shopName.dispose();
     super.dispose();
   }
 
@@ -199,6 +236,10 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
   }
 
   Future<void> _loadShop({bool silent = false}) async {
+    if (_standalone) {
+      await _loadStandaloneShop(silent: silent);
+      return;
+    }
     if (!silent) {
       setState(() {
         _loadingShop = true;
@@ -303,6 +344,121 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
       await widget.store.saveCachedShop(_shop!);
       _stopSilentRetryTimer();
     }
+  }
+
+  /// Standalone lookup: probe only the local XAMPP. On success use the
+  /// shop row; on failure fall back to a previously-saved shop name, or
+  /// (first run, no local DB) surface the shop-name-only form. Never
+  /// shows a POS/DB error — "no local XAMPP is okay."
+  Future<void> _loadStandaloneShop({bool silent = false}) async {
+    if (!silent) {
+      setState(() {
+        _loadingShop = true;
+        _shopError = null;
+        _needsShopName = false;
+        _shopSource = 'pending';
+        _shopProgress = 'Looking for the local POS database…';
+      });
+    }
+
+    final pos = await _posShop.getLocalShopInfo(
+      onProgress: silent
+          ? null
+          : (s) {
+              if (!mounted) return;
+              setState(() => _shopProgress = s);
+            },
+    );
+    if (!mounted) return;
+
+    final posName = (pos?.businessName ?? '').trim();
+    if (pos != null && posName.isNotEmpty) {
+      final refreshed = ShopInfo(
+        businessName: posName,
+        vatReg: pos.vatReg,
+        vatLabel: pos.vatLabel,
+        tin: pos.tin,
+        email: '',
+        fullName: '',
+      );
+      await widget.store.saveCachedShop(refreshed);
+      if (!mounted) return;
+      setState(() {
+        _loadingShop = false;
+        _shop = refreshed;
+        _shopSource = 'pos';
+        _shopError = null;
+        _needsShopName = false;
+      });
+      return;
+    }
+
+    // No readable local POS. On a silent background re-check, leave the
+    // current view (cached shop / typed name) untouched.
+    if (silent) return;
+
+    final savedName = (widget.store.storeName ?? '').trim();
+    if (savedName.isNotEmpty) {
+      final info = ShopInfo(
+        businessName: savedName,
+        vatReg: 0,
+        vatLabel: 'Non-VAT',
+        tin: '',
+        email: '',
+        fullName: '',
+      );
+      setState(() {
+        _loadingShop = false;
+        _shop = info;
+        _shopSource = 'manual-name';
+        _shopError = null;
+        _needsShopName = false;
+      });
+      return;
+    }
+
+    // First run, no local XAMPP and no saved name — ask for the shop
+    // name (and nothing else).
+    _shopName.text = savedName;
+    setState(() {
+      _loadingShop = false;
+      _shop = null;
+      _shopError = null;
+      _needsShopName = true;
+    });
+  }
+
+  /// Save the standalone shop name and adopt it as the ticket's
+  /// business identity. No VAT/TIN/host — a standalone shop only needs
+  /// its name on the ticket.
+  Future<void> _saveShopName() async {
+    final name = _shopName.text.trim();
+    if (name.isEmpty) {
+      setState(() => _shopNameError = 'Enter your shop name.');
+      return;
+    }
+    setState(() {
+      _shopNameBusy = true;
+      _shopNameError = null;
+    });
+    await widget.store.saveStoreName(name);
+    final info = ShopInfo(
+      businessName: name,
+      vatReg: 0,
+      vatLabel: 'Non-VAT',
+      tin: '',
+      email: '',
+      fullName: '',
+    );
+    await widget.store.saveCachedShop(info);
+    if (!mounted) return;
+    setState(() {
+      _shopNameBusy = false;
+      _needsShopName = false;
+      _shop = info;
+      _shopSource = 'manual-name';
+      _shopError = null;
+    });
   }
 
   Future<void> _saveSetupAndConnect() async {
@@ -1024,13 +1180,15 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
       // the sync QR; never the host/port "server setup" panel.
       child: kIsMobilePlatform
           ? _includedMobile()
-          : _needsSetup
-              ? _buildSetupPanel()
-              : _loadingShop
-                  ? _includedLoading()
-                  : _shop == null
-                      ? _includedError()
-                      : _includedDataGrid(),
+          : _needsShopName
+              ? _buildShopNamePanel()
+              : _needsSetup
+                  ? _buildSetupPanel()
+                  : _loadingShop
+                      ? _includedLoading()
+                      : _shop == null
+                          ? _includedError()
+                          : _includedDataGrid(),
     );
   }
 
@@ -1185,6 +1343,127 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
           ),
         ),
       ],
+    );
+  }
+
+  /// Standalone, no local XAMPP found: ask for the shop name and
+  /// nothing else. Deliberately minimal — no host, port, VAT, or TIN.
+  Widget _buildShopNamePanel() {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Brand.signal.withValues(alpha: 0.06),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: Brand.signal.withValues(alpha: 0.35)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 28,
+                height: 28,
+                decoration: BoxDecoration(
+                  color: Brand.signal.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(7),
+                ),
+                alignment: Alignment.center,
+                child: const Icon(
+                  Icons.storefront_outlined,
+                  size: 16,
+                  color: Brand.signal,
+                ),
+              ),
+              const SizedBox(width: 10),
+              const Expanded(
+                child: Text(
+                  "What's your shop name?",
+                  style: TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 13,
+                    color: Brand.textPrimary,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            "We couldn't find a POS database on this PC — that's okay. "
+            "Just tell us your shop name and we'll add it to your ticket. "
+            "We'll remember it for next time.",
+            style: TextStyle(fontSize: 12, color: Brand.textMuted, height: 1.4),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _shopName,
+            enabled: !_shopNameBusy,
+            autofocus: true,
+            decoration: _inputDecoration("e.g. Juan's Store").copyWith(
+              labelText: 'Shop name',
+              floatingLabelBehavior: FloatingLabelBehavior.always,
+              isDense: true,
+            ),
+            textInputAction: TextInputAction.done,
+            onSubmitted: (_) => _saveShopName(),
+          ),
+          if (_shopNameError != null) ...[
+            const SizedBox(height: 10),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Icon(Icons.error_outline, size: 14, color: Brand.danger),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    _shopNameError!,
+                    style: const TextStyle(
+                        color: Brand.danger,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w500),
+                  ),
+                ),
+              ],
+            ),
+          ],
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              FilledButton.icon(
+                onPressed: _shopNameBusy ? null : _saveShopName,
+                icon: _shopNameBusy
+                    ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: Colors.white),
+                      )
+                    : const Icon(Icons.check, size: 16),
+                label: Text(_shopNameBusy ? 'Saving…' : 'Save'),
+                style: FilledButton.styleFrom(
+                  backgroundColor: Brand.signal,
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8)),
+                  textStyle: const TextStyle(
+                      fontSize: 13, fontWeight: FontWeight.w700),
+                ),
+              ),
+              const SizedBox(width: 6),
+              TextButton(
+                onPressed: _shopNameBusy ? null : _loadShop,
+                style: TextButton.styleFrom(
+                  foregroundColor: Brand.textMuted,
+                  textStyle: const TextStyle(
+                      fontSize: 12.5, fontWeight: FontWeight.w600),
+                ),
+                child: const Text('Look for local POS again'),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 

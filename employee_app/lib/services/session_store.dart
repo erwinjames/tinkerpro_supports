@@ -27,6 +27,7 @@ class SessionStore {
   static const _kPosPort          = 'pos_db_port';
   static const _kPosManualHost    = 'pos_db_manual_host';
   static const _kPosManualPort    = 'pos_db_manual_port';
+  static const _kPosStandalone    = 'pos_standalone';
   static const _kShopJson         = 'pos_shop_info_json';
   static const _kShopAt           = 'pos_shop_info_saved_at';
   static const _kHelpJson         = 'help_topics_json';
@@ -56,12 +57,16 @@ class SessionStore {
   }
 
   /// Look for `%PROGRAMDATA%\TinkerPro\pos_target.json` (written by
-  /// the Inno installer when the admin picks "Terminal" mode) and
-  /// copy `{host, port}` into the manual-target prefs if we don't
-  /// already have one. The installer runs elevated so it can write
-  /// to ProgramData; the app runs as the cashier and only needs
-  /// read access. Failure here is silent — discovery still works
-  /// as a fallback.
+  /// the Inno installer for "Terminal" and "Standalone" modes) and
+  /// copy `{host, port, mode}` into prefs if we don't already have a
+  /// target. The installer runs elevated so it can write to
+  /// ProgramData; the app runs as the cashier and only needs read
+  /// access. Failure here is silent — discovery still works as a
+  /// fallback.
+  ///
+  /// `mode == "standalone"` also flips [isPosStandalone] on, which
+  /// tells the ticket form to only look at the local XAMPP and, if
+  /// there isn't one, ask for the shop name instead of a LAN host.
   Future<void> _seedFromInstallerHint() async {
     if (!Platform.isWindows) return;
     if (hasPosManualTarget) return;
@@ -75,6 +80,10 @@ class SessionStore {
       final raw = await hintFile.readAsString();
       final decoded = jsonDecode(raw);
       if (decoded is! Map) return;
+      final mode = (decoded['mode'] ?? '').toString().trim().toLowerCase();
+      if (mode == 'standalone') {
+        await setPosStandalone(true);
+      }
       final host = (decoded['host'] ?? '').toString().trim();
       if (host.isEmpty) return;
       final port = int.tryParse((decoded['port'] ?? '3306').toString());
@@ -228,6 +237,20 @@ class SessionStore {
     await _prefs.setInt(_kPosManualPort, port ?? 3306);
   }
 
+  /// Standalone install (single PC = both POS server and register),
+  /// flagged by the installer via the `mode` field in the hint file.
+  /// When true the ticket form only probes the local XAMPP and, if it
+  /// isn't there, asks for the shop name instead of a LAN host/port.
+  bool get isPosStandalone => _prefs.getBool(_kPosStandalone) ?? false;
+
+  Future<void> setPosStandalone(bool value) async {
+    if (value) {
+      await _prefs.setBool(_kPosStandalone, true);
+    } else {
+      await _prefs.remove(_kPosStandalone);
+    }
+  }
+
   /// Last ShopInfo we successfully read from the POS MariaDB. Persisted
   /// so the ticket form can render business name + VAT label instantly on
   /// every open and refresh in the background, instead of paying the full
@@ -328,6 +351,7 @@ class SessionStore {
     await _prefs.remove(_kConvId);
     await _prefs.remove(_kPosManualHost);
     await _prefs.remove(_kPosManualPort);
+    await _prefs.remove(_kPosStandalone);
     await _prefs.remove(_kShopJson);
     await _prefs.remove(_kShopAt);
     await _prefs.remove(_kServerBaseUrl);

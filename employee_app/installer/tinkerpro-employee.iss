@@ -118,7 +118,7 @@ Type: filesandordirs; Name: "{app}\data"
 
 [Code]
 {
-  Two-mode setup wizard:
+  Three-mode setup wizard:
 
   - "Server" mode: this PC hosts the POS MariaDB. Installer detects
     XAMPP and runs setup-pos-and-run.ps1 silently to provision the
@@ -131,11 +131,16 @@ Type: filesandordirs; Name: "{app}\data"
     ticket form skips LAN discovery entirely and goes straight to
     the configured server with the build's tps_reader credentials.
 
-  Default is Server (matches the single-terminal install case, which
-  is the most common). On a silent install (/SILENT) the wizard pages
-  aren't shown but their defaults still apply — Server-mode auto-
-  detect XAMPP, no-op if absent. So existing silent installs keep
-  working without changes.
+  - "Standalone" mode: this PC is both the POS server AND the only
+    register (single-terminal shop). Installer provisions the local
+    XAMPP exactly like Server mode, then writes a pos_target.json
+    pointing at 127.0.0.1 so the app connects straight to the local
+    DB with no LAN discovery.
+
+  Default is Server (matches the multi-box install case). On a silent
+  install (/SILENT) the wizard pages aren't shown but their defaults
+  still apply — Server-mode auto-detect XAMPP, no-op if absent. So
+  existing silent installs keep working without changes.
 }
 
 var
@@ -149,10 +154,12 @@ begin
     'Setup mode',
     'Is this PC the POS server or a cashier terminal?',
     'Pick "Server" if this PC hosts the TinkerPro POS database (XAMPP).' + #13#10 +
-    'Pick "Terminal" if this is a cashier register that connects to a separate POS server over the LAN.',
+    'Pick "Terminal" if this is a cashier register that connects to a separate POS server over the LAN.' + #13#10 +
+    'Pick "Standalone" if this single PC is both the POS server and the only register.',
     True, False);
   SetupModePage.Add('Server  — this PC hosts the POS database');
   SetupModePage.Add('Terminal — cashier register, connects to a server on the LAN');
+  SetupModePage.Add('Standalone — this PC is both the server and the only register');
   SetupModePage.SelectedValueIndex := 0;
 
   TerminalServerPage := CreateInputQueryPage(
@@ -247,19 +254,10 @@ begin
   end;
 end;
 
-procedure WritePosTargetHint();
+procedure WriteHintFile(Host: String; PortInt: Integer; Mode: String);
 var
   TargetDir, TargetFile, Json: String;
-  Host, Port: String;
-  PortInt: Integer;
 begin
-  Host := Trim(TerminalServerPage.Values[0]);
-  Port := Trim(TerminalServerPage.Values[1]);
-  if Host = '' then begin
-    Log('Terminal mode: host blank — skipping hint write.');
-    Exit;
-  end;
-  PortInt := StrToIntDef(Port, 3306);
   if (PortInt <= 0) or (PortInt > 65535) then PortInt := 3306;
 
   TargetDir := ExpandConstant('{commonappdata}\TinkerPro');
@@ -271,16 +269,33 @@ begin
   end;
 
   TargetFile := TargetDir + '\pos_target.json';
-  // Minimal JSON — Flutter side parses {host: String, port: int}.
-  // No quoting of the host because we trim + the cashier can only
-  // enter a hostname or IP via the wizard (no embedded quotes).
-  Json := '{"host":"' + Host + '","port":' + IntToStr(PortInt) + '}';
+  // Minimal JSON — Flutter side parses {host: String, port: int, mode: String}.
+  // No quoting of the host because we trim + the host is either a
+  // wizard-entered hostname/IP (no embedded quotes) or a literal
+  // 127.0.0.1 for Standalone. `mode` lets the app tell a Standalone
+  // install (local-only, ask shop name if no XAMPP) apart from a
+  // Terminal one (LAN server, show the host/port setup panel).
+  Json := '{"host":"' + Host + '","port":' + IntToStr(PortInt) +
+          ',"mode":"' + Mode + '"}';
   if not SaveStringToFile(TargetFile, Json, False) then begin
     Log('Failed to write ' + TargetFile);
     Exit;
   end;
-  Log('Terminal mode: wrote POS target ' + Host + ':' + IntToStr(PortInt) +
-      ' to ' + TargetFile);
+  Log('Wrote POS target ' + Host + ':' + IntToStr(PortInt) +
+      ' (mode ' + Mode + ') to ' + TargetFile);
+end;
+
+procedure WritePosTargetHint();
+var
+  Host, Port: String;
+begin
+  Host := Trim(TerminalServerPage.Values[0]);
+  Port := Trim(TerminalServerPage.Values[1]);
+  if Host = '' then begin
+    Log('Terminal mode: host blank — skipping hint write.');
+    Exit;
+  end;
+  WriteHintFile(Host, StrToIntDef(Port, 3306), 'terminal');
 end;
 
 procedure ApplyPosSetup();
@@ -289,8 +304,17 @@ var
 begin
   Mode := SetupModePage.SelectedValueIndex;
   if Mode = 0 then begin
+    // Server — provision local XAMPP; the app finds it via discovery.
     ConfigurePosAsServer();
+  end else if Mode = 2 then begin
+    // Standalone — provision local XAMPP AND pin the app to the local
+    // DB so it skips LAN discovery on a single-terminal shop. The
+    // "standalone" mode tells the app to only look at the local XAMPP
+    // and, if there isn't one, just ask for the shop name.
+    ConfigurePosAsServer();
+    WriteHintFile('127.0.0.1', 3306, 'standalone');
   end else begin
+    // Terminal — write the LAN server address the cashier entered.
     WritePosTargetHint();
   end;
 end;

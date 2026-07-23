@@ -89,6 +89,53 @@ class PosShopService {
     );
   }
 
+  /// Standalone-install path: only look at the local XAMPP. Tries
+  /// `127.0.0.1` and `localhost` across every candidate port, in order,
+  /// and returns the first that answers with a readable `shop` row. No
+  /// LAN /24 sweep — a standalone PC is its own POS server, so there is
+  /// nothing on the network to find. Returns null (no error surfaced to
+  /// the user) when there's no local POS database; the caller then falls
+  /// back to the saved shop name or asks for it.
+  Future<ShopInfo?> getLocalShopInfo({
+    String? tin,
+    void Function(String status)? onProgress,
+  }) async {
+    _lastError = null;
+    _lastResult = null;
+    _resolvedHost = null;
+    _resolvedPort = null;
+    final cleanTin = (tin ?? '').replaceAll(RegExp(r'[^0-9]'), '');
+
+    // Compile-time pin still wins, same as getShopInfo.
+    if (_config.host.isNotEmpty) {
+      onProgress?.call(
+          'Using configured POS host ${_config.host}:${_config.port}…');
+      final pinned = await _readShop(_config.host, _config.port, cleanTin);
+      if (pinned != null) {
+        _resolvedHost = _config.host;
+        _resolvedPort = _config.port;
+      }
+      return pinned;
+    }
+
+    const localHosts = ['127.0.0.1', 'localhost'];
+    for (final port in _config.ports) {
+      for (final host in localHosts) {
+        onProgress?.call('Looking for the local POS on $host:$port…');
+        final result = await _readShop(host, port, cleanTin);
+        if (result != null) {
+          _resolvedHost = host;
+          _resolvedPort = port;
+          await _discovery.cacheTarget(host, port);
+          return result;
+        }
+      }
+    }
+    // Nothing local answered. Not an error for a standalone shop — the
+    // POS DB simply isn't installed / running on this box yet.
+    return null;
+  }
+
   Future<ShopInfo?> getShopInfo({
     String? tin,
     List<String> hintHosts = const [],
