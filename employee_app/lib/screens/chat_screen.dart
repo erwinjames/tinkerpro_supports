@@ -2160,6 +2160,21 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
   /// ticket #N (\"S\") as resolved…"). Parse those into structured
   /// records here so the renderer can show a clean centered badge
   /// instead of a regular bubble.
+  /// The employee never sees which individual agent it is — the whole support
+  /// team is just "Support". Rewrite system messages that embed an agent's
+  /// name before they're shown. (Ticket accept/resolve badges are already
+  /// generic; this covers the plain remote-session note the server stamps with
+  /// the agent's name.)
+  String _maskAgentName(String body) {
+    if (body.contains('Remote session ended by ')) {
+      return body.replaceFirst(
+        RegExp(r'Remote session ended by [^\n]*'),
+        'Remote session ended by support.',
+      );
+    }
+    return body;
+  }
+
   _TicketEvent? _detectTicketEvent(String body) {
     if (body.isEmpty) return null;
     // Submitted — line 1 is "🎫 Ticket #N submitted: <subject>".
@@ -2265,7 +2280,7 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
       child: Column(
         crossAxisAlignment: align,
         children: [
-          ..._renderBodyWithQuote(m.body, mine, fg, text, m.senderId),
+          ..._renderBodyWithQuote(_maskAgentName(m.body), mine, fg, text, m.senderId),
           if (m.attachments.isNotEmpty)
             ..._renderAttachments(m, mine, text),
         ],
@@ -2622,7 +2637,8 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
         Icons.task_alt_outlined,
         Brand.success,
         'Ticket ${fmtTicketNo(ev.id)} resolved',
-        ev.agentName.isEmpty ? null : 'by ${ev.agentName}',
+        // Privacy: never surface the agent's username — always "by support".
+        'by support',
       ),
     };
 
@@ -2755,13 +2771,9 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
   /// the Linux GTK shell on this build, so we render the prompt right
   /// in the message stream where it can't be missed or hidden.
   Widget _buildRemoteRequestCard(ChatMessage m, TextTheme text) {
-    String inviterName = 'Admin';
-    for (final p in _info.participants) {
-      if (p.userId == m.senderId && p.fullName.isNotEmpty) {
-        inviterName = p.fullName;
-        break;
-      }
-    }
+    // The employee never sees which individual agent it is — the whole team is
+    // just "Support". (m.senderId identifies the agent internally for the RustDesk
+    // handoff, but their name is never surfaced here.)
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
       child: Align(
@@ -2785,7 +2797,7 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
-                      '$inviterName wants remote access',
+                      'Support wants remote access',
                       style: text.titleSmall,
                     ),
                   ),
