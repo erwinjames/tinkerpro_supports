@@ -6,6 +6,8 @@
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
     <!-- Camera: QR-code sync scanning + video calls to support. -->
     <uses-permission android:name="android.permission.CAMERA"/>
+    <!-- Android 13+ runtime permission for support-chat notifications. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <!-- Microphone + audio routing for voice/video calls (flutter_webrtc). -->
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>

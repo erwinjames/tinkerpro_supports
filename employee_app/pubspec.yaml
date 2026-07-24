@@ -1,7 +1,7 @@
 name: employee_app
 description: "TinkerPro employee desktop client — text chat + voice/video calls to admin support, identified by store name."
 publish_to: 'none'
-version: 1.0.12+13
+version: 1.0.13+14
 
 environment:
   sdk: ^3.5.0
@@ -59,6 +59,18 @@ dependencies:
     path: third_party/mysql_client_patched
   qr_flutter: ^4.1.0
   flutter_zxing: ^2.3.0
+
+  # OS/system notifications so the cashier sees a support-agent chat even
+  # when the app is minimized / they're on another screen. Two packages
+  # because no single plugin covers both targets:
+  #   • flutter_local_notifications — Android/iOS (mobile APK)
+  #   • local_notifier             — Windows/Linux/macOS (POS desktop),
+  #     same leanflutter family as window_manager which already builds
+  #     cleanly on our Windows CI.
+  # Both are wrapped behind services/os_notifications.dart and gated by
+  # platform_info so only the right one is touched per build.
+  flutter_local_notifications: ^22.1.0
+  local_notifier: ^0.1.6
 
 dev_dependencies:
   flutter_test:

@@ -25,6 +25,7 @@ import '../services/lan_presence.dart';
 import '../services/remote_access_service.dart';
 import '../services/ringtone_service.dart';
 import '../services/session_store.dart';
+import '../services/support_notifier.dart';
 import '../services/ticket_service.dart';
 import '../theme.dart';
 import 'call_screen.dart';
@@ -222,6 +223,11 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
   void initState() {
     super.initState();
     _info = widget.info;
+    // We're now looking at the thread: clear the unread badge and stop
+    // the global SupportNotifier from firing banners / OS toasts /
+    // pings — this screen surfaces incoming messages inline and plays
+    // its own chime. Reset on dispose so alerts resume once we leave.
+    SupportNotifier.instance.chatOpen = true;
     _loadHistory();
     _msgSub = widget.realtime.messageEvents.listen(_onIncoming);
     _inviteSub =
@@ -256,6 +262,8 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
 
   @override
   void dispose() {
+    // Leaving the thread — let the global notifier alert again.
+    SupportNotifier.instance.chatOpen = false;
     if (_isDesktop) {
       windowManager.removeListener(this);
       // Always release on tear-down — a parent route (HelpGuide /
@@ -390,6 +398,20 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
           scopedStart = m.persistedId;
           break;
         }
+      }
+      // No "🎫 Ticket #N submitted" bubble for this ticket in the
+      // conversation (e.g. a ticket filed via the customer-ticket web form,
+      // which never posted a chat bubble). Start a FRESH scope — anchor past
+      // the newest existing message so the store's prior backlog stays hidden
+      // and only messages from here forward show — instead of dumping the
+      // whole conversation history.
+      if (scopedStart == null) {
+        var maxId = 0;
+        for (final m in list) {
+          final pid = m.persistedId ?? 0;
+          if (pid > maxId) maxId = pid;
+        }
+        scopedStart = maxId + 1;
       }
     }
     final start = scopedStart;

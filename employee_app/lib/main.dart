@@ -11,8 +11,10 @@ import 'services/chat_realtime.dart';
 import 'services/chat_service.dart';
 import 'services/lan_presence.dart';
 import 'services/pos_shop_service.dart';
+import 'services/os_notifications.dart';
 import 'services/remote_access_service.dart';
 import 'services/session_store.dart';
+import 'services/support_notifier.dart';
 import 'services/ticket_service.dart' show ShopInfo;
 import 'screens/ai_chat_screen.dart';
 import 'screens/chat_screen.dart';
@@ -44,6 +46,9 @@ Future<void> main() async {
       await windowManager.focus();
     });
   }
+  // Register the OS/system notification backend early (desktop needs the
+  // AppUserModelID shortcut in place before the first toast). Best-effort.
+  await OsNotifications.instance.init();
   final store = await SessionStore.open();
   // Mobile adopts the server URL scanned from the desktop's sync QR; desktop
   // leaves this null and uses the compile-time TPS_BASE_URL default.
@@ -219,6 +224,7 @@ class _BootstrapState extends State<_Bootstrap> with WidgetsBindingObserver {
     try {
       await _realtime?.dispose();
     } catch (_) {}
+    SupportNotifier.instance.detach();
     _lan?.stop();
     try {
       await _api.wipeCookies();
@@ -347,6 +353,18 @@ class _BootstrapState extends State<_Bootstrap> with WidgetsBindingObserver {
       shadowUserId: info.meId,
       conversationId: info.conversationId,
     );
+
+    // Watch this store's conversation for agent messages so the cashier
+    // is alerted (badge + banner + sound + OS toast) even when they're on
+    // the AI landing or the app is minimized. onOpenChat is wired by the
+    // landing screen, which owns the deps needed to push the chat route.
+    SupportNotifier.instance.attach(
+      realtime: realtime,
+      meId: info.meId,
+      convId: info.conversationId,
+    );
+    OsNotifications.instance.onTap =
+        () => SupportNotifier.instance.onOpenChat?.call();
 
     // Same-store LAN discovery for the chat's "Add participant" picker.
     final lan = LanPresence(userId: info.meId, storeName: info.storeName);

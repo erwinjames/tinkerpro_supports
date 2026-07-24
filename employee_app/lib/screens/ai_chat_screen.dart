@@ -4,6 +4,7 @@ import 'dart:math';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:window_manager/window_manager.dart';
 
 import '../api_client.dart';
 import '../services/call_service.dart';
@@ -11,6 +12,7 @@ import '../services/chat_realtime.dart';
 import '../services/chat_service.dart';
 import '../services/lan_presence.dart';
 import '../services/session_store.dart';
+import '../services/support_notifier.dart';
 import '../services/ticket_service.dart';
 import '../services/tinker_chat_service.dart';
 import '../platform_info.dart';
@@ -82,17 +84,86 @@ class _AiChatScreenState extends State<AiChatScreen> {
     'Apply a discount',
   ];
 
+  // Mirrors SupportNotifier.unread so we can tell an increment (new agent
+  // message → drop a banner) from a decrement (badge cleared on open).
+  int _lastSeenUnread = 0;
+
   @override
   void initState() {
     super.initState();
     _seedGreeting();
+    // This screen is the persistent landing route, so it owns the
+    // "open the support chat" action a notification tap triggers, and it
+    // listens for unread changes to paint the header badge + banner.
+    _lastSeenUnread = SupportNotifier.instance.unread;
+    SupportNotifier.instance.onOpenChat = _openSupportChat;
+    SupportNotifier.instance.addListener(_onSupportChange);
   }
 
   @override
   void dispose() {
+    SupportNotifier.instance.removeListener(_onSupportChange);
+    if (SupportNotifier.instance.onOpenChat == _openSupportChat) {
+      SupportNotifier.instance.onOpenChat = null;
+    }
     _input.dispose();
     _scroll.dispose();
     super.dispose();
+  }
+
+  void _onSupportChange() {
+    if (!mounted) return;
+    final n = SupportNotifier.instance;
+    final increased = n.unread > _lastSeenUnread;
+    _lastSeenUnread = n.unread;
+    setState(() {}); // repaint the header/chat-entry badge
+    // Only drop an in-app banner when a NEW message arrived and this
+    // landing screen is the one on top (the chat screen, when pushed,
+    // shows messages inline and sets chatOpen so this won't fire).
+    if (increased && n.unread > 0 && (ModalRoute.of(context)?.isCurrent ?? false)) {
+      _showSupportBanner(n.lastMessage?.body ?? '');
+    }
+  }
+
+  void _showSupportBanner(String body) {
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.clearSnackBars();
+    messenger.showSnackBar(SnackBar(
+      backgroundColor: Brand.signal,
+      behavior: SnackBarBehavior.floating,
+      duration: const Duration(seconds: 6),
+      content: Row(
+        children: [
+          const Icon(Icons.chat_bubble, color: Colors.white, size: 18),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Support sent you a message',
+                    style: TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w700,
+                        fontSize: 13.5)),
+                if (body.trim().isNotEmpty)
+                  Text(
+                    SupportNotifier.messagePreview(body),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: Colors.white, fontSize: 12.5),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+      action: SnackBarAction(
+        label: 'Open',
+        textColor: Colors.white,
+        onPressed: _openSupportChat,
+      ),
+    ));
   }
 
   static String _newSessionId() {
@@ -348,7 +419,61 @@ class _AiChatScreenState extends State<AiChatScreen> {
     setState(() {});
   }
 
-  Future<void> _submitTicket() async {
+  /// Entry point behind the "Submit ticket" button. Instead of jumping
+  /// straight into the ticket form, ask the cashier how they'd like to
+  /// reach support: file a formal ticket, or just open a live chat with
+  /// an agent (where they can also read their previous conversations).
+  Future<void> _chooseSupportPath() async {
+    final choice = await showModalBottomSheet<_SupportPath>(
+      context: context,
+      backgroundColor: Brand.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => _SupportPathSheet(unread: SupportNotifier.instance.unread),
+    );
+    if (choice == null || !mounted) return;
+    switch (choice) {
+      case _SupportPath.ticket:
+        await _openTicketForm();
+        break;
+      case _SupportPath.chat:
+        await _openSupportChat();
+        break;
+    }
+  }
+
+  /// Open the store's live support conversation directly — no ticket.
+  /// Shows the full history (previous chats) and lets the cashier message
+  /// an agent right away. Also the target of a tapped notification, so it
+  /// foregrounds the window and no-ops if the chat is already open.
+  Future<void> _openSupportChat() async {
+    if (SupportNotifier.instance.chatOpen) return;
+    if (kIsDesktopPlatform) {
+      try {
+        await windowManager.show();
+        await windowManager.focus();
+      } catch (_) {}
+    }
+    SupportNotifier.instance.markAllRead();
+    if (!mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => EmployeeChatScreen(
+          api: widget.api,
+          chat: widget.chat,
+          realtime: widget.realtime,
+          calls: widget.calls,
+          lan: widget.lan,
+          store: widget.store,
+          info: widget.info,
+          onTicketClosed: (ctx) => Navigator.of(ctx).pop(),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openTicketForm() async {
     final tickets = TicketService(widget.api);
     final outcome = await Navigator.of(context).push<TicketSubmitOutcome>(
       MaterialPageRoute(
@@ -417,8 +542,9 @@ class _AiChatScreenState extends State<AiChatScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text(
-              'Enter the ticket number you were given (e.g. a ticket you '
-              'filed on the web). We\'ll open its support chat.',
+              'Enter a ticket number from this store\'s support to open its '
+              'chat. Tickets filed elsewhere (e.g. the public web chat) can\'t '
+              'be tracked here.',
               style: TextStyle(fontSize: 13),
             ),
             const SizedBox(height: 12),
@@ -461,11 +587,36 @@ class _AiChatScreenState extends State<AiChatScreen> {
       _snack('Ticket ${fmtTicketNo(id)} was not found.');
       return;
     }
+    // A ticket already bound to a DIFFERENT live chat — e.g. the public web
+    // login chatbox, which keeps its own standalone guest conversation —
+    // can't be tracked here; its accept/resolve events would never reach
+    // this app. A ticket with NO conversation yet (filed via the
+    // customer-ticket web form) is fine — we open it as a fresh chat below.
+    if (detail.conversationId != null &&
+        detail.conversationId != widget.info.conversationId) {
+      _snack(
+          'Ticket ${fmtTicketNo(id)} was filed in a different chat and can\'t be tracked here.');
+      return;
+    }
     // A resolved/closed ticket has no live chat to join — its accept/reply
     // events are done. Don't open it; just tell the employee it's closed.
     if (detail.isResolved) {
       _snack('Ticket ${fmtTicketNo(id)} is already resolved — nothing to open.');
       return;
+    }
+    // A ticket filed via the customer-ticket web form has no conversation
+    // yet — adopt it into THIS store's thread so the admin can Accept/Resolve
+    // it and those events reach this app. The server links the ticket and
+    // posts its "🎫 submitted" bubble, which the scoped chat then anchors on.
+    if (detail.conversationId == null) {
+      final adopted = await TicketService(widget.api)
+          .adoptTicket(detail.id, widget.info.conversationId);
+      if (!mounted) return;
+      if (!adopted) {
+        _snack(
+            'Couldn\'t open ticket ${fmtTicketNo(id)} right now. Please try again.');
+        return;
+      }
     }
     // Open into the support chat. The employee app always shows this store's
     // own thread, so we route there and scope to the ticket. Only a
@@ -555,7 +706,8 @@ class _AiChatScreenState extends State<AiChatScreen> {
         icon: Icons.headset_mic_outlined,
         label: 'Submit ticket',
         shortLabel: 'Submit',
-        onTap: _submitTicket,
+        onTap: _chooseSupportPath,
+        badge: SupportNotifier.instance.unread,
       ),
       // Desktop only — this is the device that generates the sync QR a
       // phone scans to sign in. The mobile build never shows it.
@@ -576,6 +728,7 @@ class _AiChatScreenState extends State<AiChatScreen> {
           icon: actions[i].icon,
           label: actions[i].label,
           onTap: actions[i].onTap,
+          badge: actions[i].badge,
         ));
       }
       return out;
@@ -599,6 +752,7 @@ class _AiChatScreenState extends State<AiChatScreen> {
                   icon: actions[i].icon,
                   label: actions[i].shortLabel,
                   onTap: actions[i].onTap,
+                  badge: actions[i].badge,
                 ),
               ));
             }
@@ -648,7 +802,7 @@ class _AiChatScreenState extends State<AiChatScreen> {
           onSuggestion: _send,
           showActions: m.showActions,
           onOpenGuide: _openHelpArticles,
-          onFileTicket: _submitTicket,
+          onFileTicket: _openTicketForm,
           showSetApiKey: m.showSetApiKey,
           onSetApiKey: _setApiKey,
         );
@@ -757,12 +911,16 @@ class _HeaderAction {
     required this.label,
     required this.shortLabel,
     required this.onTap,
+    this.badge = 0,
   });
 
   final IconData icon;
   final String label;
   final String shortLabel;
   final VoidCallback onTap;
+
+  /// Unread-count badge painted on the button (0 = none).
+  final int badge;
 }
 
 /// Phone-width header action: icon stacked over a short label, sized by
@@ -772,11 +930,13 @@ class _MobileActionTile extends StatelessWidget {
     required this.icon,
     required this.label,
     required this.onTap,
+    this.badge = 0,
   });
 
   final IconData icon;
   final String label;
   final VoidCallback onTap;
+  final int badge;
 
   @override
   Widget build(BuildContext context) {
@@ -795,7 +955,7 @@ class _MobileActionTile extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(icon, size: 20, color: Brand.signal),
+              _IconWithBadge(icon: icon, size: 20, badge: badge),
               const SizedBox(height: 4),
               Text(
                 label,
@@ -815,16 +975,68 @@ class _MobileActionTile extends StatelessWidget {
   }
 }
 
+/// An icon with a small red unread-count badge in its top-right corner.
+/// Badge hidden when [badge] is 0; caps the printed count at "9+".
+class _IconWithBadge extends StatelessWidget {
+  const _IconWithBadge({
+    required this.icon,
+    required this.size,
+    required this.badge,
+    this.color = Brand.signal,
+  });
+
+  final IconData icon;
+  final double size;
+  final int badge;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        Icon(icon, size: size, color: color),
+        if (badge > 0)
+          Positioned(
+            right: -6,
+            top: -5,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+              constraints: const BoxConstraints(minWidth: 16),
+              decoration: BoxDecoration(
+                color: Brand.danger,
+                borderRadius: BorderRadius.circular(9),
+                border: Border.all(color: Brand.canvas, width: 1.5),
+              ),
+              child: Text(
+                badge > 9 ? '9+' : '$badge',
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 10,
+                  height: 1.1,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
 class _HeaderButton extends StatelessWidget {
   const _HeaderButton({
     required this.icon,
     required this.label,
     required this.onTap,
+    this.badge = 0,
   });
 
   final IconData icon;
   final String label;
   final VoidCallback onTap;
+  final int badge;
 
   @override
   Widget build(BuildContext context) {
@@ -843,7 +1055,8 @@ class _HeaderButton extends StatelessWidget {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(icon, size: 17, color: Brand.textPrimary),
+              _IconWithBadge(
+                  icon: icon, size: 17, badge: badge, color: Brand.textPrimary),
               const SizedBox(width: 8),
               Text(
                 label,
@@ -1300,6 +1513,151 @@ class _TypingIndicatorState extends State<_TypingIndicator>
       decoration: BoxDecoration(
         color: Brand.textMuted.withValues(alpha: 0.35 + pulse * 0.45),
         shape: BoxShape.circle,
+      ),
+    );
+  }
+}
+
+/// Which path the cashier picked from the "how do you want to reach
+/// support?" sheet.
+enum _SupportPath { ticket, chat }
+
+/// Bottom sheet shown when the cashier taps "Submit ticket": choose
+/// between filing a formal ticket or opening a live chat with an agent
+/// (which also shows their previous conversations). The chat option
+/// carries the unread badge so a waiting reply is obvious here too.
+class _SupportPathSheet extends StatelessWidget {
+  const _SupportPathSheet({required this.unread});
+
+  final int unread;
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 14, 20, 20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Center(
+              child: Container(
+                width: 40,
+                height: 4,
+                margin: const EdgeInsets.only(bottom: 16),
+                decoration: BoxDecoration(
+                  color: Brand.stroke,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+            const Text(
+              'How can we help?',
+              style: TextStyle(
+                fontSize: 17,
+                fontWeight: FontWeight.w700,
+                color: Brand.textPrimary,
+              ),
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              'File a ticket for something that needs tracking, or chat with '
+              'an agent now.',
+              style: TextStyle(fontSize: 13, color: Brand.textMuted),
+            ),
+            const SizedBox(height: 16),
+            _SupportPathCard(
+              icon: Icons.confirmation_number_outlined,
+              title: 'File a ticket',
+              subtitle: 'Log an issue with priority — we\'ll track it to a fix.',
+              onTap: () => Navigator.of(context).pop(_SupportPath.ticket),
+            ),
+            const SizedBox(height: 12),
+            _SupportPathCard(
+              icon: Icons.chat_bubble_outline,
+              title: 'Chat with support',
+              subtitle: 'Talk to an agent now and read your previous chats.',
+              badge: unread,
+              onTap: () => Navigator.of(context).pop(_SupportPath.chat),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SupportPathCard extends StatelessWidget {
+  const _SupportPathCard({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.onTap,
+    this.badge = 0,
+  });
+
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final VoidCallback onTap;
+  final int badge;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Brand.canvas,
+      borderRadius: BorderRadius.circular(14),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(14),
+        child: Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            border: Border.all(color: Brand.stroke),
+            borderRadius: BorderRadius.circular(14),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 44,
+                height: 44,
+                decoration: BoxDecoration(
+                  color: Brand.signal.withValues(alpha: 0.10),
+                  borderRadius: BorderRadius.circular(11),
+                ),
+                alignment: Alignment.center,
+                child: _IconWithBadge(icon: icon, size: 22, badge: badge),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: const TextStyle(
+                        fontSize: 14.5,
+                        fontWeight: FontWeight.w700,
+                        color: Brand.textPrimary,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      subtitle,
+                      style: const TextStyle(
+                        fontSize: 12.5,
+                        color: Brand.textMuted,
+                        height: 1.35,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              const Icon(Icons.chevron_right, color: Brand.textMuted, size: 22),
+            ],
+          ),
+        ),
       ),
     );
   }
