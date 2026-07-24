@@ -157,6 +157,105 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
   /// mode so legacy unscoped chat keeps its existing behavior.
   bool _ticketAccepted = false;
 
+  /// True once the newest ticket on this thread has been marked resolved by
+  /// an admin. Locks the composer (read-only banner) and greys the header
+  /// actions so the employee can't keep chatting on a closed ticket — the
+  /// same rule the web guest panel and admin composer enforce. Unlike the
+  /// scoped resolved-navigation, this also covers the unscoped main support
+  /// thread, where there's no route to bounce back to. Cleared when a fresh
+  /// ticket is filed/accepted (a new active ticket reopens the chat).
+  bool _ticketResolved = false;
+
+  /// The chat is closed to new input when opened onto an already-resolved
+  /// ticket OR the tracked ticket has just been resolved live.
+  bool get _chatClosed => widget.initiallyResolved || _ticketResolved;
+
+  /// Ticket # this screen tracks, for the status poll. Set in _loadHistory.
+  int? _pollTicketNo;
+
+  /// Polls the tracked ticket's real status so live accept/resolve transitions
+  /// land even when the announcement bubbles never reach this client (they're
+  /// unreliable). Stops once the ticket is resolved (terminal) or on dispose.
+  Timer? _ticketPoll;
+
+  void _startTicketPolling() {
+    if (_ticketPoll != null || _pollTicketNo == null) return;
+    // Keep polling even after the ticket resolves: an agent can RE-ENGAGE a
+    // resolved ticket from the web (reopens it → in_progress), and the employee
+    // should unlock live. The poll only stops on dispose. Acts on transitions.
+    _ticketPoll = Timer.periodic(const Duration(seconds: 5), (_) async {
+      if (!mounted || _pollTicketNo == null) return;
+      final st = await widget.chat.ticketStatus(_pollTicketNo!);
+      if (!mounted || st == null) return;
+      final status = (st['status'] ?? '').toString().toLowerCase();
+      if (status.isEmpty) return;
+      if (status == 'resolved' || status == 'closed') {
+        if (!_ticketResolved) _handleTicketResolved(); // transition → lock/bounce
+      } else if (status == 'in_progress' || status == 'assigned') {
+        if (_ticketResolved || !_ticketAccepted) {
+          setState(() {
+            _ticketResolved = false;
+            _ticketAccepted = true; // (re)claimed → composer unlocks live
+          });
+        }
+      } else if (status == 'new') {
+        if (_ticketResolved || (_scopedTicketId != null && _ticketAccepted)) {
+          setState(() {
+            _ticketResolved = false;
+            if (_scopedTicketId != null) _ticketAccepted = false;
+          });
+        }
+      }
+    });
+  }
+
+  /// The tracked ticket is resolved: lock the composer AND — if this screen was
+  /// opened with a close callback (the scoped/live ticket flow) — bounce back to
+  /// the caller (the AI/chatbot screen), so the cashier isn't stranded in a
+  /// read-only thread. Driven by the authoritative status (poll / send-response
+  /// / bubble), not just the "resolved" announcement bubble which may never
+  /// arrive. Guarded by [_closedFromResolution] so it fires exactly once;
+  /// review mode (initiallyResolved) sets that flag up front so it stays put.
+  void _handleTicketResolved({String? agentName, int? ticketNo}) {
+    if (!mounted) return;
+    final firstTime = !_ticketResolved;
+    setState(() => _ticketResolved = true);
+    if (_closedFromResolution || widget.onTicketClosed == null) return;
+    _closedFromResolution = true;
+    unawaited(widget.store.clearPendingTicket());
+    unawaited(_applyWindowLock(false));
+    if (firstTime) {
+      final who = (agentName != null && agentName.isNotEmpty) ? agentName : 'support';
+      final no = ticketNo ?? _scopedTicketId ?? _pollTicketNo;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(no != null
+            ? 'Ticket ${fmtTicketNo(no)} resolved by $who.'
+            : 'Ticket resolved by $who.'),
+        duration: const Duration(seconds: 2),
+      ));
+    }
+    // Let the snackbar register before tearing the route down.
+    Future<void>.delayed(const Duration(milliseconds: 900), () {
+      if (!mounted) return;
+      widget.onTicketClosed!(context);
+    });
+  }
+
+  /// Fold a ticket lifecycle event into [_ticketResolved]: a resolved event
+  /// closes the chat; a fresh submit/accept reopens it. Called for every
+  /// ticket bubble in history and every live one, in all modes.
+  void _applyTicketLifecycle(_TicketEvent ev) {
+    switch (ev.kind) {
+      case _TicketEventKind.resolved:
+        _ticketResolved = true;
+        break;
+      case _TicketEventKind.submitted:
+      case _TicketEventKind.accepted:
+        _ticketResolved = false;
+        break;
+    }
+  }
+
   /// id of the message currently being hovered. Drives the
   /// fade-in/out of the inline ⋮ action button next to each bubble
   /// (mouse-only — long-press has been removed in favour of the
@@ -278,6 +377,7 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
     _pinnedSub?.cancel();
     _presenceAutoClear?.cancel();
     _highlightClearTimer?.cancel();
+    _ticketPoll?.cancel();
     navigator.mediaDevices.ondevicechange = null;
     widget.calls.removeListener(_onCallChange);
     _composer.dispose();
@@ -469,19 +569,58 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
       }
     }
     _ticketAccepted = initiallyAccepted;
+    // First pass: derive a fast initial state from ticket bubbles in history
+    // (resolved→lock, submit/accept→open). scoped is oldest→newest so the last
+    // ticket event wins; also remember the newest ticket # for the fetch below.
+    int? latestBubbleTicketNo;
+    for (final m in scoped) {
+      final ev = _detectTicketEvent(m.body);
+      if (ev != null) {
+        _applyTicketLifecycle(ev);
+        latestBubbleTicketNo = ev.id;
+      }
+    }
+    // Authoritative pass: ask the server for the CURRENT status of the ticket
+    // this chat is about. The "accepted"/"resolved" announcement bubbles don't
+    // reliably reach this client, and info.ticketStatus is only a launch-time
+    // snapshot (stale the moment a new ticket is filed) — both caused wrong
+    // states (resumed-unlocked-after-resolve, and stuck "waiting to accept"
+    // after an accept). getTicketsByIds is the source of truth. Falls back to
+    // the launch snapshot only if the lookup fails.
+    final currentTicketNo = _scopedTicketId ?? latestBubbleTicketNo;
+    _pollTicketNo = currentTicketNo;
+    Map<String, dynamic>? liveTicket;
+    if (currentTicketNo != null) {
+      liveTicket = await widget.chat.ticketStatus(currentTicketNo);
+      if (!mounted) return;
+    }
+    final liveStatus =
+        (liveTicket?['status'] ?? '').toString().toLowerCase();
+    if (liveStatus == 'resolved' || liveStatus == 'closed') {
+      _ticketResolved = true;
+    } else if (liveStatus == 'in_progress' || liveStatus == 'assigned') {
+      _ticketResolved = false;
+      _ticketAccepted = true; // an agent has claimed it → composer opens
+    } else if (liveStatus == 'new') {
+      _ticketResolved = false;
+      // Unclaimed: the scoped "waiting for support" card should show.
+      if (_scopedTicketId != null) _ticketAccepted = false;
+    } else if (liveTicket == null && widget.info.isTicketClosed) {
+      // Lookup failed → fall back to the launch snapshot so a resolved ticket
+      // still locks rather than resuming open.
+      _ticketResolved = true;
+    }
     // Opened straight onto a resolved/closed ticket (entered by number):
     // mark it already-closed so the back-nav guard lets the user leave
     // and a stray live resolved event can't double-fire onTicketClosed.
     if (widget.initiallyResolved) {
       _closedFromResolution = true;
     }
-    // Warm-restart resolution check. If the ticket was resolved
-    // while the app was closed, the loaded history will contain a
-    // matching `✅ … as resolved` event; treat it the same way we
-    // would a live resolved event so the screen bounces back to
-    // Help Guide instead of stranding the user in a closed chat.
-    // The waiting-card pointer is wiped here too — closed tickets
-    // are no longer pending.
+    // Warm-restart resolution check. If the ticket was already resolved when
+    // this screen opened (history carries a `✅ … as resolved` event), show it
+    // read-only for review — do NOT bounce away (the user tapped "Chat with
+    // support" to look at it; auto-closing the window was the bug). Mark it
+    // handled + drop the pending pointer so no live event re-fires a nav.
     if (anchor != null && _scopedTicketId != null) {
       for (final m in scoped) {
         final ev = _detectTicketEvent(m.body);
@@ -489,16 +628,9 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
             ev.kind == _TicketEventKind.resolved &&
             ev.id == _scopedTicketId) {
           _closedFromResolution = true;
+          _ticketResolved = true;
           unawaited(widget.store.clearPendingTicket());
-          // Defer the navigation until after the first frame so we
-          // don't pop a route mid-build. The user sees the chat
-          // briefly before the bounce; that's fine — it's the same
-          // visual sequence as the live resolved path.
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (!mounted) return;
-            unawaited(_applyWindowLock(false));
-            widget.onTicketClosed?.call(context);
-          });
+          unawaited(_applyWindowLock(false));
           break;
         }
       }
@@ -525,6 +657,14 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
       _loading = false;
     });
     _scrollToBottom();
+    // Already resolved when the screen OPENS (e.g. the user tapped "Chat with
+    // support" to review a closed ticket) → show it read-only, do NOT bounce
+    // away (mark it handled so a later event can't fire a navigation). A resolve
+    // that happens WHILE viewing an active chat DOES bounce back (see
+    // _handleTicketResolved, driven by the poll). Always poll: an agent can
+    // re-engage a resolved ticket from the web, and the employee unlocks live.
+    if (_ticketResolved) _closedFromResolution = true;
+    _startTicketPolling();
   }
 
   void _onIncoming(ChatMessage m) {
@@ -540,6 +680,14 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
       // /remote messages are rendered as interactive cards inline in
       // the chat (see _buildBubble). No dialog needed — user just
       // taps Allow/Deny on the bubble itself.
+
+      // Composer lock, all modes: a live resolve closes the chat; a fresh
+      // submit/accept reopens it. Keeps the unscoped main support thread in
+      // sync (the scoped resolved-navigation below only covers scoped chats).
+      {
+        final lifeEv = _detectTicketEvent(m.body);
+        if (lifeEv != null) _applyTicketLifecycle(lifeEv);
+      }
 
       // Ticket-accepted unlock. While we're in scoped mode and the
       // ticket hasn't been accepted yet, the composer is replaced by
@@ -566,38 +714,13 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
         }
       }
 
-      // Ticket-resolved auto-close. When the admin marks the ticket
-      // this scoped chat is tracking as resolved, surface a brief
-      // confirmation and bounce the employee back to HelpGuideScreen
-      // via the parent-supplied callback. Skip when unscoped (full
-      // history mode), when the ids don't match (a different
-      // ticket's resolution), or when we've already closed once.
-      if (!_closedFromResolution &&
-          _scopedTicketId != null &&
-          widget.onTicketClosed != null) {
+      // Ticket-resolved auto-close: a live "resolved" bubble bounces the
+      // employee back to the chatbot (via _handleTicketResolved). The status
+      // poll drives the same path even if this bubble never arrives.
+      if (!_closedFromResolution) {
         final ev = _detectTicketEvent(m.body);
-        if (ev != null &&
-            ev.kind == _TicketEventKind.resolved &&
-            ev.id == _scopedTicketId) {
-          _closedFromResolution = true;
-          // Resolved → no longer pending; wipe the persisted pointer
-          // so the next launch lands on a fresh Help Guide.
-          unawaited(widget.store.clearPendingTicket());
-          // Also release the window lock if it's still engaged (the
-          // pathological "resolved before accepted" path).
-          unawaited(_applyWindowLock(false));
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text(
-              'Ticket ${fmtTicketNo(ev.id)} resolved by ${ev.agentName.isNotEmpty ? ev.agentName : "support"}.',
-            ),
-            duration: const Duration(seconds: 2),
-          ));
-          // Give the snackbar a beat to register before we tear the
-          // route down.
-          Future<void>.delayed(const Duration(milliseconds: 900), () {
-            if (!mounted) return;
-            widget.onTicketClosed!(context);
-          });
+        if (ev != null && ev.kind == _TicketEventKind.resolved) {
+          _handleTicketResolved(agentName: ev.agentName, ticketNo: ev.id);
         }
       }
     }
@@ -870,12 +993,15 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
       await _openTicketForm();
       return;
     }
-    // `/request` (or `@request`) — employee asks an admin to start a
-    // remote-desktop session. Drops a clearly-formatted message into
-    // the thread so the admin sees the ask + can respond with their
-    // existing `/remote` flow.
+    // Employee asks an admin to start a remote-desktop session. Accept
+    // `/request`, `@request`, and the intuitive `/remote` / `@remote` too
+    // (on the employee side there's nothing to target — it just means "please
+    // remote in", same as /request; the admin drives the actual `/remote @uid`
+    // from the request bubble). Drops a clearly-formatted ask into the thread.
     if (_isSlashCommand(text, '/request') ||
-        _isSlashCommand(text, '@request')) {
+        _isSlashCommand(text, '@request') ||
+        _isSlashCommand(text, '/remote') ||
+        _isSlashCommand(text, '@remote')) {
       _composer.clear();
       await _sendRemoteAccessRequest();
       return;
@@ -1006,6 +1132,12 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
         setState(() => _messages.add(msg));
         _scrollToBottom();
       }
+    } else if (msg == null && mounted && widget.chat.lastSendTicketClosed) {
+      // The ticket was resolved/closed server-side — lock (and bounce back to
+      // the chatbot) now, the authoritative signal in case the "resolved"
+      // bubble never landed. Keep the draft for a fresh ticket.
+      if (text.isNotEmpty) _composer.text = text;
+      _handleTicketResolved();
     }
   }
 
@@ -1661,29 +1793,29 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
           // POS box); the mobile APK hides this entirely.
           if (kIsDesktopPlatform)
             IconButton(
-              tooltip: widget.initiallyResolved
+              tooltip: _chatClosed
                   ? 'Ticket is resolved'
                   : (_ticketAccepted
                       ? 'Show remote-desktop password (for first-time setup)'
                       : 'Waiting for support to accept your ticket'),
               icon: const Icon(Icons.vpn_key_outlined),
-              onPressed: (_ticketAccepted && !widget.initiallyResolved)
+              onPressed: (_ticketAccepted && !_chatClosed)
                   ? _showRemotePasswordSheet
                   : null,
             ),
           IconButton(
-            tooltip: widget.initiallyResolved
+            tooltip: _chatClosed
                 ? 'Ticket is resolved'
                 : (_ticketAccepted
                     ? 'Add a colleague from this Wi-Fi'
                     : 'Waiting for support to accept your ticket'),
             icon: const Icon(Icons.person_add_alt_1),
-            onPressed: (_ticketAccepted && !widget.initiallyResolved)
+            onPressed: (_ticketAccepted && !_chatClosed)
                 ? _openAddParticipantSheet
                 : null,
           ),
           IconButton(
-            tooltip: widget.initiallyResolved
+            tooltip: _chatClosed
                 ? 'Ticket is resolved'
                 : (!_ticketAccepted
                     ? 'Waiting for support to accept your ticket'
@@ -1701,14 +1833,14 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
             // the video-call button below with the camera.
             onPressed:
                 (!_ticketAccepted ||
-                        widget.initiallyResolved ||
+                        _chatClosed ||
                         _colleagueInCall != null ||
                         _hasMic != true)
                     ? null
                     : () => _placeCall(CallMedia.voice),
           ),
           IconButton(
-            tooltip: widget.initiallyResolved
+            tooltip: _chatClosed
                 ? 'Ticket is resolved'
                 : (!_ticketAccepted
                     ? 'Waiting for support to accept your ticket'
@@ -1724,7 +1856,7 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
             // camera is found (_hasCamera == false); only a detected
             // camera (== true) enables it, alongside the existing gates.
             onPressed: (!_ticketAccepted ||
-                    widget.initiallyResolved ||
+                    _chatClosed ||
                     _colleagueInCall != null ||
                     _hasCamera != true)
                 ? null
@@ -3160,11 +3292,12 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
   }
 
   Widget _buildComposer() {
-    // Resolved-review mode (opened by ticket number for an already
-    // resolved/closed ticket): the thread is read-only — show a banner
-    // instead of the input so the employee can read the history but
-    // can't keep chatting on a closed ticket.
-    if (widget.initiallyResolved) {
+    // Resolved-review mode: the thread is read-only — show a banner instead
+    // of the input so the employee can read the history but can't keep
+    // chatting on a closed ticket. Covers both opening straight onto a
+    // resolved ticket (initiallyResolved) and a live resolve landing while
+    // the chat is open (_ticketResolved), including the main support thread.
+    if (_chatClosed) {
       return Container(
         decoration: const BoxDecoration(
           color: Brand.canvas,

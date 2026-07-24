@@ -321,6 +321,13 @@ class _BootstrapState extends State<_Bootstrap> with WidgetsBindingObserver {
       });
       return;
     }
+    // The store's latest ticket is already resolved/closed → don't resume back
+    // into that dead chat. Drop the pending pointer so we land on the home (AI)
+    // screen where the cashier can file a fresh ticket, instead of reopening a
+    // read-only thread. (Authoritative server status, not the resolve bubble.)
+    if (info.isTicketClosed) {
+      await widget.store.clearPendingTicket();
+    }
     await widget.store.saveIdentity(
       userId: info.meId,
       convId: info.conversationId,

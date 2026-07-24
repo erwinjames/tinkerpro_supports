@@ -41,6 +41,10 @@ class ChatService {
         }
       }
     }
+    final rawTicket = res['ticket'];
+    final ticketStatus = (rawTicket is Map && rawTicket['status'] != null)
+        ? rawTicket['status'].toString().toLowerCase()
+        : null;
     return EmployeeChatInfo(
       conversationId:
           int.tryParse((res['conversation_id'] ?? 0).toString()) ?? 0,
@@ -48,6 +52,7 @@ class ChatService {
       meName: (me['display_name'] ?? storeName).toString(),
       storeName: storeName,
       participants: parts,
+      ticketStatus: ticketStatus,
     );
   }
 
@@ -99,20 +104,64 @@ class ChatService {
   /// Posts a message + binds any pre-uploaded attachments. Server returns
   /// the canonical row (with attachments inflated) that the UI swaps in
   /// for the optimistic placeholder.
+  /// Set true when the last [send] was rejected because the ticket is
+  /// resolved/closed (server sends `ticket_closed: true`). The chat screen
+  /// reads this after a null return to lock the composer — authoritative, so
+  /// it works even if the "resolved" announcement bubble never arrived.
+  bool lastSendTicketClosed = false;
+
   Future<ChatMessage?> send({
     required int convId,
     required String body,
     required String clientNonce,
     List<int> attachmentIds = const [],
   }) async {
+    lastSendTicketClosed = false;
     final res = await api.postChat('chat.send', body: {
       'conversation_id': convId.toString(),
       'body': body,
       'client_nonce': clientNonce,
       'attachment_ids': attachmentIds.join(','),
     });
-    if (res['success'] != true || res['message'] is! Map) return null;
+    if (res['success'] != true || res['message'] is! Map) {
+      lastSendTicketClosed = res['ticket_closed'] == true;
+      return null;
+    }
     return ChatMessage.fromJson(Map<String, dynamic>.from(res['message']));
+  }
+
+  /// "Chat with support" re-engagement: if the conversation's latest ticket is
+  /// resolved/closed, reopen it to 'new' so an agent can accept + chat again.
+  /// Returns the current ticket map ({'ticket_number','status',...}) to scope
+  /// the chat, or null on failure.
+  Future<Map<String, dynamic>?> reopenSupportTicket(int convId) async {
+    try {
+      final res = await api.postChat('chat.reopenSupportTicket',
+          body: {'conversation_id': convId.toString()});
+      if (res['success'] == true && res['ticket'] is Map) {
+        return Map<String, dynamic>.from(res['ticket'] as Map);
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  /// Authoritative current status of a ticket by its reference number, via
+  /// getTicketsByIds. Bubble-independent — the source of truth for accept /
+  /// resolve, since the "accepted"/"resolved" announcement bubbles don't
+  /// reliably reach this client. Returns e.g. {'status': 'in_progress',
+  /// 'assigned_agent_id': 3, ...} or null on failure / unknown ticket.
+  Future<Map<String, dynamic>?> ticketStatus(int ticketRef) async {
+    if (ticketRef <= 0) return null;
+    try {
+      final res = await api
+          .getChat('getTicketsByIds', params: {'ids': ticketRef.toString()});
+      final tickets = res['tickets'];
+      final key = ticketRef.toString();
+      if (tickets is Map && tickets[key] is Map) {
+        return Map<String, dynamic>.from(tickets[key] as Map);
+      }
+    } catch (_) {}
+    return null;
   }
 
   /// Server-side unsend (delete for everyone). Only the original
@@ -300,6 +349,7 @@ class EmployeeChatInfo {
     required this.meName,
     required this.storeName,
     required this.participants,
+    this.ticketStatus,
   });
 
   final int conversationId;
@@ -307,6 +357,15 @@ class EmployeeChatInfo {
   final String meName;
   final String storeName;
   final List<ChatParticipant> participants;
+
+  /// Status of the conversation's latest ticket at launch ('new',
+  /// 'in_progress', 'resolved', 'closed', …), or null when there's no ticket.
+  /// Drives the composer lock on resume so a resolved ticket opens read-only
+  /// without depending on the "resolved" announcement bubble.
+  final String? ticketStatus;
+
+  bool get isTicketClosed =>
+      ticketStatus == 'resolved' || ticketStatus == 'closed';
 }
 
 class UploadException implements Exception {

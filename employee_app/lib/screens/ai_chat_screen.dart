@@ -117,10 +117,18 @@ class _AiChatScreenState extends State<AiChatScreen> {
     final increased = n.unread > _lastSeenUnread;
     _lastSeenUnread = n.unread;
     setState(() {}); // repaint the header/chat-entry badge
+    // Chat is open → the thread shows messages inline, so the "Support sent you
+    // a message" toast is noise. Clear any lingering one and never add another.
+    if (n.chatOpen) {
+      ScaffoldMessenger.of(context).clearSnackBars();
+      return;
+    }
     // Only drop an in-app banner when a NEW message arrived and this
     // landing screen is the one on top (the chat screen, when pushed,
     // shows messages inline and sets chatOpen so this won't fire).
-    if (increased && n.unread > 0 && (ModalRoute.of(context)?.isCurrent ?? false)) {
+    if (increased &&
+        n.unread > 0 &&
+        (ModalRoute.of(context)?.isCurrent ?? false)) {
       _showSupportBanner(n.lastMessage?.body ?? '');
     }
   }
@@ -312,9 +320,8 @@ class _AiChatScreenState extends State<AiChatScreen> {
     if (!mounted) return;
 
     final caption = _input.text.trim();
-    final question = caption.isEmpty
-        ? 'What is this? Help me with what you see.'
-        : caption;
+    final question =
+        caption.isEmpty ? 'What is this? Help me with what you see.' : caption;
     _input.clear();
     setState(() {
       _messages.add(_Msg.user(
@@ -402,8 +409,7 @@ class _AiChatScreenState extends State<AiChatScreen> {
             child: const Text('Cancel'),
           ),
           FilledButton(
-            onPressed: () =>
-                Navigator.of(ctx).pop(controller.text.trim()),
+            onPressed: () => Navigator.of(ctx).pop(controller.text.trim()),
             child: const Text('Save'),
           ),
         ],
@@ -424,13 +430,20 @@ class _AiChatScreenState extends State<AiChatScreen> {
   /// reach support: file a formal ticket, or just open a live chat with
   /// an agent (where they can also read their previous conversations).
   Future<void> _chooseSupportPath() async {
-    final choice = await showModalBottomSheet<_SupportPath>(
+    // If support has already sent an unread message (the badge/banner the
+    // cashier is reacting to), skip the picker and take them straight into the
+    // live chat to read/reply — that's what they're tapping for.
+    if (SupportNotifier.instance.hasUnread) {
+      await _openSupportChat();
+      return;
+    }
+    // A centered modal dialog (not a bottom sheet) — reads better on the
+    // wide POS desktop and matches the rest of the app's dialogs.
+    final choice = await showDialog<_SupportPath>(
       context: context,
-      backgroundColor: Brand.surface,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (ctx) => _SupportPathSheet(unread: SupportNotifier.instance.unread),
+      barrierDismissible: true,
+      builder: (ctx) =>
+          _SupportPathDialog(unread: SupportNotifier.instance.unread),
     );
     if (choice == null || !mounted) return;
     switch (choice) {
@@ -449,6 +462,9 @@ class _AiChatScreenState extends State<AiChatScreen> {
   /// foregrounds the window and no-ops if the chat is already open.
   Future<void> _openSupportChat() async {
     if (SupportNotifier.instance.chatOpen) return;
+    // Opening the thread → hide the "Support sent you a message" banner; it
+    // would otherwise linger over the chat (SnackBars float above the route).
+    if (mounted) ScaffoldMessenger.of(context).clearSnackBars();
     if (kIsDesktopPlatform) {
       try {
         await windowManager.show();
@@ -457,6 +473,19 @@ class _AiChatScreenState extends State<AiChatScreen> {
     }
     SupportNotifier.instance.markAllRead();
     if (!mounted) return;
+    // Re-engage support: if the last ticket is resolved, reopen it to 'new' so
+    // an agent can accept + chat again (returning-customer flow). Returns the
+    // current ticket, which we scope the chat to so it shows the right
+    // waiting/active state instead of a read-only resolved thread.
+    final ticket =
+        await widget.chat.reopenSupportTicket(widget.info.conversationId);
+    if (!mounted) return;
+    final ticketNo = (ticket != null)
+        ? int.tryParse((ticket['ticket_number'] ?? ticket['id'] ?? 0).toString())
+        : null;
+    final status = (ticket?['status'] ?? '').toString().toLowerCase();
+    final claimed = status == 'in_progress' || status == 'assigned';
+    final hasTicket = ticketNo != null && ticketNo > 0;
     await Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => EmployeeChatScreen(
@@ -467,6 +496,11 @@ class _AiChatScreenState extends State<AiChatScreen> {
           lan: widget.lan,
           store: widget.store,
           info: widget.info,
+          // Scope to the (re)active ticket so a fresh/unclaimed one shows the
+          // "waiting for support to accept" card; a claimed one opens straight
+          // into the chat. No ticket at all → ungated free chat as before.
+          scopedTicketId: hasTicket ? ticketNo : null,
+          initialAccepted: hasTicket ? claimed : true,
           onTicketClosed: (ctx) => Navigator.of(ctx).pop(),
         ),
       ),
@@ -531,6 +565,10 @@ class _AiChatScreenState extends State<AiChatScreen> {
   /// otherwise into the "waiting for support to accept" screen. A ticket
   /// not linked to this store's conversation is rejected (its accept /
   /// resolve events would never reach this app).
+  ///
+  /// The "Track ticket" header button is currently hidden (per request); this
+  /// stays so it can be re-enabled by re-adding the _HeaderAction in _buildHeader.
+  // ignore: unused_element
   Future<void> _trackTicket() async {
     final controller = TextEditingController();
     final numStr = await showDialog<String>(
@@ -557,8 +595,7 @@ class _AiChatScreenState extends State<AiChatScreen> {
                 hintText: 'e.g. 480312',
                 border: OutlineInputBorder(),
               ),
-              onSubmitted: (_) =>
-                  Navigator.of(ctx).pop(controller.text.trim()),
+              onSubmitted: (_) => Navigator.of(ctx).pop(controller.text.trim()),
             ),
           ],
         ),
@@ -601,7 +638,8 @@ class _AiChatScreenState extends State<AiChatScreen> {
     // A resolved/closed ticket has no live chat to join — its accept/reply
     // events are done. Don't open it; just tell the employee it's closed.
     if (detail.isResolved) {
-      _snack('Ticket ${fmtTicketNo(id)} is already resolved — nothing to open.');
+      _snack(
+          'Ticket ${fmtTicketNo(id)} is already resolved — nothing to open.');
       return;
     }
     // A ticket filed via the customer-ticket web form has no conversation
@@ -695,12 +733,6 @@ class _AiChatScreenState extends State<AiChatScreen> {
         label: 'Help articles',
         shortLabel: 'Help',
         onTap: _openHelpArticles,
-      ),
-      _HeaderAction(
-        icon: Icons.confirmation_number_outlined,
-        label: 'Track ticket',
-        shortLabel: 'Track',
-        onTap: _trackTicket,
       ),
       _HeaderAction(
         icon: Icons.headset_mic_outlined,
@@ -1370,9 +1402,7 @@ class _ActionPill extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final bg = accent
-        ? Brand.signal.withValues(alpha: 0.08)
-        : Brand.canvas;
+    final bg = accent ? Brand.signal.withValues(alpha: 0.08) : Brand.canvas;
     final border = accent ? Brand.signal.withValues(alpha: 0.35) : Brand.stroke;
     final fg = accent ? Brand.signal : Brand.textPrimary;
     return Material(
@@ -1438,8 +1468,8 @@ class _SendButton extends StatelessWidget {
                 ),
               ],
             ),
-            child: const Icon(Icons.arrow_upward,
-                color: Colors.white, size: 20),
+            child:
+                const Icon(Icons.arrow_upward, color: Colors.white, size: 20),
           ),
         ),
       ),
@@ -1519,68 +1549,81 @@ class _TypingIndicatorState extends State<_TypingIndicator>
 }
 
 /// Which path the cashier picked from the "how do you want to reach
-/// support?" sheet.
+/// support?" dialog.
 enum _SupportPath { ticket, chat }
 
-/// Bottom sheet shown when the cashier taps "Submit ticket": choose
-/// between filing a formal ticket or opening a live chat with an agent
-/// (which also shows their previous conversations). The chat option
+/// Centered modal dialog shown when the cashier taps "Submit ticket":
+/// choose between filing a formal ticket or opening a live chat with an
+/// agent (which also shows their previous conversations). The chat option
 /// carries the unread badge so a waiting reply is obvious here too.
-class _SupportPathSheet extends StatelessWidget {
-  const _SupportPathSheet({required this.unread});
+class _SupportPathDialog extends StatelessWidget {
+  const _SupportPathDialog({required this.unread});
 
   final int unread;
 
   @override
   Widget build(BuildContext context) {
-    return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(20, 14, 20, 20),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Center(
-              child: Container(
-                width: 40,
-                height: 4,
-                margin: const EdgeInsets.only(bottom: 16),
-                decoration: BoxDecoration(
-                  color: Brand.stroke,
-                  borderRadius: BorderRadius.circular(2),
-                ),
+    return Dialog(
+      backgroundColor: Brand.surface,
+      insetPadding: const EdgeInsets.all(24),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 460),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(24, 20, 24, 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Expanded(
+                    child: Text(
+                      'How can we help?',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w700,
+                        color: Brand.textPrimary,
+                      ),
+                    ),
+                  ),
+                  // Close affordance so the modal reads like a dialog.
+                  InkWell(
+                    onTap: () => Navigator.of(context).pop(),
+                    borderRadius: BorderRadius.circular(20),
+                    child: const Padding(
+                      padding: EdgeInsets.all(2),
+                      child: Icon(Icons.close,
+                          size: 20, color: Brand.textMuted),
+                    ),
+                  ),
+                ],
               ),
-            ),
-            const Text(
-              'How can we help?',
-              style: TextStyle(
-                fontSize: 17,
-                fontWeight: FontWeight.w700,
-                color: Brand.textPrimary,
+              const SizedBox(height: 4),
+              const Text(
+                'File a ticket for something that needs tracking, or chat with '
+                'an agent now.',
+                style: TextStyle(fontSize: 13, color: Brand.textMuted),
               ),
-            ),
-            const SizedBox(height: 4),
-            const Text(
-              'File a ticket for something that needs tracking, or chat with '
-              'an agent now.',
-              style: TextStyle(fontSize: 13, color: Brand.textMuted),
-            ),
-            const SizedBox(height: 16),
-            _SupportPathCard(
-              icon: Icons.confirmation_number_outlined,
-              title: 'File a ticket',
-              subtitle: 'Log an issue with priority — we\'ll track it to a fix.',
-              onTap: () => Navigator.of(context).pop(_SupportPath.ticket),
-            ),
-            const SizedBox(height: 12),
-            _SupportPathCard(
-              icon: Icons.chat_bubble_outline,
-              title: 'Chat with support',
-              subtitle: 'Talk to an agent now and read your previous chats.',
-              badge: unread,
-              onTap: () => Navigator.of(context).pop(_SupportPath.chat),
-            ),
-          ],
+              const SizedBox(height: 18),
+              _SupportPathCard(
+                icon: Icons.confirmation_number_outlined,
+                title: 'File a ticket',
+                subtitle:
+                    'Log an issue with priority — we\'ll track it to a fix.',
+                onTap: () => Navigator.of(context).pop(_SupportPath.ticket),
+              ),
+              const SizedBox(height: 12),
+              _SupportPathCard(
+                icon: Icons.chat_bubble_outline,
+                title: 'Chat with support',
+                subtitle: 'Talk to an agent now and read your previous chats.',
+                badge: unread,
+                onTap: () => Navigator.of(context).pop(_SupportPath.chat),
+              ),
+            ],
+          ),
         ),
       ),
     );
