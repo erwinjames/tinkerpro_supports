@@ -506,6 +506,41 @@ class _BootstrapState extends State<_Bootstrap> with WidgetsBindingObserver {
       );
     }
 
+    // No local pending pointer, but the SERVER says there's a live (not-yet-
+    // resolved) ticket on this store's thread → go straight into the chat
+    // instead of the AI landing screen. Covers the case where the pending
+    // pointer was lost (app reinstalled, or the ticket was filed/accepted
+    // elsewhere). Scope to that ticket so a 'new' one shows "waiting for
+    // support" and a claimed one opens chattable; resolving bounces back to AI.
+    if (_info!.hasActiveTicket && _info!.ticketNumber != null) {
+      return EmployeeChatScreen(
+        api: _api,
+        chat: _chat,
+        realtime: _realtime!,
+        calls: _calls!,
+        lan: _lan!,
+        store: widget.store,
+        info: _info!,
+        scopedTicketId: _info!.ticketNumber,
+        initialAccepted: _info!.isTicketClaimed,
+        onTicketClosed: (ctx) {
+          Navigator.of(ctx).pushReplacement(
+            MaterialPageRoute(
+              builder: (_) => AiChatScreen(
+                api: _api,
+                chat: _chat,
+                realtime: _realtime!,
+                calls: _calls!,
+                lan: _lan!,
+                store: widget.store,
+                info: _info!,
+              ),
+            ),
+          );
+        },
+      );
+    }
+
     // No pending ticket — land on the new AI-first POS support screen.
     // The top bar's "Help articles" opens the legacy HelpGuideScreen
     // (FAQ), and "Submit ticket" opens the TicketFormScreen → live chat

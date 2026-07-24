@@ -45,6 +45,10 @@ class ChatService {
     final ticketStatus = (rawTicket is Map && rawTicket['status'] != null)
         ? rawTicket['status'].toString().toLowerCase()
         : null;
+    final ticketNumber = (rawTicket is Map)
+        ? int.tryParse(
+            (rawTicket['ticket_number'] ?? rawTicket['id'] ?? '').toString())
+        : null;
     return EmployeeChatInfo(
       conversationId:
           int.tryParse((res['conversation_id'] ?? 0).toString()) ?? 0,
@@ -53,6 +57,7 @@ class ChatService {
       storeName: storeName,
       participants: parts,
       ticketStatus: ticketStatus,
+      ticketNumber: ticketNumber,
     );
   }
 
@@ -350,6 +355,7 @@ class EmployeeChatInfo {
     required this.storeName,
     required this.participants,
     this.ticketStatus,
+    this.ticketNumber,
   });
 
   final int conversationId;
@@ -364,8 +370,23 @@ class EmployeeChatInfo {
   /// without depending on the "resolved" announcement bubble.
   final String? ticketStatus;
 
+  /// The latest ticket's reference number (for scoping the chat on resume).
+  final int? ticketNumber;
+
   bool get isTicketClosed =>
       ticketStatus == 'resolved' || ticketStatus == 'closed';
+
+  /// True when the latest ticket is live work — filed and not yet resolved.
+  /// Used to route the employee straight into the chat on launch instead of
+  /// the AI landing screen.
+  bool get hasActiveTicket =>
+      ticketStatus == 'new' ||
+      ticketStatus == 'in_progress' ||
+      ticketStatus == 'assigned';
+
+  /// The latest ticket has been claimed by an agent (chat is live, not waiting).
+  bool get isTicketClaimed =>
+      ticketStatus == 'in_progress' || ticketStatus == 'assigned';
 }
 
 class UploadException implements Exception {
