@@ -119,6 +119,25 @@ extension TicketDetailService on TicketService {
       return null;
     }
   }
+
+  /// Adopt a not-yet-chat-linked ticket (one filed via the customer-ticket
+  /// web form, which has no conversation) into [conversationId] so the admin
+  /// can Accept/Resolve it and those events reach this chat. The server links
+  /// the ticket and posts its "🎫 submitted" bubble. Returns true on success
+  /// (incl. the idempotent already-linked-here case). Refuses (false) when the
+  /// ticket is already bound to a different conversation.
+  Future<bool> adoptTicket(int ticketRef, int conversationId) async {
+    if (ticketRef <= 0 || conversationId <= 0) return false;
+    try {
+      final res = await api.postChat('chat.adoptTicket', body: {
+        'ticket_id': ticketRef.toString(),
+        'conversation_id': conversationId.toString(),
+      });
+      return res['status'] == 'success';
+    } catch (_) {
+      return false;
+    }
+  }
 }
 
 /// Full ticket record returned by `chat.getTicketDetail`.
