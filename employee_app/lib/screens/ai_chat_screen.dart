@@ -182,7 +182,12 @@ class _AiChatScreenState extends State<AiChatScreen> {
   }
 
   Future<void> _seedGreeting() async {
-    final first = _firstName(widget.info.storeName);
+    // Greet the cashier by their own name when we have it (captured on
+    // setup); otherwise fall back to the store name.
+    final greetSource = widget.info.employeeName.isNotEmpty
+        ? widget.info.employeeName
+        : widget.info.storeName;
+    final first = _firstName(greetSource);
     var greeting = "Hi$first, I'm your TinkerPro POS assistant. "
         "I can help with refunds, Z readings, printers, scanners, "
         "discounts, and most day to day POS questions. What's going on?";
@@ -722,6 +727,8 @@ class _AiChatScreenState extends State<AiChatScreen> {
           'Chat with our AI assistant, anytime',
           style: text.bodySmall?.copyWith(color: Brand.textMuted),
         ),
+        const SizedBox(height: 6),
+        _buildSignedInAs(text),
       ],
     );
 
@@ -816,6 +823,123 @@ class _AiChatScreenState extends State<AiChatScreen> {
         builder: (_) => SyncMobileScreen(api: widget.api, store: widget.store),
       ),
     );
+  }
+
+  /// "Signed in as {name} · Change" — lets the terminal be handed to a
+  /// new operator (staff change) by editing just the person name; the
+  /// store identity is untouched.
+  Widget _buildSignedInAs(TextTheme text) {
+    final name = widget.info.employeeName.trim();
+    final label = name.isEmpty ? 'Set your name' : 'Signed in as $name';
+    return InkWell(
+      onTap: _editEmployeeName,
+      borderRadius: BorderRadius.circular(6),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 2, horizontal: 2),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.person_outline, size: 14, color: Brand.textMuted),
+            const SizedBox(width: 5),
+            Text(
+              label,
+              style: text.bodySmall?.copyWith(
+                color: Brand.textMuted,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(width: 4),
+            Text(
+              '· Change',
+              style: text.bodySmall?.copyWith(
+                color: Brand.signal,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Edit the operator's full name (e.g. when a new employee takes over
+  /// the terminal). Persists to SessionStore and updates the live
+  /// EmployeeChatInfo so the greeting label and future tickets use the
+  /// new name — no need to re-run store setup or re-enter the store name.
+  Future<void> _editEmployeeName() async {
+    final controller =
+        TextEditingController(text: widget.info.employeeName.trim());
+    final newName = await showDialog<String>(
+      context: context,
+      builder: (ctx) {
+        String? err;
+        return StatefulBuilder(
+          builder: (ctx, setLocal) => AlertDialog(
+            title: const Text('Who is using this terminal?'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Enter the current employee\'s full name. This replaces '
+                  'the previous name on new tickets — the store stays the '
+                  'same.',
+                  style: TextStyle(fontSize: 13),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: controller,
+                  autofocus: true,
+                  textCapitalization: TextCapitalization.words,
+                  decoration: InputDecoration(
+                    labelText: 'Full name',
+                    hintText: 'e.g. Maria Santos',
+                    errorText: err,
+                    prefixIcon: const Icon(Icons.person_outline),
+                  ),
+                  onSubmitted: (_) {
+                    if (controller.text.trim().isEmpty) {
+                      setLocal(() => err = 'Enter a full name.');
+                    } else {
+                      Navigator.of(ctx).pop(controller.text.trim());
+                    }
+                  },
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () {
+                  final v = controller.text.trim();
+                  if (v.isEmpty) {
+                    setLocal(() => err = 'Enter a full name.');
+                    return;
+                  }
+                  Navigator.of(ctx).pop(v);
+                },
+                child: const Text('Save'),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+    if (newName == null || newName.isEmpty || !mounted) return;
+    await widget.store.saveEmployeeFullName(newName);
+    if (!mounted) return;
+    setState(() => widget.info.employeeName = newName);
+    // Push the new operator name to the server so the agent inbox shows
+    // "Store — Employee" right away, not just on the next app launch.
+    // Fire-and-forget: idempotent re-start, safe to ignore the result.
+    final store = widget.info.storeName.trim();
+    if (store.isNotEmpty) {
+      unawaited(widget.chat.employeeStart(store, fullName: newName));
+    }
+    _snack('Now signed in as $newName');
   }
 
   Widget _buildMessages() {

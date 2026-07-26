@@ -21,6 +21,7 @@ class SessionStore {
   final SharedPreferences _prefs;
 
   static const _kStoreName = 'employee_store_name';
+  static const _kFullName  = 'employee_full_name';
   static const _kUserId    = 'employee_user_id';
   static const _kConvId    = 'employee_conv_id';
   static const _kPosHost          = 'pos_db_host';
@@ -95,6 +96,13 @@ class SessionStore {
   }
 
   String? get storeName => _prefs.getString(_kStoreName);
+
+  /// The cashier's own full name, captured on the setup screen alongside
+  /// the store name. The store name is the account/inbox identity + resume
+  /// key; this is the person operating the terminal, stamped on tickets so
+  /// support knows who filed each one.
+  String? get employeeFullName => _prefs.getString(_kFullName);
+
   int? get userId => _prefs.getInt(_kUserId);
   int? get convId => _prefs.getInt(_kConvId);
 
@@ -185,6 +193,12 @@ class SessionStore {
 
   Future<void> saveStoreName(String name) =>
       _prefs.setString(_kStoreName, name.trim());
+
+  Future<void> saveEmployeeFullName(String name) {
+    final trimmed = name.trim();
+    if (trimmed.isEmpty) return _prefs.remove(_kFullName);
+    return _prefs.setString(_kFullName, trimmed);
+  }
 
   Future<void> saveIdentity({required int userId, required int convId}) async {
     await _prefs.setInt(_kUserId, userId);
@@ -347,6 +361,7 @@ class SessionStore {
   /// MVP UI but kept for parity with debug paths.
   Future<void> reset() async {
     await _prefs.remove(_kStoreName);
+    await _prefs.remove(_kFullName);
     await _prefs.remove(_kUserId);
     await _prefs.remove(_kConvId);
     await _prefs.remove(_kPosManualHost);

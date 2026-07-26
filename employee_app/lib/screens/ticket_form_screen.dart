@@ -559,9 +559,12 @@ class _TicketFormScreenState extends State<TicketFormScreen> {
     setState(() => _submitting = true);
     final attachmentPath = _attachment?.path;
     final result = await widget.tickets.createTicket(
-      // Cashier no longer types their name — the chat identity is the
-      // canonical "who sent this ticket" value.
-      customerName: widget.info.meName,
+      // Prefer the cashier's own full name (captured on setup) so support
+      // sees who filed the ticket; fall back to the store/chat identity
+      // for older installs that never collected a name.
+      customerName: widget.info.employeeName.isNotEmpty
+          ? widget.info.employeeName
+          : widget.info.meName,
       customerEmail: '',
       businessName: shop.businessName,
       vatReg: shop.vatReg,

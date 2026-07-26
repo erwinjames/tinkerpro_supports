@@ -25,9 +25,17 @@ class ChatService {
   /// chat history persists across reinstalls. The PHPSESSID cookie that
   /// PHP returns on this call is what authenticates every subsequent
   /// chat/call request — Dio's cookie jar persists it to disk.
-  Future<EmployeeChatInfo?> employeeStart(String storeName) async {
-    final res = await api.postChat('chat.employeeStart',
-        body: {'store_name': storeName});
+  Future<EmployeeChatInfo?> employeeStart(String storeName,
+      {String? fullName}) async {
+    final cleanName = (fullName ?? '').trim();
+    final res = await api.postChat('chat.employeeStart', body: {
+      'store_name': storeName,
+      // The person operating the terminal. Sent so the server can use it
+      // later; the app also carries it in EmployeeChatInfo below and
+      // stamps it on tickets. Omitted when blank so nothing changes for
+      // callers that don't collect a name.
+      if (cleanName.isNotEmpty) 'full_name': cleanName,
+    });
     if (res['success'] != true || res['conversation_id'] == null) return null;
     final me = (res['me'] is Map)
         ? Map<String, dynamic>.from(res['me'] as Map)
@@ -55,6 +63,7 @@ class ChatService {
       meId: int.tryParse((me['user_id'] ?? 0).toString()) ?? 0,
       meName: (me['display_name'] ?? storeName).toString(),
       storeName: storeName,
+      employeeName: cleanName,
       participants: parts,
       ticketStatus: ticketStatus,
       ticketNumber: ticketNumber,
@@ -353,6 +362,7 @@ class EmployeeChatInfo {
     required this.meId,
     required this.meName,
     required this.storeName,
+    this.employeeName = '',
     required this.participants,
     this.ticketStatus,
     this.ticketNumber,
@@ -362,6 +372,13 @@ class EmployeeChatInfo {
   final int meId;
   final String meName;
   final String storeName;
+
+  /// The cashier's own name entered on setup (may be empty). The store
+  /// name stays the account/inbox identity; this is the person, stamped
+  /// on tickets and used to greet them. Mutable so the operator can be
+  /// switched in-app (staff change) without re-running store setup.
+  String employeeName;
+
   final List<ChatParticipant> participants;
 
   /// Status of the conversation's latest ticket at launch ('new',

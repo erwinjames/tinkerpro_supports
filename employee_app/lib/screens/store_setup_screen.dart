@@ -30,26 +30,37 @@ class StoreSetupScreen extends StatefulWidget {
 
 class _StoreSetupScreenState extends State<StoreSetupScreen> {
   final _ctrl = TextEditingController();
+  final _nameCtrl = TextEditingController();
+  final _nameFocus = FocusNode();
   bool _busy = false;
   String? _error;
+  String? _nameError;
 
   @override
   void dispose() {
     _ctrl.dispose();
+    _nameCtrl.dispose();
+    _nameFocus.dispose();
     super.dispose();
   }
 
   Future<void> _continue() async {
     final name = _ctrl.text.trim();
+    final fullName = _nameCtrl.text.trim();
     if (name.isEmpty) {
       setState(() => _error = 'Enter your store name to continue.');
+      return;
+    }
+    if (fullName.isEmpty) {
+      setState(() => _nameError = 'Enter your full name to continue.');
       return;
     }
     setState(() {
       _busy = true;
       _error = null;
+      _nameError = null;
     });
-    final info = await widget.chat.employeeStart(name);
+    final info = await widget.chat.employeeStart(name, fullName: fullName);
     if (!mounted) return;
     if (info == null) {
       setState(() {
@@ -59,6 +70,7 @@ class _StoreSetupScreenState extends State<StoreSetupScreen> {
       return;
     }
     await widget.store.saveStoreName(name);
+    await widget.store.saveEmployeeFullName(fullName);
     await widget.store.saveIdentity(
       userId: info.meId,
       convId: info.conversationId,
@@ -101,8 +113,9 @@ class _StoreSetupScreenState extends State<StoreSetupScreen> {
                 ),
                 const SizedBox(height: 8),
                 Text(
-                  'Enter your store name. The support team will see this '
-                  'as your identity in their inbox.',
+                  'Enter your store name and your full name. The support '
+                  'team sees the store as your identity in their inbox, and '
+                  'your name on any ticket you file.',
                   textAlign: TextAlign.center,
                   style: text.bodyMedium,
                 ),
@@ -110,13 +123,28 @@ class _StoreSetupScreenState extends State<StoreSetupScreen> {
                 TextField(
                   controller: _ctrl,
                   enabled: !_busy,
-                  textInputAction: TextInputAction.done,
-                  onSubmitted: (_) => _continue(),
+                  textInputAction: TextInputAction.next,
+                  onSubmitted: (_) => _nameFocus.requestFocus(),
                   decoration: InputDecoration(
                     labelText: 'Store name',
                     hintText: 'e.g. D.D.S. Grocery — Main Branch',
                     errorText: _error,
                     prefixIcon: const Icon(Icons.store),
+                  ),
+                ),
+                const SizedBox(height: 14),
+                TextField(
+                  controller: _nameCtrl,
+                  focusNode: _nameFocus,
+                  enabled: !_busy,
+                  textCapitalization: TextCapitalization.words,
+                  textInputAction: TextInputAction.done,
+                  onSubmitted: (_) => _continue(),
+                  decoration: InputDecoration(
+                    labelText: 'Your full name',
+                    hintText: 'e.g. Juan Dela Cruz',
+                    errorText: _nameError,
+                    prefixIcon: const Icon(Icons.person_outline),
                   ),
                 ),
                 const SizedBox(height: 16),

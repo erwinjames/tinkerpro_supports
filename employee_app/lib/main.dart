@@ -312,7 +312,10 @@ class _BootstrapState extends State<_Bootstrap> with WidgetsBindingObserver {
       _resolving = true;
       _error = null;
     });
-    final info = await _chat.employeeStart(name);
+    final info = await _chat.employeeStart(
+      name,
+      fullName: widget.store.employeeFullName,
+    );
     if (!mounted) return;
     if (info == null) {
       setState(() {
