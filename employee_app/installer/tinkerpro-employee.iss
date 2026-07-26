@@ -82,6 +82,11 @@ RestartApplications=no
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
+; Auto-start on boot. A POS terminal should come up straight into the
+; support app after Windows logs in, so this is CHECKED by default (an
+; admin can untick it). Installs an all-users Startup shortcut below.
+Name: "startupicon"; Description: "Start {#AppName} automatically when Windows starts"; \
+    GroupDescription: "Startup:"
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; \
     GroupDescription: "Additional shortcuts:"; Flags: unchecked
 Name: "quicklaunchicon"; Description: "Create a &Quick Launch shortcut"; \
@@ -101,6 +106,10 @@ Name: "{group}\Configure POS server"; \
     Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\setup-pos-and-run.ps1"""; \
     Comment: "Run the one-shot POS-server prep script"
 Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}"
+; All-users Startup folder → launches once the (auto-login) cashier
+; account signs in, after Windows finishes booting. Runs as that user,
+; not elevated. Removed cleanly on uninstall.
+Name: "{commonstartup}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: startupicon
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon
 Name: "{userappdata}\Microsoft\Internet Explorer\Quick Launch\{#AppName}"; \
     Filename: "{app}\{#AppExeName}"; Tasks: quicklaunchicon

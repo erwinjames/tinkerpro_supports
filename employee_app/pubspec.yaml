@@ -1,7 +1,7 @@
 name: employee_app
 description: "TinkerPro employee desktop client — text chat + voice/video calls to admin support, identified by store name."
 publish_to: 'none'
-version: 1.0.15+16
+version: 1.0.16+17
 
 environment:
   sdk: ^3.5.0
