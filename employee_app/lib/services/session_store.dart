@@ -110,6 +110,12 @@ class SessionStore {
 
   bool get isConfigured => (storeName ?? '').trim().isNotEmpty;
 
+  /// True once we know who is operating this terminal. Setup (desktop) and
+  /// QR sync (mobile) both require it, but an install that predates the
+  /// field — or one synced before it was collected — can be configured
+  /// without one; the shell gates on this and asks before letting them in.
+  bool get hasEmployeeName => (employeeFullName ?? '').trim().isNotEmpty;
+
   /// TinkerPro server origin this device talks to. On desktop this stays
   /// null and the compile-time `TPS_BASE_URL` default is used. On the
   /// mobile APK it's populated from the scanned sync QR so the phone hits

@@ -18,6 +18,7 @@ import 'services/support_notifier.dart';
 import 'services/ticket_service.dart' show ShopInfo;
 import 'screens/ai_chat_screen.dart';
 import 'screens/chat_screen.dart';
+import 'screens/employee_name_screen.dart';
 import 'screens/store_setup_screen.dart';
 import 'screens/qr_sync_screen.dart';
 import 'platform_info.dart';
@@ -410,6 +411,20 @@ class _BootstrapState extends State<_Bootstrap> with WidgetsBindingObserver {
     _wireRealtimeAndCalls(info);
   }
 
+  /// The late name-capture gate resolved. If the warm-start resume already
+  /// wired realtime/calls/LAN we keep that session and just adopt the name
+  /// (re-wiring would leak a second socket + presence broadcaster);
+  /// otherwise this info becomes the session.
+  void _onEmployeeNameCaptured(EmployeeChatInfo info) {
+    final existing = _info;
+    if (existing == null) {
+      _wireRealtimeAndCalls(info);
+      return;
+    }
+    setState(() => existing.employeeName = info.employeeName);
+    _lan?.employeeName = info.employeeName;
+  }
+
   /// Mobile QR-sync completed: the scanner already saved the server URL +
   /// store name and ran chat.employeeStart against a fresh ApiClient based
   /// on the scanned URL. Adopt that client and resume the normal flow.
@@ -436,6 +451,18 @@ class _BootstrapState extends State<_Bootstrap> with WidgetsBindingObserver {
         chat: _chat,
         store: widget.store,
         onReady: _onSetupReady,
+      );
+    }
+
+    // Store identity is set but nobody claimed the terminal — an install
+    // from before the full-name field existed, or a phone synced before QR
+    // sync collected one. Required, same as on setup: tickets and the agent
+    // inbox label are meaningless without it.
+    if (!widget.store.hasEmployeeName) {
+      return EmployeeNameScreen(
+        chat: _chat,
+        store: widget.store,
+        onReady: _onEmployeeNameCaptured,
       );
     }
 
