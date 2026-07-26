@@ -377,7 +377,12 @@ class _BootstrapState extends State<_Bootstrap> with WidgetsBindingObserver {
         () => SupportNotifier.instance.onOpenChat?.call();
 
     // Same-store LAN discovery for the chat's "Add participant" picker.
-    final lan = LanPresence(userId: info.meId, storeName: info.storeName);
+    final lan = LanPresence(
+      userId: info.meId,
+      storeName: info.storeName,
+      deviceId: widget.store.deviceId,
+      employeeName: info.employeeName,
+    );
     lan.start();
 
     // Eagerly extract + launch the bundled RustDesk so it registers

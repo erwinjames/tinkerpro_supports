@@ -1611,9 +1611,17 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
-      builder: (_) => _LanPickerSheet(lan: widget.lan),
+      builder: (_) => _LanPickerSheet(lan: widget.lan, myUserId: _meId),
     );
     if (picked == null || !mounted) return;
+
+    // Same store identity (same underlying user) → they already share this
+    // conversation, so there's nothing to "add" — just confirm they're here.
+    if (picked.userId == _meId) {
+      _toast('${picked.displayName} is on this network — '
+          'already in this chat.');
+      return;
+    }
 
     final ok = await widget.chat.addToConversation(
       conversationId: _convId,
@@ -1621,8 +1629,8 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
     );
     if (!mounted) return;
     _toast(ok
-        ? 'Invited ${picked.storeName.isEmpty ? "Store ${picked.userId}" : picked.storeName}'
-        : 'Could not invite ${picked.storeName}');
+        ? 'Invited ${picked.displayName}'
+        : 'Could not invite ${picked.displayName}');
     if (ok) {
       // Refresh participants so the AppBar subtitle picks up the new
       // member immediately. Server already added them; this is a UI
@@ -3614,8 +3622,9 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
 /// after 10s of silence). Tapping a row pops the sheet with the chosen
 /// peer; the chat screen then calls `chat.addToConversation`.
 class _LanPickerSheet extends StatelessWidget {
-  const _LanPickerSheet({required this.lan});
+  const _LanPickerSheet({required this.lan, required this.myUserId});
   final LanPresence lan;
+  final int myUserId;
 
   @override
   Widget build(BuildContext context) {
@@ -3648,9 +3657,10 @@ class _LanPickerSheet extends StatelessWidget {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text('Add a colleague', style: text.titleMedium),
+                        Text('Colleagues on this network',
+                            style: text.titleMedium),
                         Text(
-                          'Other employees on this Wi-Fi',
+                          'Employees with the app open nearby',
                           style: text.bodySmall
                               ?.copyWith(color: Brand.textMuted),
                         ),
@@ -3684,7 +3694,7 @@ class _LanPickerSheet extends StatelessWidget {
                             ),
                             const SizedBox(height: 4),
                             Text(
-                              "Make sure they're on the same Wi-Fi and the "
+                              "Make sure they're on the same network and the "
                               'app is open.',
                               textAlign: TextAlign.center,
                               style: text.bodySmall
@@ -3699,21 +3709,33 @@ class _LanPickerSheet extends StatelessWidget {
                     itemCount: peers.length,
                     itemBuilder: (_, i) {
                       final p = peers[i];
+                      // Same underlying identity (same store) → they already
+                      // share this chat; show them as simply "online". A peer
+                      // from a different store can be added to the thread.
+                      final sameStore = p.userId == myUserId;
+                      final initial = p.displayName.isNotEmpty
+                          ? p.displayName.characters.first.toUpperCase()
+                          : '?';
                       return ListTile(
-                        leading: const CircleAvatar(
+                        leading: CircleAvatar(
                           backgroundColor: Brand.signal,
-                          child: Icon(Icons.storefront,
-                              color: Brand.canvas, size: 18),
+                          child: Text(initial,
+                              style: const TextStyle(
+                                  color: Brand.canvas,
+                                  fontWeight: FontWeight.w700)),
                         ),
-                        title: Text(p.storeName.isEmpty
-                            ? 'Store ${p.userId}'
-                            : p.storeName),
+                        title: Text(p.displayName),
                         subtitle: Text(
-                          p.address,
+                          sameStore
+                              ? 'Online · ${p.address}'
+                              : '${p.storeName} · ${p.address}',
                           style: text.bodySmall
                               ?.copyWith(color: Brand.textMuted),
                         ),
-                        trailing: const Icon(Icons.chevron_right),
+                        trailing: sameStore
+                            ? const _OnlineDot()
+                            : const Icon(Icons.person_add_alt_1,
+                                color: Brand.signal),
                         onTap: () => Navigator.of(context).pop(p),
                       );
                     },
@@ -3724,6 +3746,34 @@ class _LanPickerSheet extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// Small green "online" indicator for same-store colleagues in the roster.
+class _OnlineDot extends StatelessWidget {
+  const _OnlineDot();
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 9,
+          height: 9,
+          decoration: const BoxDecoration(
+            color: Color(0xFF22C55E),
+            shape: BoxShape.circle,
+          ),
+        ),
+        const SizedBox(width: 6),
+        const Text('Online',
+            style: TextStyle(
+                fontSize: 12,
+                color: Brand.textMuted,
+                fontWeight: FontWeight.w600)),
+      ],
     );
   }
 }

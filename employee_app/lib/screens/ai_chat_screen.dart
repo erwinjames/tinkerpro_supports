@@ -932,6 +932,8 @@ class _AiChatScreenState extends State<AiChatScreen> {
     await widget.store.saveEmployeeFullName(newName);
     if (!mounted) return;
     setState(() => widget.info.employeeName = newName);
+    // Keep the LAN roster label in sync so colleagues see the new name.
+    widget.lan.employeeName = newName;
     // Push the new operator name to the server so the agent inbox shows
     // "Store — Employee" right away, not just on the next app launch.
     // Fire-and-forget: idempotent re-start, safe to ignore the result.

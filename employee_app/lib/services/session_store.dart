@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -29,6 +30,7 @@ class SessionStore {
   static const _kPosManualHost    = 'pos_db_manual_host';
   static const _kPosManualPort    = 'pos_db_manual_port';
   static const _kPosStandalone    = 'pos_standalone';
+  static const _kDeviceId         = 'lan_device_id';
   static const _kShopJson         = 'pos_shop_info_json';
   static const _kShopAt           = 'pos_shop_info_saved_at';
   static const _kHelpJson         = 'help_topics_json';
@@ -198,6 +200,20 @@ class SessionStore {
     final trimmed = name.trim();
     if (trimmed.isEmpty) return _prefs.remove(_kFullName);
     return _prefs.setString(_kFullName, trimmed);
+  }
+
+  /// Stable per-install id. Two terminals that sign in with the SAME store
+  /// name share one identity (user id), so the LAN roster keys on this
+  /// instead — otherwise they'd hide each other as "my own device".
+  /// Generated + persisted on first read; survives restarts.
+  String get deviceId {
+    var id = _prefs.getString(_kDeviceId);
+    if (id == null || id.isEmpty) {
+      id = 'dev_${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}'
+          '_${Random().nextInt(0x7fffffff).toRadixString(36)}';
+      _prefs.setString(_kDeviceId, id); // fire-and-forget persist
+    }
+    return id;
   }
 
   Future<void> saveIdentity({required int userId, required int convId}) async {
