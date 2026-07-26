@@ -1635,7 +1635,10 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
           meId: _info.meId,
           meName: _info.meName,
           storeName: _info.storeName,
+          employeeName: _info.employeeName,
           participants: parts,
+          ticketStatus: _info.ticketStatus,
+          ticketNumber: _info.ticketNumber,
         );
       });
     }
@@ -1714,6 +1717,7 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
         meId: _info.meId,
         meName: _info.meName,
         storeName: _info.storeName,
+        employeeName: _info.employeeName,
         participants: parts,
       );
       _messages.clear();
