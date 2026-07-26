@@ -1811,7 +1811,7 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
             tooltip: _chatClosed
                 ? 'Ticket is resolved'
                 : (_ticketAccepted
-                    ? 'Add a colleague from this Wi-Fi'
+                    ? 'Add a colleague on this network'
                     : 'Waiting for support to accept your ticket'),
             icon: const Icon(Icons.person_add_alt_1),
             onPressed: (_ticketAccepted && !_chatClosed)

@@ -48,12 +48,7 @@ class LanPresence {
     if (_started) return;
     _started = true;
     try {
-      _socket = await RawDatagramSocket.bind(
-        InternetAddress.anyIPv4,
-        _port,
-        reuseAddress: true,
-        reusePort: true,
-      );
+      _socket = await _bindSocket();
       _socket!.broadcastEnabled = true;
       _socket!.listen(_onDatagram);
     } catch (e) {
@@ -66,6 +61,32 @@ class LanPresence {
     _pruneTimer = Timer.periodic(
         const Duration(seconds: 2), (_) => _pruneStale());
     _broadcast();
+  }
+
+  /// Bind the UDP socket, working around the fact that `SO_REUSEPORT`
+  /// (reusePort) does NOT exist on Windows — passing `reusePort: true`
+  /// there throws, which used to silently kill LAN discovery on the POS
+  /// desktop. So we only request it where it's supported, and fall back
+  /// to a plain reuseAddress bind if any platform still rejects it.
+  Future<RawDatagramSocket> _bindSocket() async {
+    final wantReusePort = !Platform.isWindows;
+    try {
+      return await RawDatagramSocket.bind(
+        InternetAddress.anyIPv4,
+        _port,
+        reuseAddress: true,
+        reusePort: wantReusePort,
+      );
+    } catch (e) {
+      if (!wantReusePort) rethrow;
+      debugPrint('[lan-presence] reusePort bind rejected ($e) — '
+          'retrying without it.');
+      return RawDatagramSocket.bind(
+        InternetAddress.anyIPv4,
+        _port,
+        reuseAddress: true,
+      );
+    }
   }
 
   Future<void> stop() async {

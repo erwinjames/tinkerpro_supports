@@ -115,9 +115,27 @@ Name: "{userappdata}\Microsoft\Internet Explorer\Quick Launch\{#AppName}"; \
     Filename: "{app}\{#AppExeName}"; Tasks: quicklaunchicon
 
 [Run]
+; Allow the app through Windows Firewall so same-store LAN colleague
+; discovery (UDP broadcast on port 56789) can RECEIVE peers. Without an
+; inbound allow rule, Windows silently drops the broadcasts and the
+; "Add participant" picker stays empty. Delete any prior rule first so
+; re-running the installer doesn't stack duplicates. netsh needs admin —
+; the installer already runs elevated.
+Filename: "{sys}\netsh.exe"; \
+    Parameters: "advfirewall firewall delete rule name=""TinkerPro Support LAN"""; \
+    Flags: runhidden; StatusMsg: "Configuring firewall for LAN discovery..."
+Filename: "{sys}\netsh.exe"; \
+    Parameters: "advfirewall firewall add rule name=""TinkerPro Support LAN"" dir=in action=allow program=""{app}\{#AppExeName}"" enable=yes profile=any"; \
+    Flags: runhidden; StatusMsg: "Configuring firewall for LAN discovery..."
 ; Post-install: offer to launch the app. Skipped on /SILENT runs.
 Filename: "{app}\{#AppExeName}"; Description: "Launch {#AppName}"; \
     Flags: nowait postinstall skipifsilent runasoriginaluser
+
+[UninstallRun]
+; Drop the firewall rule when uninstalling.
+Filename: "{sys}\netsh.exe"; \
+    Parameters: "advfirewall firewall delete rule name=""TinkerPro Support LAN"""; \
+    Flags: runhidden
 
 [UninstallDelete]
 ; Make sure leftover Flutter shader/state caches under the install
