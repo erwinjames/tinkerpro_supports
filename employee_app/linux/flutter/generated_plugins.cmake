@@ -6,6 +6,7 @@ list(APPEND FLUTTER_PLUGIN_LIST
   audioplayers_linux
   file_selector_linux
   flutter_webrtc
+  local_notifier
   screen_retriever_linux
   window_manager
 )

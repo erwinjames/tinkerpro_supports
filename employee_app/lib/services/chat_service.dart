@@ -304,6 +304,22 @@ class ChatService {
     return res['success'] == true;
   }
 
+  /// WebRTC ICE configuration (STUN + ephemeral TURN credentials) minted by
+  /// `chat.iceServers`. Fetched per call rather than hardcoded so TURN
+  /// credentials stay short-lived and the relay can be changed server-side
+  /// without shipping a new build. Returns null on any failure so the caller
+  /// keeps whatever config it already had.
+  Future<Map<String, dynamic>?> iceServers() async {
+    try {
+      final res = await api.postChat('chat.iceServers', body: {});
+      if (res['success'] == true && res['iceServers'] is List) {
+        return Map<String, dynamic>.from(res);
+      }
+    } catch (_) {}
+    return null;
+  }
+
+
   Future<bool> signal({
     required int peerId,
     required String kind,
