@@ -1032,18 +1032,7 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
                   .firstWhere((p) => p.userId == reply.senderId)
                   .fullName
               : 'them');
-      // If the message being quoted is itself a reply, strip its own
-      // quote prefix so the chip shows just the new content rather
-      // than nested quotes turtles-all-the-way-down. CRLF-aware (web
-      // admin form POSTs store \r\n\r\n separators).
-      final stripQuote = RegExp(
-              r'^>\s*@[^\[:\n]+?(?:\s*\[#\d+\])?\s*:\s*.+?\r?\n\r?\n(.+)$',
-              dotAll: true)
-          .firstMatch(reply.body);
-      final cleanedBody =
-          stripQuote != null ? (stripQuote.group(1) ?? '').trim() : reply.body;
-      final preview =
-          cleanedBody.replaceAll(RegExp(r'\s+'), ' ').trim();
+      final preview = _quotePreviewOf(reply);
       final shortPreview =
           preview.length > 200 ? '${preview.substring(0, 200)}…' : preview;
       final targetId = reply.persistedId;
@@ -2393,8 +2382,7 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
     // anything stored after a web-side send has \r\n\r\n between the
     // quote prefix and the reply.
     final match = RegExp(
-            r'^>\s*@([^\[:\n]+?)(?:\s*\[#(\d+)\])?\s*:\s*(.+?)\r?\n\r?\n(.+)$',
-            dotAll: true)
+            r'^>\s*@([^\[:\n]+?)(?:\s*\[#(\d+)\])?\s*:[ \t]*([^\n]*?)(?:\r?\n\r?\n([\s\S]+))?$')
         .firstMatch(body);
     if (match == null) {
       return [Text(body, style: text.bodyMedium?.copyWith(color: fg))];
@@ -2406,7 +2394,10 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
     // quote prefixes into the chip text. Strip leading "> @sender: "
     // segments at render time so the chip displays only the actual
     // content the sender wrote, regardless of how the body was stored.
-    final preview = _stripNestedQuotes((match.group(3) ?? '').trim());
+    final preview =
+        _stripNestedQuotes((match.group(3) ?? '').trim()).isEmpty
+            ? '[attachment]'
+            : _stripNestedQuotes((match.group(3) ?? '').trim());
     final reply = (match.group(4) ?? '').trim();
     // Quote-chip palette: on my (orange) bubbles the chip needs to
     // contrast against orange, so we use white-tinted; on theirs the
@@ -2468,7 +2459,8 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
           child: chip,
         ),
       ),
-      Text(reply, style: text.bodyMedium?.copyWith(color: fg)),
+      if (reply.isNotEmpty)
+        Text(reply, style: text.bodyMedium?.copyWith(color: fg)),
     ];
   }
 
@@ -2567,6 +2559,24 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
       s = s.replaceFirst(re, '').trim();
     }
     return s;
+  }
+
+  String _quotePreviewOf(ChatMessage m) {
+    final stripQuote = RegExp(
+            r'^>\s*@[^\[:\n]+?(?:\s*\[#\d+\])?\s*:[ \t]*[^\n]*?(?:\r?\n\r?\n([\s\S]+))?$')
+        .firstMatch(m.body);
+    final cleaned =
+        stripQuote != null ? (stripQuote.group(1) ?? '').trim() : m.body;
+    final preview = cleaned.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (preview.isNotEmpty) return preview;
+    if (m.attachments.isEmpty) return '';
+    final first = m.attachments.first;
+    final label = first.mimeType.startsWith('image/')
+        ? '[image]'
+        : '[file: ${first.originalName}]';
+    return m.attachments.length > 1
+        ? '$label +${m.attachments.length - 1}'
+        : label;
   }
 
   /// Highlights the target message + scrolls it into view when the
@@ -3555,16 +3565,7 @@ class _EmployeeChatScreenState extends State<EmployeeChatScreen>
                 .firstWhere((p) => p.userId == r.senderId)
                 .fullName
             : 'them');
-    // Strip the original's own quote prefix so the bar shows just
-    // what the user actually wrote, not nested quote-of-a-quote text.
-    // CRLF-aware for bodies originating from a web-admin form POST.
-    final stripQuote = RegExp(
-            r'^>\s*@[^\[:\n]+?(?:\s*\[#\d+\])?\s*:\s*.+?\r?\n\r?\n(.+)$',
-            dotAll: true)
-        .firstMatch(r.body);
-    final cleanedBody =
-        stripQuote != null ? (stripQuote.group(1) ?? '').trim() : r.body;
-    final preview = cleanedBody.replaceAll(RegExp(r'\s+'), ' ').trim();
+    final preview = _quotePreviewOf(r);
     final shortPreview =
         preview.length > 140 ? '${preview.substring(0, 140)}…' : preview;
     return Container(
