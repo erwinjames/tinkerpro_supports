@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "878606218018",
+    "project_id": "tinkerpro-5ec76",
+    "storage_bucket": "tinkerpro-5ec76.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:878606218018:android:1beb58876692c7a7c62b7b",
+        "android_client_info": {
+          "package_name": "com.tinkerpro.support"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAsRA27RikpA8k8rufV_49VQCu9Uj-6aqg"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

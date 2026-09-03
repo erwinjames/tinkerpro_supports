@@ -1,0 +1,209 @@
+name: Build iOS (chat_app)
+
+# Triggers:
+#   - manual via the Actions tab ("Run workflow" button)
+#   - automatic on tags like ios-v1.2.3 (handy for releases)
+#
+# iOS builds MUST run on a macOS runner (Xcode + CocoaPods). By default this
+# workflow does an UNSIGNED release build so it works out of the box with no
+# Apple Developer account — that verifies the app compiles and produces a
+# Runner.app you can inspect, but it CANNOT be installed on a real iPhone.
+#
+# To get an installable / TestFlight-ready .ipa, add the repository secrets
+# listed under the "Signed IPA" step below. When all of them are present the
+# workflow automatically switches to a code-signed build and exports a real
+# .ipa. Without them it falls back to the unsigned .app.
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: 'TPS_BASE_URL (chat backend)'
+        required: true
+        default: 'https://support.tinkerpro.io'
+      soketi_host:
+        description: 'CHAT_SOKETI_HOST (WebSocket host — usually same as base_url host)'
+        required: true
+        default: 'support.tinkerpro.io'
+  push:
+    tags:
+      - 'chat-ios-v*'
+
+jobs:
+  build:
+    # macos-15 ships Xcode 16 (Swift 6). Required because the Firebase iOS SDK
+    # 12.x uses Swift 6 language features (`sending`, access-level-on-imports)
+    # that Xcode 15 on macos-14 can't compile ("Cannot find type 'sending'").
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: chat_app
+
+    env:
+      BASE_URL:    ${{ github.event.inputs.base_url    || 'https://support.tinkerpro.io' }}
+      SOKETI_HOST: ${{ github.event.inputs.soketi_host || 'support.tinkerpro.io' }}
+      # Shared dart-define set — kept in sync with the Windows/desktop builds so
+      # realtime chat + calls hit the same Soketi endpoint (TLS on 443, /soketi
+      # reverse-proxy prefix). Reused by both the unsigned and signed lanes.
+      DART_DEFINES: >-
+        --dart-define=TPS_BASE_URL=${{ github.event.inputs.base_url || 'https://support.tinkerpro.io' }}
+        --dart-define=CHAT_SOKETI_HOST=${{ github.event.inputs.soketi_host || 'support.tinkerpro.io' }}
+        --dart-define=CHAT_SOKETI_PORT=443
+        --dart-define=CHAT_SOKETI_TLS=true
+        --dart-define=CHAT_SOKETI_PATH=/soketi
+        --dart-define=CHAT_SOKETI_KEY=tinkerpro-chat-key
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Pin to the newest stable Xcode on the image (16.x) so the Swift 6
+      # toolchain the Firebase SDK needs is the one actually used.
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Show toolchain versions (debug)
+        run: |
+          flutter --version
+          flutter doctor -v
+          xcodebuild -version
+
+      # Force CocoaPods-based plugin integration. Recent Flutter enables Swift
+      # Package Manager, whose plugin-copy step fails on a clean CI checkout
+      # ("rsync ... build/ios/SourcePackages/... No such file or directory")
+      # because no iOS build has created build/ios yet. We use `pod install`
+      # below, so SPM isn't needed.
+      - name: Disable Swift Package Manager
+        run: flutter config --no-enable-swift-package-manager
+
+      - name: Resolve Dart dependencies
+        run: flutter pub get
+
+      - name: CocoaPods install
+        run: |
+          cd ios
+          pod install --repo-update
+
+      # ── Decide which lane to run ─────────────────────────────────────────
+      # Signed build only when ALL Apple signing secrets are present. We expose
+      # the boolean as an output so later steps can gate on it.
+      - name: Detect signing secrets
+        id: signing
+        env:
+          CERT: ${{ secrets.IOS_CERTIFICATE_BASE64 }}
+          PROFILE: ${{ secrets.IOS_PROVISION_PROFILE_BASE64 }}
+          TEAM: ${{ secrets.IOS_TEAM_ID }}
+        run: |
+          if [ -n "$CERT" ] && [ -n "$PROFILE" ] && [ -n "$TEAM" ]; then
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+            echo "Signing secrets found → will produce a signed .ipa"
+          else
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "No signing secrets → unsigned .app build only"
+          fi
+
+      # ── Unsigned lane (default, no Apple account needed) ─────────────────
+      - name: Build unsigned iOS (.app)
+        if: steps.signing.outputs.signed == 'false'
+        run: |
+          flutter build ios --release --no-codesign $DART_DEFINES
+
+      - name: Zip Runner.app
+        if: steps.signing.outputs.signed == 'false'
+        run: |
+          cd build/ios/iphoneos
+          zip -r -y "$GITHUB_WORKSPACE/chat_app/TinkerPro-Chat-ios-unsigned.zip" Runner.app
+
+      - name: Upload unsigned .app artifact
+        if: steps.signing.outputs.signed == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: TinkerPro-Chat-ios-unsigned
+          path: chat_app/TinkerPro-Chat-ios-unsigned.zip
+          retention-days: 14
+
+      # ── Signed lane (installable / TestFlight-ready .ipa) ────────────────
+      # Required repository secrets:
+      #   IOS_CERTIFICATE_BASE64       — base64 of your Apple Distribution .p12
+      #                                  (base64 -i cert.p12 | pbcopy)
+      #   IOS_CERTIFICATE_PASSWORD     — password for that .p12
+      #   IOS_PROVISION_PROFILE_BASE64 — base64 of the matching .mobileprovision
+      #   IOS_TEAM_ID                  — 10-char Apple Team ID
+      #   IOS_KEYCHAIN_PASSWORD        — any throwaway string (temp keychain)
+      #   IOS_EXPORT_METHOD (optional) — app-store | ad-hoc | development
+      #                                  (defaults to app-store)
+      - name: Import signing assets
+        if: steps.signing.outputs.signed == 'true'
+        env:
+          CERT_B64: ${{ secrets.IOS_CERTIFICATE_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          PROFILE_B64: ${{ secrets.IOS_PROVISION_PROFILE_BASE64 }}
+          KEYCHAIN_PASSWORD: ${{ secrets.IOS_KEYCHAIN_PASSWORD }}
+        run: |
+          CERT_PATH="$RUNNER_TEMP/cert.p12"
+          PROFILE_PATH="$RUNNER_TEMP/profile.mobileprovision"
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+
+          echo -n "$CERT_B64" | base64 --decode -o "$CERT_PATH"
+          echo -n "$PROFILE_B64" | base64 --decode -o "$PROFILE_PATH"
+
+          # Spin up a temporary keychain and import the distribution cert.
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$CERT_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+
+          # Install the provisioning profile where Xcode looks for it.
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          cp "$PROFILE_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/"
+
+      - name: Write ExportOptions.plist
+        if: steps.signing.outputs.signed == 'true'
+        env:
+          TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+          EXPORT_METHOD: ${{ secrets.IOS_EXPORT_METHOD || 'app-store' }}
+        run: |
+          cat > "$RUNNER_TEMP/ExportOptions.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>${EXPORT_METHOD}</string>
+            <key>teamID</key>
+            <string>${TEAM_ID}</string>
+            <key>signingStyle</key>
+            <string>manual</string>
+            <key>stripSwiftSymbols</key>
+            <true/>
+            <key>uploadBitcode</key>
+            <false/>
+            <key>compileBitcode</key>
+            <false/>
+          </dict>
+          </plist>
+          PLIST
+
+      - name: Build signed .ipa
+        if: steps.signing.outputs.signed == 'true'
+        run: |
+          flutter build ipa --release \
+            $DART_DEFINES \
+            --export-options-plist "$RUNNER_TEMP/ExportOptions.plist"
+
+      - name: Upload .ipa artifact
+        if: steps.signing.outputs.signed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: TinkerPro-Chat-ios-ipa
+          path: chat_app/build/ios/ipa/*.ipa
+          retention-days: 14
