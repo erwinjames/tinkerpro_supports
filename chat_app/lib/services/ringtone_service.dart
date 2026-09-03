@@ -4,6 +4,51 @@ import 'dart:typed_data';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/foundation.dart';
 
+/// Mirrors PRESETS in layout/audio-cues.php so a sound picked on the web
+/// plays identically here — same frequencies, durations and relative gain.
+class SoundPreset {
+  const SoundPreset(this.pattern, this.gain);
+  final List<Seg> pattern;
+  final double gain;
+}
+
+const Map<String, SoundPreset> kSoundPresets = {
+  'chime': SoundPreset([
+    Seg(783.99, 0.13), Seg(0, 0.03), Seg(1046.50, 0.30),
+  ], 0.16),
+  'ding': SoundPreset([
+    Seg(660, 0.10), Seg(0, 0.04), Seg(880, 0.14),
+  ], 0.18),
+  'bell': SoundPreset([Seg(1174.66, 0.5)], 0.12),
+  'pop': SoundPreset([
+    Seg(523.25, 0.06), Seg(0, 0.02), Seg(659.25, 0.06),
+  ], 0.16),
+  'classic': SoundPreset([
+    Seg(440, 0.4), Seg(0, 0.05), Seg(480, 0.4), Seg(0, 0.15),
+    Seg(440, 0.4), Seg(0, 0.05), Seg(480, 0.4), Seg(0, 1.8),
+  ], 0.22),
+  'soft': SoundPreset([Seg(523.25, 0.2)], 0.12),
+  'alert': SoundPreset([
+    Seg(880, 0.12), Seg(0, 0.05), Seg(880, 0.12),
+  ], 0.20),
+  'messenger': SoundPreset([
+    Seg(987.77, 0.07), Seg(0, 0.02), Seg(1318.51, 0.07),
+    Seg(0, 0.02), Seg(1567.98, 0.20),
+  ], 0.17),
+  'visitor': SoundPreset([
+    Seg(1318.51, 0.07), Seg(0, 0.03), Seg(1046.50, 0.15),
+  ], 0.15),
+};
+
+/// SoundSettings::FACTORY on the server.
+const Map<String, String> kSoundFactoryDefaults = {
+  'notify': 'chime',
+  'incoming': 'classic',
+  'react': 'pop',
+  'sent': 'none',
+  'fb': 'messenger',
+};
+
 class RingtoneService {
   RingtoneService._();
   static final RingtoneService instance = RingtoneService._();
@@ -18,21 +63,68 @@ class RingtoneService {
   bool _initStarted = false;
   Future<void>? _initFuture;
 
+  /// Effective per-event sound names from the server, resolved there against
+  /// the user's own picks and the global defaults.
+  Map<String, String> _events = const {};
+
+  /// Fetches the bytes of an uploaded custom sound for an event.
+  Future<Uint8List?> Function(String event)? _customLoader;
+
+  final Map<String, Uint8List> _presetCache = {};
+  final Map<String, Uint8List> _customCache = {};
+
+  void applyPreferences(
+    Map<String, String> effective, {
+    Future<Uint8List?> Function(String event)? customLoader,
+  }) {
+    _events = Map<String, String>.from(effective);
+    _customLoader = customLoader;
+  }
+
+  String _valueFor(String event) {
+    final v = _events[event];
+    if (v != null && v.isNotEmpty) return v;
+    return kSoundFactoryDefaults[event] ?? 'chime';
+  }
+
+  Future<Uint8List?> _bytesFor(String event) async {
+    final value = _valueFor(event);
+    if (value == 'none') return null;
+    if (value == 'custom') {
+      final cached = _customCache[event];
+      if (cached != null) return cached;
+      final loaded = await _customLoader?.call(event);
+      if (loaded != null && loaded.isNotEmpty) {
+        _customCache[event] = loaded;
+        return loaded;
+      }
+      // Upload missing or unreachable — fall back to the factory tone.
+      return _presetBytes(kSoundFactoryDefaults[event] ?? 'chime');
+    }
+    return _presetBytes(value);
+  }
+
+  Uint8List? _presetBytes(String name) {
+    final preset = kSoundPresets[name];
+    if (preset == null) return null;
+    return _presetCache[name] ??= _wav(preset.pattern, gain: preset.gain);
+  }
+
   Future<void> _init() {
     if (_initFuture != null) return _initFuture!;
     _initStarted = true;
     _initFuture = () async {
       _ringBytes = _wav([
-        const _Seg(440, 0.4), const _Seg(0, 0.05),
-        const _Seg(480, 0.4), const _Seg(0, 0.15),
-        const _Seg(440, 0.4), const _Seg(0, 0.05),
-        const _Seg(480, 0.4), const _Seg(0, 1.8),
+        const Seg(440, 0.4), const Seg(0, 0.05),
+        const Seg(480, 0.4), const Seg(0, 0.15),
+        const Seg(440, 0.4), const Seg(0, 0.05),
+        const Seg(480, 0.4), const Seg(0, 1.8),
       ]);
       _ringbackBytes = _wav([
-        const _Seg(440, 1.2), const _Seg(0, 2.8),
+        const Seg(440, 1.2), const Seg(0, 2.8),
       ]);
       _pingBytes = _wav([
-        const _Seg(660, 0.10), const _Seg(0, 0.04), const _Seg(880, 0.14),
+        const Seg(660, 0.10), const Seg(0, 0.04), const Seg(880, 0.14),
       ]);
       try {
         await _ringPlayer.setReleaseMode(ReleaseMode.loop);
@@ -50,8 +142,9 @@ class RingtoneService {
     try {
       await _ringbackPlayer.stop();
       await _ringPlayer.stop();
-      if (_ringBytes != null) {
-        await _ringPlayer.play(BytesSource(_ringBytes!));
+      final bytes = await _bytesFor('incoming') ?? _ringBytes;
+      if (bytes != null) {
+        await _ringPlayer.play(BytesSource(bytes));
       }
     } catch (e) {
       debugPrint('[ringtone] startIncoming failed: $e');
@@ -81,12 +174,15 @@ class RingtoneService {
     }
   }
 
-  Future<void> ping() async {
+  /// New-message cue. Facebook page threads use the `fb` slot, everything
+  /// else `notify` — the same split the web app makes.
+  Future<void> ping({bool facebook = false}) async {
     await _init();
     try {
       await _pingPlayer.stop();
-      if (_pingBytes != null) {
-        await _pingPlayer.play(BytesSource(_pingBytes!));
+      final bytes = await _bytesFor(facebook ? 'fb' : 'notify') ?? _pingBytes;
+      if (bytes != null) {
+        await _pingPlayer.play(BytesSource(bytes));
       }
     } catch (e) {
       debugPrint('[ringtone] ping failed: $e');
@@ -104,7 +200,7 @@ class RingtoneService {
   static const int _sampleRate = 22050;
   static const double _gain = 0.4;
 
-  Uint8List _wav(List<_Seg> pattern) {
+  Uint8List _wav(List<Seg> pattern, {double gain = _gain}) {
     var totalSamples = 0;
     for (final s in pattern) {
       totalSamples += (s.duration * _sampleRate).round();
@@ -126,7 +222,7 @@ class RingtoneService {
         } else if (i > samples - fade) {
           env = (samples - i) / fade;
         }
-        final v = (sin(omega * i) * env * _gain * 32767).toInt();
+        final v = (sin(omega * i) * env * gain * 32767).toInt();
         pcm[idx++] = v.clamp(-32768, 32767);
       }
     }
@@ -156,8 +252,8 @@ class RingtoneService {
       [v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff, (v >> 24) & 0xff];
 }
 
-class _Seg {
-  const _Seg(this.freq, this.duration);
+class Seg {
+  const Seg(this.freq, this.duration);
   final double freq;
   final double duration;
 }

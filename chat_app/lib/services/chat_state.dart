@@ -206,6 +206,10 @@ class ChatThread extends ChangeNotifier {
   /// screen answer questions the inbox summary can't when a thread is
   /// opened by id alone (e.g. from a notification tap).
   ConversationDetail? get detail => _detail;
+
+  /// Facebook page threads get their own notification cue, matching the
+  /// web app's separate `fb` sound slot.
+  bool get isFacebook => _detail?.source == 'facebook';
   final int myUserId;
   final ChatService _service;
   final ChatRealtimeService _realtime;
@@ -460,7 +464,7 @@ class ChatThread extends ChangeNotifier {
     if (byId) return;
     _messages = [m, ..._messages];
     if (m.senderId != myUserId) {
-      unawaited(RingtoneService.instance.ping());
+      unawaited(RingtoneService.instance.ping(facebook: isFacebook));
     }
     notifyListeners();
   }

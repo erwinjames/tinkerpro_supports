@@ -13,6 +13,7 @@ import '../services/chat_state.dart';
 import '../services/incoming_call_service.dart';
 import '../services/location_service.dart';
 import '../services/notification_service.dart';
+import '../services/sound_prefs_service.dart';
 import '../services/theme_prefs.dart';
 import '../theme.dart';
 import '../widgets/premium.dart';
@@ -66,6 +67,7 @@ class _ChatShellState extends State<ChatShell> with WidgetsBindingObserver {
 
     _startIfPermitted();
     _reportLocation();
+    SoundPrefsService(widget.api).load();
   }
 
   /// Chat is gated on the `chat` permission, matching the web sidebar and the
