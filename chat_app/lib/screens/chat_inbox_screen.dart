@@ -76,8 +76,13 @@ class _ChatInboxScreenState extends State<ChatInboxScreen> {
       case _InboxView.archived:
         return _archived;
       case _InboxView.inbox:
+        // A conversation nobody has written in yet is noise — it carries no
+        // preview and nothing to read. It reappears the moment it has a
+        // message. Requests and archived views are left unfiltered so
+        // nothing silently vanishes from them.
         return widget.inbox.conversations
-            .where((c) => !c.isArchived && !c.isFacebookRequest)
+            .where((c) =>
+                !c.isArchived && !c.isFacebookRequest && c.lastMessage != null)
             .toList();
     }
   }
