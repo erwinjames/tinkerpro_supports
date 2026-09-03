@@ -72,6 +72,35 @@ class IncomingCallEvents {
     });
   }
 
+  /// A call accepted from the CallKit sheet while the app was not running
+  /// fires its event before [start] can subscribe, so it is lost. The plugin
+  /// keeps accepted calls in its active list — read that on launch and
+  /// replay the accept, otherwise the user lands in the app with no call.
+  Future<IncomingCallEvent?> pendingAcceptedCall() async {
+    if (!Platform.isAndroid && !Platform.isIOS) return null;
+    try {
+      final calls = await FlutterCallkitIncoming.activeCalls();
+      if (calls is! List) return null;
+      for (final entry in calls) {
+        if (entry is! Map) continue;
+        final extra = entry['extra'];
+        if (extra is! Map) continue;
+        final callId = (extra['call_id'] ?? '').toString();
+        if (callId.isEmpty) continue;
+        return IncomingCallEvent(
+          action: IncomingCallAction.accept,
+          callId: callId,
+          callerId: int.tryParse((extra['caller_id'] ?? '').toString()) ?? 0,
+          callerName: (extra['caller_name'] ?? '').toString(),
+          media: (extra['media'] ?? 'voice').toString(),
+        );
+      }
+    } catch (e) {
+      debugPrint('[incoming_call] activeCalls lookup failed: $e');
+    }
+    return null;
+  }
+
   Future<void> dispose() async {
     await _sub?.cancel();
     _sub = null;

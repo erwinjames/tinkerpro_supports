@@ -57,6 +57,10 @@ class CallService extends ChangeNotifier {
   DateTime? _iceExpiresAt;
   StreamSubscription<CallSignal>? _signalSub;
 
+  /// Set when a call ends for a reason worth telling the user about, so the
+  /// shell can surface it. Cleared by the reader.
+  String? lastError;
+
   CallPhase phase = CallPhase.idle;
   CallRole? role;
   CallMedia media = CallMedia.voice;
@@ -643,7 +647,9 @@ class CallService extends ChangeNotifier {
 
     final cached = await chat.fetchPendingOffer();
     if (cached == null || cached['call_id'] != callId) {
-
+      // The caller's SDP is only kept server-side for a few minutes. Past
+      // that the call can't be joined — say so rather than vanishing, which
+      // reads as the app simply doing nothing after an accept.
       debugPrint('[call] acceptIncomingFromPush — no cached offer for $callId');
       await chat.signal(
         peerId: callerId,
@@ -652,6 +658,8 @@ class CallService extends ChangeNotifier {
         media: media,
       );
       _cleanup(silent: true);
+      lastError = 'That call has already ended';
+      notifyListeners();
       return;
     }
 

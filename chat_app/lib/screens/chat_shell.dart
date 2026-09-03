@@ -172,8 +172,24 @@ class _ChatShellState extends State<ChatShell> with WidgetsBindingObserver {
 
     unawaited(_chatRealtime.connect(uid));
     unawaited(inbox.load());
+    unawaited(_resumeAcceptedCall(calls));
 
     _consumePendingChatNav();
+  }
+
+  /// Accepting from the CallKit sheet with the app closed fires the event
+  /// before anything is listening, so the call is lost and the user just
+  /// lands in the app. Replay it from the plugin's active-call list.
+  Future<void> _resumeAcceptedCall(CallService calls) async {
+    final pending = await IncomingCallEvents.instance.pendingAcceptedCall();
+    if (pending == null || !mounted) return;
+    debugPrint('[call] resuming accepted call ${pending.callId} after launch');
+    await calls.acceptIncomingFromPush(
+      callId: pending.callId,
+      callerId: pending.callerId,
+      callerName: pending.callerName,
+      media: pending.media,
+    );
   }
 
   void _onInboxChange() {
@@ -242,6 +258,15 @@ class _ChatShellState extends State<ChatShell> with WidgetsBindingObserver {
   void _onCallChange() {
     final calls = _callService;
     if (calls == null || !mounted) return;
+
+    final error = calls.lastError;
+    if (error != null) {
+      calls.lastError = null;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(error)),
+      );
+    }
+
     if (calls.isActive && !_callScreenOpen) {
       _callScreenOpen = true;
       Navigator.of(context, rootNavigator: true)
