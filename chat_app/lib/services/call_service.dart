@@ -68,6 +68,13 @@ class CallService extends ChangeNotifier {
   bool _hasTurn = false;
   bool get hasTurn => _hasTurn;
 
+  /// One-line ICE state for the call screen, so a stuck call can be
+  /// diagnosed from a screenshot without attaching a debugger.
+  String? iceDiagnostics;
+
+  int _localCandidateCount = 0;
+  int _remoteCandidateCount = 0;
+
   CallPhase phase = CallPhase.idle;
   CallRole? role;
   CallMedia media = CallMedia.voice;
@@ -803,6 +810,7 @@ class CallService extends ChangeNotifier {
           p.pendingIce.add(cand);
           break;
         }
+        _remoteCandidateCount++;
         try {
           final rd = await pc.getRemoteDescription();
           if (rd != null) {
@@ -882,6 +890,7 @@ class CallService extends ChangeNotifier {
     });
     p.pc = pc;
     pc.onIceCandidate = (RTCIceCandidate cand) {
+      if (cand.candidate != null) _localCandidateCount++;
       if (cand.candidate == null) {
         debugPrint('[call] local ICE: end-of-candidates for ${p.id}');
         return;
@@ -905,6 +914,10 @@ class CallService extends ChangeNotifier {
     pc.onIceConnectionState = (state) {
       debugPrint('[call] ${p.id} iceConnectionState = $state '
           '(turn=$_hasTurn, servers=${_ice.length})');
+      iceDiagnostics = 'turn=$_hasTurn · servers=${_ice.length} · '
+          '${state.name.replaceFirst("RTCIceConnectionState", "")} · '
+          'local=$_localCandidateCount remote=$_remoteCandidateCount';
+      notifyListeners();
       if (state == RTCIceConnectionState.RTCIceConnectionStateConnected ||
           state == RTCIceConnectionState.RTCIceConnectionStateCompleted) {
         _onPeerConnected(p);
