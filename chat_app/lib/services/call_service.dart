@@ -74,6 +74,13 @@ class CallService extends ChangeNotifier {
 
   int _localCandidateCount = 0;
   int _remoteCandidateCount = 0;
+  String _iceState = 'new';
+
+  void _publishIceDiagnostics() {
+    iceDiagnostics = 'turn=$_hasTurn · servers=${_ice.length} · $_iceState · '
+        'local=$_localCandidateCount remote=$_remoteCandidateCount';
+    notifyListeners();
+  }
 
   CallPhase phase = CallPhase.idle;
   CallRole? role;
@@ -801,6 +808,11 @@ class CallService extends ChangeNotifier {
       case 'ice':
         if (sig.payload == null) return;
         final cand = _candidateOf(sig);
+        // Count every arrival, including ones buffered before the peer or
+        // its connection exists — otherwise the diagnostic reads zero while
+        // candidates are in fact coming in.
+        _remoteCandidateCount++;
+        _publishIceDiagnostics();
         if (p == null) {
           _bufferEarlyIce(sig);
           break;
@@ -810,7 +822,6 @@ class CallService extends ChangeNotifier {
           p.pendingIce.add(cand);
           break;
         }
-        _remoteCandidateCount++;
         try {
           final rd = await pc.getRemoteDescription();
           if (rd != null) {
@@ -890,7 +901,10 @@ class CallService extends ChangeNotifier {
     });
     p.pc = pc;
     pc.onIceCandidate = (RTCIceCandidate cand) {
-      if (cand.candidate != null) _localCandidateCount++;
+      if (cand.candidate != null) {
+        _localCandidateCount++;
+        _publishIceDiagnostics();
+      }
       if (cand.candidate == null) {
         debugPrint('[call] local ICE: end-of-candidates for ${p.id}');
         return;
@@ -914,10 +928,8 @@ class CallService extends ChangeNotifier {
     pc.onIceConnectionState = (state) {
       debugPrint('[call] ${p.id} iceConnectionState = $state '
           '(turn=$_hasTurn, servers=${_ice.length})');
-      iceDiagnostics = 'turn=$_hasTurn · servers=${_ice.length} · '
-          '${state.name.replaceFirst("RTCIceConnectionState", "")} · '
-          'local=$_localCandidateCount remote=$_remoteCandidateCount';
-      notifyListeners();
+      _iceState = state.name.replaceFirst('RTCIceConnectionState', '');
+      _publishIceDiagnostics();
       if (state == RTCIceConnectionState.RTCIceConnectionStateConnected ||
           state == RTCIceConnectionState.RTCIceConnectionStateCompleted) {
         _onPeerConnected(p);
