@@ -516,7 +516,10 @@ class CallService extends ChangeNotifier {
     }
     unawaited(RingtoneService.instance.stop());
 
-    if (callId != null) unawaited(markIncomingCallConnected(callId!));
+    if (callId != null) {
+      unawaited(markIncomingCallConnected(callId!));
+      unawaited(dismissIncomingCall(callId!));
+    }
     phase = CallPhase.connecting;
 
     _signalHandledElsewhere();
@@ -733,10 +736,12 @@ class CallService extends ChangeNotifier {
   }) async {
     if (callerId <= 0 || callId.isEmpty) return;
 
-    if (this.callId == callId &&
-        role == CallRole.callee &&
-        phase == CallPhase.ringing) {
-      await decline();
+    if (this.callId == callId && isActive) {
+      if (role == CallRole.callee && phase == CallPhase.ringing) {
+        await decline();
+      } else {
+        debugPrint('[call] ignoring push decline for in-progress call $callId');
+      }
       return;
     }
 
