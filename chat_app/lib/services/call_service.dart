@@ -61,6 +61,11 @@ class CallService extends ChangeNotifier {
   /// shell can surface it. Cleared by the reader.
   String? lastError;
 
+  /// Whether the last ICE refresh yielded a usable TURN relay. Without one,
+  /// only same-network calls tend to connect.
+  bool _hasTurn = false;
+  bool get hasTurn => _hasTurn;
+
   CallPhase phase = CallPhase.idle;
   CallRole? role;
   CallMedia media = CallMedia.voice;
@@ -875,7 +880,8 @@ class CallService extends ChangeNotifier {
       debugPrint('[call] ${p.id} iceGatheringState = $state');
     };
     pc.onIceConnectionState = (state) {
-      debugPrint('[call] ${p.id} iceConnectionState = $state');
+      debugPrint('[call] ${p.id} iceConnectionState = $state '
+          '(turn=$_hasTurn, servers=${_ice.length})');
       if (state == RTCIceConnectionState.RTCIceConnectionStateConnected ||
           state == RTCIceConnectionState.RTCIceConnectionStateCompleted) {
         _onPeerConnected(p);
@@ -927,7 +933,15 @@ class CallService extends ChangeNotifier {
     if (_iceExpiresAt != null && now.isBefore(_iceExpiresAt!)) return;
 
     final res = await chat.iceServers();
-    if (res == null) return;
+    if (res == null) {
+      // Falling through leaves the hardcoded STUN-only default, which cannot
+      // traverse most mobile/NAT paths — the call then sits on "connecting"
+      // until the timeout. Say so rather than failing mutely.
+      _hasTurn = false;
+      debugPrint('[call] ICE fetch failed — using STUN-only fallback');
+      lastError = 'No relay server available — this call may not connect';
+      return;
+    }
 
     final out = <Map<String, dynamic>>[];
     for (final entry in (res['iceServers'] as List)) {
@@ -945,13 +959,20 @@ class CallService extends ChangeNotifier {
         out.add(one);
       }
     }
-    if (out.isEmpty) return;
+    if (out.isEmpty) {
+      _hasTurn = false;
+      debugPrint('[call] ICE list empty — using STUN-only fallback');
+      lastError = 'No relay server available — this call may not connect';
+      return;
+    }
 
     _ice = out;
     final ttl = (res['ttl'] as num?)?.toInt() ?? 43200;
     _iceExpiresAt = now.add(Duration(seconds: (ttl ~/ 2).clamp(150, 86400)));
-    if (res['has_turn'] != true) {
-      debugPrint('[call] no TURN configured — calls will fail behind symmetric NAT');
+    _hasTurn = res['has_turn'] == true;
+    debugPrint('[call] ICE ready: ${out.length} server(s), turn=$_hasTurn');
+    if (!_hasTurn) {
+      lastError = 'No relay server available — this call may not connect';
     }
   }
 
