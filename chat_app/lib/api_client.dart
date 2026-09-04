@@ -340,8 +340,13 @@ class ApiClient {
 
   Map<String, dynamic> _decode(http.Response response) {
     if (response.statusCode < 200 || response.statusCode >= 300) {
+      // The API explains itself in the body — rate-limit lockouts say which
+      // limit was hit and how long to wait. Prefer that over a bare status
+      // code, which tells the user nothing actionable.
+      final serverMessage = _messageFromBody(response.body);
       throw HttpException(
-        'HTTP ${response.statusCode} from ${response.request?.url}',
+        serverMessage ??
+            'HTTP ${response.statusCode} from ${response.request?.url}',
       );
     }
     final trimmed = response.body.trim();
@@ -354,6 +359,21 @@ class ApiClient {
       throw HttpException('Non-JSON response: $trimmed');
     }
   }
+}
+
+String? _messageFromBody(String body) {
+  final trimmed = body.trim();
+  if (trimmed.isEmpty) return null;
+  try {
+    final decoded = jsonDecode(trimmed);
+    if (decoded is Map) {
+      final message = decoded['message'];
+      if (message is String && message.trim().isNotEmpty) {
+        return message.trim();
+      }
+    }
+  } catch (_) {}
+  return null;
 }
 
 class HttpException implements Exception {
