@@ -809,7 +809,13 @@ class CallService extends ChangeNotifier {
         }
         break;
       case 'handled':
-
+        // Answered or declined on another surface. Always tear down the
+        // CallKit sheet: when it was raised by a push while the app was
+        // backgrounded there is no local call state, so the phase guard
+        // below never fires and the notification would linger.
+        if (sig.callId.isNotEmpty) {
+          unawaited(dismissIncomingCall(sig.callId));
+        }
         if (role == CallRole.callee && phase == CallPhase.ringing) {
           _cleanup(silent: true);
         }
@@ -817,6 +823,11 @@ class CallService extends ChangeNotifier {
       case 'decline':
       case 'busy':
       case 'end':
+        // Same reasoning — the caller hanging up must clear a push-raised
+        // sheet even with no CallService state to clean.
+        if (sig.callId.isNotEmpty && callId != sig.callId) {
+          unawaited(dismissIncomingCall(sig.callId));
+        }
         _peerLeft(sig.fromId);
         break;
     }
