@@ -29,6 +29,7 @@ class CallParticipant {
   MediaStream? stream;
   final RTCVideoRenderer renderer = RTCVideoRenderer();
   final List<RTCIceCandidate> pendingIce = [];
+  String? avatarUrl;
   bool remoteReady = false;
   bool connected = false;
   bool rendererReady = false;
@@ -93,6 +94,8 @@ class CallService extends ChangeNotifier {
   CallMedia media = CallMedia.voice;
   int? peerId;
   String peerName = '';
+  String? peerAvatarUrl;
+  String? myAvatarUrl;
   String? callId;
 
   bool isGroup = false;
@@ -123,6 +126,57 @@ class CallService extends ChangeNotifier {
   Timer? _connectingTimeout;
   Timer? _staleTimeout;
   bool _accepting = false;
+
+  static final Map<int, String?> _avatarCache = {};
+
+  Map<String, String> get avatarHeaders => chat.api.authHeaders();
+
+  String? _absoluteAvatar(String? rel) {
+    final raw = rel?.trim() ?? '';
+    if (raw.isEmpty) return null;
+    if (raw.startsWith('http://') || raw.startsWith('https://')) return raw;
+    return '${chat.api.baseUrl}/${raw.replaceAll(RegExp(r'^/+'), '')}';
+  }
+
+  Future<void> _resolveAvatars() async {
+    final wanted = <int>{myUserId, ..._peers.keys};
+    if (peerId != null) wanted.add(peerId!);
+    final missing = wanted.where((i) => i > 0 && !_avatarCache.containsKey(i));
+    if (missing.isNotEmpty) {
+      try {
+        final users = await chat.directory();
+        if (users.isEmpty) return;
+        for (final u in users) {
+          _avatarCache[u.id] = _absoluteAvatar(u.avatar);
+        }
+        for (final id in wanted) {
+          _avatarCache.putIfAbsent(id, () => null);
+        }
+      } catch (_) {
+        return;
+      }
+    }
+
+    var changed = false;
+    for (final p in _peers.values) {
+      final url = _avatarCache[p.id];
+      if (p.avatarUrl != url) {
+        p.avatarUrl = url;
+        changed = true;
+      }
+    }
+    final mine = _avatarCache[myUserId];
+    if (myAvatarUrl != mine) {
+      myAvatarUrl = mine;
+      changed = true;
+    }
+    final theirs = peerId == null ? null : _avatarCache[peerId!];
+    if (peerAvatarUrl != theirs) {
+      peerAvatarUrl = theirs;
+      changed = true;
+    }
+    if (changed) notifyListeners();
+  }
 
   List<CallParticipant> get participants => _peers.values.toList();
 
@@ -302,7 +356,9 @@ class CallService extends ChangeNotifier {
       return existing;
     }
     final p = CallParticipant(id: id, name: name.isEmpty ? 'User' : name);
+    p.avatarUrl = _avatarCache[id];
     _peers[id] = p;
+    unawaited(_resolveAvatars());
     try {
       await p.renderer.initialize();
       p.rendererReady = true;
@@ -1174,6 +1230,7 @@ class CallService extends ChangeNotifier {
     role = null;
     peerId = null;
     peerName = '';
+    peerAvatarUrl = null;
     callId = null;
     media = CallMedia.voice;
     muted = false;
