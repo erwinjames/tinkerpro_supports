@@ -29,6 +29,7 @@ class CallParticipant {
   MediaStream? stream;
   final RTCVideoRenderer renderer = RTCVideoRenderer();
   final List<RTCIceCandidate> pendingIce = [];
+  bool remoteReady = false;
   bool connected = false;
   bool rendererReady = false;
 
@@ -59,17 +60,11 @@ class CallService extends ChangeNotifier {
   DateTime? _iceExpiresAt;
   StreamSubscription<CallSignal>? _signalSub;
 
-  /// Set when a call ends for a reason worth telling the user about, so the
-  /// shell can surface it. Cleared by the reader.
   String? lastError;
 
-  /// Whether the last ICE refresh yielded a usable TURN relay. Without one,
-  /// only same-network calls tend to connect.
   bool _hasTurn = false;
   bool get hasTurn => _hasTurn;
 
-  /// One-line ICE state for the call screen, so a stuck call can be
-  /// diagnosed from a screenshot without attaching a debugger.
   String? iceDiagnostics;
 
   int _localCandidateCount = 0;
@@ -77,8 +72,6 @@ class CallService extends ChangeNotifier {
   String _iceState = 'new';
   final Set<String> _remoteCandidateKinds = {};
 
-  /// `host`, `srflx`, `relay` — plus `mdns` for Chrome's anonymised
-  /// `*.local` host candidates, which a phone off the LAN cannot resolve.
   String _candidateKind(String? raw) {
     final c = raw ?? '';
     if (c.contains('.local')) return 'mdns';
@@ -129,6 +122,7 @@ class CallService extends ChangeNotifier {
   Timer? _calleeRingTimeout;
   Timer? _connectingTimeout;
   Timer? _staleTimeout;
+  bool _accepting = false;
 
   List<CallParticipant> get participants => _peers.values.toList();
 
@@ -468,6 +462,7 @@ class CallService extends ChangeNotifier {
         sig.payload!['sdp']?.toString(),
         sig.payload!['type']?.toString(),
       ));
+      p.remoteReady = true;
       await _drainIce(p);
       final answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
@@ -486,8 +481,39 @@ class CallService extends ChangeNotifier {
     }
   }
 
+  Future<Map<String, dynamic>?> _fetchOfferFor(String? id) async {
+    if (id == null || id.isEmpty) return null;
+    for (var attempt = 0; attempt < 3; attempt++) {
+      final cached = await chat.fetchPendingOffer();
+      if (cached != null && cached['call_id'] == id) return cached;
+      if (attempt < 2) {
+        await Future.delayed(const Duration(milliseconds: 700));
+      }
+    }
+    return null;
+  }
+
   Future<void> accept() async {
-    if (role != CallRole.callee || _pendingOffer == null) return;
+    if (role != CallRole.callee || _accepting) return;
+    _accepting = true;
+    try {
+      await _accept();
+    } finally {
+      _accepting = false;
+    }
+  }
+
+  Future<void> _accept() async {
+    if (_pendingOffer == null) {
+      debugPrint('[call] accept without a seeded offer — fetching $callId');
+      final cached = await _fetchOfferFor(callId);
+      if (cached == null) {
+        lastError = 'Still reaching the caller — tap answer again';
+        notifyListeners();
+        return;
+      }
+      _pendingOffer = RTCSessionDescription(cached['sdp']?.toString(), 'offer');
+    }
     unawaited(RingtoneService.instance.stop());
 
     if (callId != null) unawaited(markIncomingCallConnected(callId!));
@@ -542,6 +568,7 @@ class CallService extends ChangeNotifier {
     try {
       await pc.setRemoteDescription(_pendingOffer!);
       _pendingOffer = null;
+      p.remoteReady = true;
       await _drainIce(p);
 
       final answer = await pc.createAnswer();
@@ -638,17 +665,9 @@ class CallService extends ChangeNotifier {
 
     if (this.callId == callId &&
         role == CallRole.callee &&
-        phase == CallPhase.ringing &&
-        _pendingOffer != null) {
-      debugPrint('[call] acceptIncomingFromPush — answering in-flight ringing $callId');
-      await accept();
-      return;
-    }
-
-    if (this.callId == callId &&
-        role == CallRole.callee &&
         phase == CallPhase.ringing) {
-      debugPrint('[call] acceptIncomingFromPush — seed already in progress $callId');
+      debugPrint('[call] acceptIncomingFromPush — answering ringing $callId');
+      await accept();
       return;
     }
 
@@ -689,28 +708,10 @@ class CallService extends ChangeNotifier {
       media: media,
     );
 
-    // The offer is cached server-side for a limited window and the row may
-    // still be landing when a cold start beats it. Retry briefly instead of
-    // giving up on the first miss — declining here kills a call the caller
-    // is still ringing on.
-    Map<String, dynamic>? cached;
-    for (var attempt = 0; attempt < 3; attempt++) {
-      cached = await chat.fetchPendingOffer();
-      if (cached != null && cached['call_id'] == callId) break;
-      cached = null;
-      if (attempt < 2) {
-        await Future.delayed(const Duration(milliseconds: 700));
-      }
-    }
+    final cached = await _fetchOfferFor(callId);
 
     if (cached == null) {
-      // The caller's SDP is only kept server-side for a few minutes. Past
-      // that the call can't be joined — say so rather than vanishing, which
-      // reads as the app simply doing nothing after an accept.
       debugPrint('[call] acceptIncomingFromPush — no cached offer for $callId');
-      // Do NOT decline: the caller may still be ringing and a decline ends
-      // their call outright. Stay as a ringing callee so the offer can still
-      // arrive over the realtime channel and be answered normally.
       phase = CallPhase.ringing;
       lastError = 'Could not pick up automatically — tap answer again';
       notifyListeners();
@@ -813,6 +814,7 @@ class CallService extends ChangeNotifier {
             sig.payload!['sdp']?.toString(),
             sig.payload!['type']?.toString(),
           ));
+          p.remoteReady = true;
           await _drainIce(p);
 
           unawaited(RingtoneService.instance.stop());
@@ -831,9 +833,6 @@ class CallService extends ChangeNotifier {
       case 'ice':
         if (sig.payload == null) return;
         final cand = _candidateOf(sig);
-        // Count every arrival, including ones buffered before the peer or
-        // its connection exists — otherwise the diagnostic reads zero while
-        // candidates are in fact coming in.
         _remoteCandidateCount++;
         _remoteCandidateKinds.add(
             _candidateKind(sig.payload?['candidate']?.toString()));
@@ -842,21 +841,8 @@ class CallService extends ChangeNotifier {
           _bufferEarlyIce(sig);
           break;
         }
-        final pc = p.pc;
-        if (pc == null) {
-          p.pendingIce.add(cand);
-          break;
-        }
-        try {
-          final rd = await pc.getRemoteDescription();
-          if (rd != null) {
-            await pc.addCandidate(cand);
-          } else {
-            p.pendingIce.add(cand);
-          }
-        } catch (_) {
-          p.pendingIce.add(cand);
-        }
+        p.pendingIce.add(cand);
+        await _drainIce(p);
         break;
       case 'ringing':
         if (role == CallRole.caller && phase == CallPhase.calling) {
@@ -865,10 +851,6 @@ class CallService extends ChangeNotifier {
         }
         break;
       case 'handled':
-        // Answered or declined on another surface. Always tear down the
-        // CallKit sheet: when it was raised by a push while the app was
-        // backgrounded there is no local call state, so the phase guard
-        // below never fires and the notification would linger.
         if (sig.callId.isNotEmpty) {
           unawaited(dismissIncomingCall(sig.callId));
         }
@@ -879,8 +861,6 @@ class CallService extends ChangeNotifier {
       case 'decline':
       case 'busy':
       case 'end':
-        // Same reasoning — the caller hanging up must clear a push-raised
-        // sheet even with no CallService state to clean.
         if (sig.callId.isNotEmpty && callId != sig.callId) {
           unawaited(dismissIncomingCall(sig.callId));
         }
@@ -906,16 +886,23 @@ class CallService extends ChangeNotifier {
     final early = _earlyIce.remove('$callId|${p.id}');
     if (early != null && early.isNotEmpty) {
       p.pendingIce.addAll(early);
-      debugPrint('[call] drained ${early.length} pre-offer ICE for ${p.id}');
+      debugPrint('[call] queued ${early.length} pre-offer ICE for ${p.id}');
     }
     final pc = p.pc;
-    if (pc == null) return;
-    for (final c in p.pendingIce) {
+    if (pc == null || !p.remoteReady || p.pendingIce.isEmpty) return;
+    final queued = List<RTCIceCandidate>.from(p.pendingIce);
+    p.pendingIce.clear();
+    var added = 0;
+    for (final c in queued) {
       try {
         await pc.addCandidate(c);
-      } catch (_) {}
+        added++;
+      } catch (_) {
+        p.pendingIce.add(c);
+      }
     }
-    p.pendingIce.clear();
+    debugPrint('[call] added $added/${queued.length} ICE for ${p.id}'
+        '${p.pendingIce.isEmpty ? '' : ' (${p.pendingIce.length} requeued)'}');
   }
 
   Future<RTCPeerConnection> _createPeer(CallParticipant p) async {
@@ -1007,9 +994,6 @@ class CallService extends ChangeNotifier {
 
     final res = await chat.iceServers();
     if (res == null) {
-      // Falling through leaves the hardcoded STUN-only default, which cannot
-      // traverse most mobile/NAT paths — the call then sits on "connecting"
-      // until the timeout. Say so rather than failing mutely.
       _hasTurn = false;
       debugPrint('[call] ICE fetch failed — using STUN-only fallback');
       lastError = 'No relay server available — this call may not connect';
@@ -1049,10 +1033,6 @@ class CallService extends ChangeNotifier {
     }
   }
 
-  /// Android and iOS gate the mic and camera behind a runtime grant. The app
-  /// never asked for them, leaving the request to flutter_webrtc's internal
-  /// flow — which needs a foreground Activity and so is unreliable when a
-  /// call is accepted from the CallKit sheet. Ask explicitly first.
   Future<bool> _ensureCapturePermissions(CallMedia mediaKind) async {
     if (!kIsMobilePlatform) return true;
     try {
