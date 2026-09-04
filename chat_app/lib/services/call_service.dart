@@ -75,10 +75,23 @@ class CallService extends ChangeNotifier {
   int _localCandidateCount = 0;
   int _remoteCandidateCount = 0;
   String _iceState = 'new';
+  final Set<String> _remoteCandidateKinds = {};
+
+  /// `host`, `srflx`, `relay` — plus `mdns` for Chrome's anonymised
+  /// `*.local` host candidates, which a phone off the LAN cannot resolve.
+  String _candidateKind(String? raw) {
+    final c = raw ?? '';
+    if (c.contains('.local')) return 'mdns';
+    final m = RegExp(r'\btyp (\w+)').firstMatch(c);
+    return m?.group(1) ?? '?';
+  }
 
   void _publishIceDiagnostics() {
+    final kinds = _remoteCandidateKinds.isEmpty
+        ? ''
+        : '(${_remoteCandidateKinds.join(",")})';
     iceDiagnostics = 'turn=$_hasTurn · servers=${_ice.length} · $_iceState · '
-        'local=$_localCandidateCount remote=$_remoteCandidateCount';
+        'local=$_localCandidateCount remote=$_remoteCandidateCount$kinds';
     notifyListeners();
   }
 
@@ -812,6 +825,8 @@ class CallService extends ChangeNotifier {
         // its connection exists — otherwise the diagnostic reads zero while
         // candidates are in fact coming in.
         _remoteCandidateCount++;
+        _remoteCandidateKinds.add(
+            _candidateKind(sig.payload?['candidate']?.toString()));
         _publishIceDiagnostics();
         if (p == null) {
           _bufferEarlyIce(sig);
