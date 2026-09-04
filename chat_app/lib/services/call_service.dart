@@ -3,8 +3,10 @@ import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 import '../models/chat_models.dart';
+import '../platform_info.dart';
 import 'chat_realtime.dart';
 import 'chat_service.dart';
 import 'incoming_call_service.dart';
@@ -202,6 +204,11 @@ class CallService extends ChangeNotifier {
     notifyListeners();
 
     try {
+      if (!await _ensureCapturePermissions(media)) {
+        _cleanup(silent: true);
+        notifyListeners();
+        return false;
+      }
       _localStream = await _getMedia(media);
       debugPrint('[call] local stream tracks: '
           '${_localStream!.getAudioTracks().length} audio, '
@@ -476,6 +483,11 @@ class CallService extends ChangeNotifier {
     await _refreshIce();
 
     try {
+      if (!await _ensureCapturePermissions(media)) {
+        _cleanup(silent: true);
+        notifyListeners();
+        return;
+      }
       _localStream = await _getMedia(media);
       debugPrint('[call] local stream tracks: '
           '${_localStream!.getAudioTracks().length} audio, '
@@ -984,6 +996,32 @@ class CallService extends ChangeNotifier {
     debugPrint('[call] ICE ready: ${out.length} server(s), turn=$_hasTurn');
     if (!_hasTurn) {
       lastError = 'No relay server available — this call may not connect';
+    }
+  }
+
+  /// Android and iOS gate the mic and camera behind a runtime grant. The app
+  /// never asked for them, leaving the request to flutter_webrtc's internal
+  /// flow — which needs a foreground Activity and so is unreliable when a
+  /// call is accepted from the CallKit sheet. Ask explicitly first.
+  Future<bool> _ensureCapturePermissions(CallMedia mediaKind) async {
+    if (!kIsMobilePlatform) return true;
+    try {
+      final wanted = <Permission>[
+        Permission.microphone,
+        if (mediaKind == CallMedia.video) Permission.camera,
+      ];
+      final statuses = await wanted.request();
+      final denied = statuses.entries
+          .where((e) => !e.value.isGranted)
+          .map((e) => e.key == Permission.camera ? 'camera' : 'microphone')
+          .toList();
+      if (denied.isEmpty) return true;
+      debugPrint('[call] capture permission denied: ${denied.join(", ")}');
+      lastError = 'Allow ${denied.join(" and ")} access to take calls';
+      return false;
+    } catch (e) {
+      debugPrint('[call] permission request failed: $e');
+      return true;
     }
   }
 
