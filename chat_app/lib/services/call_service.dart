@@ -689,20 +689,30 @@ class CallService extends ChangeNotifier {
       media: media,
     );
 
-    final cached = await chat.fetchPendingOffer();
-    if (cached == null || cached['call_id'] != callId) {
+    // The offer is cached server-side for a limited window and the row may
+    // still be landing when a cold start beats it. Retry briefly instead of
+    // giving up on the first miss — declining here kills a call the caller
+    // is still ringing on.
+    Map<String, dynamic>? cached;
+    for (var attempt = 0; attempt < 3; attempt++) {
+      cached = await chat.fetchPendingOffer();
+      if (cached != null && cached['call_id'] == callId) break;
+      cached = null;
+      if (attempt < 2) {
+        await Future.delayed(const Duration(milliseconds: 700));
+      }
+    }
+
+    if (cached == null) {
       // The caller's SDP is only kept server-side for a few minutes. Past
       // that the call can't be joined — say so rather than vanishing, which
       // reads as the app simply doing nothing after an accept.
       debugPrint('[call] acceptIncomingFromPush — no cached offer for $callId');
-      await chat.signal(
-        peerId: callerId,
-        kind: 'decline',
-        callId: callId,
-        media: media,
-      );
-      _cleanup(silent: true);
-      lastError = 'That call has already ended';
+      // Do NOT decline: the caller may still be ringing and a decline ends
+      // their call outright. Stay as a ringing callee so the offer can still
+      // arrive over the realtime channel and be answered normally.
+      phase = CallPhase.ringing;
+      lastError = 'Could not pick up automatically — tap answer again';
       notifyListeners();
       return;
     }
