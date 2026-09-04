@@ -121,20 +121,7 @@ class _CallScreenState extends State<CallScreen> {
                 child: Padding(
                   padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
                   child: Center(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        _GlassPill(label: status, monospace: true),
-                        if (c.phase == CallPhase.connecting &&
-                            c.iceDiagnostics != null) ...[
-                          const SizedBox(height: 6),
-                          _GlassPill(
-                            label: c.iceDiagnostics!,
-                            monospace: true,
-                          ),
-                        ],
-                      ],
-                    ),
+                    child: _GlassPill(label: status, monospace: true),
                   ),
                 ),
               ),
