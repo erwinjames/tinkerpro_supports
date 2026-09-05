@@ -42,8 +42,6 @@ class ChatTheme {
     required this.displayName,
     required this.mineBg,
     required this.mineBorder,
-    required this.theirBg,
-    required this.theirBorder,
     required this.accent,
   });
 
@@ -55,22 +53,13 @@ class ChatTheme {
 
   final Color mineBorder;
 
-  final Color theirBg;
-
-  final Color theirBorder;
-
   final Color accent;
-
-  static const _peerBg = Color(0xFF141311);
-  static const _peerBorder = Color(0xFF2A2824);
 
   static const ChatTheme signal = ChatTheme(
     key: 'signal',
     displayName: 'Signal',
     mineBg: Color(0x33FF7D00),
     mineBorder: Color(0xFFFF7D00),
-    theirBg: _peerBg,
-    theirBorder: _peerBorder,
     accent: Color(0xFFFF7D00),
   );
 
@@ -79,8 +68,6 @@ class ChatTheme {
     displayName: 'Ocean',
     mineBg: Color(0x332196F3),
     mineBorder: Color(0xFF2196F3),
-    theirBg: _peerBg,
-    theirBorder: _peerBorder,
     accent: Color(0xFF2196F3),
   );
 
@@ -89,8 +76,6 @@ class ChatTheme {
     displayName: 'Forest',
     mineBg: Color(0x3343A047),
     mineBorder: Color(0xFF43A047),
-    theirBg: _peerBg,
-    theirBorder: _peerBorder,
     accent: Color(0xFF43A047),
   );
 
@@ -99,8 +84,6 @@ class ChatTheme {
     displayName: 'Sunset',
     mineBg: Color(0x33E91E63),
     mineBorder: Color(0xFFE91E63),
-    theirBg: _peerBg,
-    theirBorder: _peerBorder,
     accent: Color(0xFFE91E63),
   );
 
@@ -109,8 +92,6 @@ class ChatTheme {
     displayName: 'Lavender',
     mineBg: Color(0x339C27B0),
     mineBorder: Color(0xFF9C27B0),
-    theirBg: _peerBg,
-    theirBorder: _peerBorder,
     accent: Color(0xFF9C27B0),
   );
 
@@ -119,18 +100,14 @@ class ChatTheme {
     displayName: 'Amber',
     mineBg: Color(0x33FFB300),
     mineBorder: Color(0xFFFFB300),
-    theirBg: _peerBg,
-    theirBorder: _peerBorder,
     accent: Color(0xFFFFB300),
   );
 
   static const ChatTheme mono = ChatTheme(
     key: 'mono',
     displayName: 'Mono',
-    mineBg: Color(0xFF1C1B18),
+    mineBg: Color(0x33A8A59D),
     mineBorder: Color(0xFFA8A59D),
-    theirBg: _peerBg,
-    theirBorder: _peerBorder,
     accent: Color(0xFFA8A59D),
   );
 

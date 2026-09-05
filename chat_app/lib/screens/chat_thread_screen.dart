@@ -1601,15 +1601,12 @@ class _MessageBubble extends StatelessWidget {
   Color get _tagColour =>
       tone == _BubbleTone.page ? Brand.pageVoice : theme.accent;
 
-  /// Chat themes define bubble fills as translucent tints, which let a
-  /// tucked-behind quote show through the reply. Composite onto the canvas
-  /// so the colour is unchanged but the bubble is opaque.
   Color _bubbleFill(BuildContext context) {
     final tint = switch (tone) {
       _BubbleTone.mine => theme.mineBg,
       _BubbleTone.page => Brand.pageVoice.withValues(alpha: 0.22),
       _BubbleTone.agent => context.brand.surfaceHi,
-      _BubbleTone.peer => theme.theirBg,
+      _BubbleTone.peer => context.brand.surface,
     };
     return Color.alphaBlend(tint, context.brand.canvas);
   }
@@ -1618,7 +1615,7 @@ class _MessageBubble extends StatelessWidget {
     _BubbleTone.mine => theme.mineBorder,
     _BubbleTone.page => Brand.pageVoice,
     _BubbleTone.agent => context.brand.paperDim.withValues(alpha: 0.55),
-    _BubbleTone.peer => theme.theirBorder,
+    _BubbleTone.peer => context.brand.rule,
   };
 
   String? get _seenLabel {

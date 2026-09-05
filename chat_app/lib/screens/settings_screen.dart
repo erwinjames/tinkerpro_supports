@@ -773,8 +773,8 @@ class _BubblePreview extends StatelessWidget {
             top: size * 0.4,
             child: _previewBubble(
               size: size,
-              fill: theme.theirBg,
-              border: theme.theirBorder,
+              fill: context.brand.surface,
+              border: context.brand.rule,
             ),
           ),
           Positioned(
