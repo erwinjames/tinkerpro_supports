@@ -1,3 +1,4 @@
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
@@ -98,6 +99,8 @@ class _CallScreenState extends State<CallScreen> {
               _StagePortrait(
                 name: c.title,
                 pulse: !isIncoming && c.phase != CallPhase.connected,
+                avatarUrl: c.isGroup ? null : c.peerAvatarUrl,
+                headers: c.avatarHeaders,
                 caption: isIncoming
                     ? status
                     : (isVideo ? 'Video call' : 'Voice call'),
@@ -200,6 +203,8 @@ class _MeshGrid extends StatelessWidget {
     final tiles = <Widget>[
       _MeshTile(
         label: 'You',
+        avatarUrl: calls.myAvatarUrl,
+        headers: calls.avatarHeaders,
         renderer: isVideo ? calls.localRenderer : null,
         hasVideo: isVideo && !calls.cameraOff,
         mirror: true,
@@ -208,6 +213,8 @@ class _MeshGrid extends StatelessWidget {
       for (final p in calls.participants)
         _MeshTile(
           label: p.name,
+          avatarUrl: p.avatarUrl,
+          headers: calls.avatarHeaders,
           renderer: isVideo ? p.renderer : null,
           hasVideo: isVideo && p.hasVideo,
           mirror: false,
@@ -241,6 +248,8 @@ class _MeshGrid extends StatelessWidget {
 class _MeshTile extends StatelessWidget {
   const _MeshTile({
     required this.label,
+    required this.avatarUrl,
+    required this.headers,
     required this.renderer,
     required this.hasVideo,
     required this.mirror,
@@ -248,6 +257,8 @@ class _MeshTile extends StatelessWidget {
   });
 
   final String label;
+  final String? avatarUrl;
+  final Map<String, String> headers;
   final RTCVideoRenderer? renderer;
   final bool hasVideo;
   final bool mirror;
@@ -279,22 +290,12 @@ class _MeshTile extends StatelessWidget {
               )
             else
               Center(
-                child: Container(
-                  width: 64,
-                  height: 64,
-                  decoration: const BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: Brand.orange,
-                  ),
-                  alignment: Alignment.center,
-                  child: Text(
-                    initial,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 22,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
+                child: _AvatarCircle(
+                  size: 64,
+                  fontSize: 22,
+                  initial: initial,
+                  avatarUrl: avatarUrl,
+                  headers: headers,
                 ),
               ),
             if (connecting)
@@ -354,10 +355,14 @@ class _StagePortrait extends StatefulWidget {
     required this.name,
     required this.pulse,
     required this.caption,
+    required this.avatarUrl,
+    required this.headers,
   });
   final String name;
   final bool pulse;
   final String caption;
+  final String? avatarUrl;
+  final Map<String, String> headers;
 
   @override
   State<_StagePortrait> createState() => _StagePortraitState();
@@ -426,22 +431,12 @@ class _StagePortraitState extends State<_StagePortrait>
                           ),
                         ),
                       ),
-                    Container(
-                      width: 132,
-                      height: 132,
-                      decoration: const BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: Brand.orange,
-                      ),
-                      alignment: Alignment.center,
-                      child: Text(
-                        initial,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 46,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
+                    _AvatarCircle(
+                      size: 132,
+                      fontSize: 46,
+                      initial: initial,
+                      avatarUrl: widget.avatarUrl,
+                      headers: widget.headers,
                     ),
                   ],
                 ),
@@ -894,6 +889,57 @@ class _CallButtonState extends State<_CallButton>
           ),
         ),
       ),
+    );
+  }
+}
+
+class _AvatarCircle extends StatelessWidget {
+  const _AvatarCircle({
+    required this.size,
+    required this.fontSize,
+    required this.initial,
+    required this.headers,
+    this.avatarUrl,
+  });
+
+  final double size;
+  final double fontSize;
+  final String initial;
+  final Map<String, String> headers;
+  final String? avatarUrl;
+
+  @override
+  Widget build(BuildContext context) {
+    final letter = Center(
+      child: Text(
+        initial,
+        style: TextStyle(
+          color: Colors.white,
+          fontSize: fontSize,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+    );
+    final url = avatarUrl;
+    return Container(
+      width: size,
+      height: size,
+      clipBehavior: Clip.antiAlias,
+      decoration: const BoxDecoration(
+        shape: BoxShape.circle,
+        color: Brand.orange,
+      ),
+      child: url == null || url.isEmpty
+          ? letter
+          : CachedNetworkImage(
+              imageUrl: url,
+              httpHeaders: headers,
+              width: size,
+              height: size,
+              fit: BoxFit.cover,
+              placeholder: (_, _) => letter,
+              errorWidget: (_, _, _) => letter,
+            ),
     );
   }
 }

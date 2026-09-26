@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io' show Platform;
 
 import 'package:flutter/foundation.dart';
@@ -8,10 +9,14 @@ import 'package:flutter_callkit_incoming/entities/call_kit_params.dart';
 import 'package:flutter_callkit_incoming/entities/ios_params.dart';
 import 'package:flutter_callkit_incoming/entities/notification_params.dart';
 import 'package:flutter_callkit_incoming/flutter_callkit_incoming.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
-/// Triggered by [FlutterCallkitIncoming] events. Coarse-grained on purpose —
-/// `accept` / `decline` / `ended` is everything the rest of the app needs to
-/// know. SDP fetch + WebRTC negotiation is the [CallService]'s job.
+const String _kDefaultBaseUrl = String.fromEnvironment(
+  'TPS_BASE_URL',
+  defaultValue: 'https://support.tinkerpro.io',
+);
+const String _kAvatarCacheKey = 'call_avatar_cache';
+
 enum IncomingCallAction { accept, decline, timeout, ended }
 
 class IncomingCallEvent {
@@ -27,14 +32,9 @@ class IncomingCallEvent {
   final String callId;
   final int callerId;
   final String callerName;
-  final String media; // 'voice' | 'video'
+  final String media;
 }
 
-/// App-wide bus for CallKit-originated events. The CallService subscribes to
-/// this once it's constructed (after login bootstrap); the singleton lets
-/// the background isolate's `showCallkitIncoming` call still surface its
-/// follow-up accept / decline through a path the foreground app can pick
-/// up after a cold start.
 class IncomingCallEvents {
   IncomingCallEvents._();
   static final IncomingCallEvents instance = IncomingCallEvents._();
@@ -44,14 +44,8 @@ class IncomingCallEvents {
 
   StreamSubscription<CallEvent?>? _sub;
 
-  /// Wire `FlutterCallkitIncoming.onEvent` into [stream]. Safe to call more
-  /// than once; later calls are no-ops.
   void start() {
     if (_sub != null) return;
-    // flutter_callkit_incoming only has a native implementation on Android and
-    // iOS. On desktop/web the `flutter_callkit_incoming_events` EventChannel
-    // has no handler, so subscribing throws MissingPluginException (reported
-    // by the services library, not deliverable to onError). Skip it entirely.
     if (!Platform.isAndroid && !Platform.isIOS) return;
     _sub = FlutterCallkitIncoming.onEvent.listen(
       (event) {
@@ -60,8 +54,6 @@ class IncomingCallEvents {
         if (body is! Map) return;
         final extra = body['extra'];
         if (extra is! Map) return;
-        // Only events we tagged ourselves carry call_id in extra. CallKit's
-        // own outgoing-call events (and iOS PushKit ones in Phase 2) won't.
         final callId = (extra['call_id'] ?? '').toString();
         if (callId.isEmpty) return;
 
@@ -85,11 +77,6 @@ class IncomingCallEvents {
         );
       },
       onError: (Object e) {
-        // The CallKit EventChannel can throw MissingPluginException while it's
-        // (re)activating — most commonly right after a hot restart, when the
-        // Dart side re-subscribes before the native channel is re-registered,
-        // or on platforms with no native CallKit implementation. It's transient
-        // and non-fatal, so swallow it instead of letting it surface uncaught.
         debugPrint('[incoming_call] CallKit event stream error: $e');
       },
     );
@@ -102,13 +89,42 @@ class IncomingCallEvents {
   }
 }
 
-/// Render the native incoming-call sheet. Safe to call from either the
-/// foreground or the FCM background isolate. The [data] map is the payload
-/// from the FCM `data` block produced by `mobileSendCallPush()` server-side
-/// (`type: incoming_call`, `call_id`, `caller_id`, `caller_name`, `media`).
-///
-/// On Android: full-screen heads-up notification + ConnectionService entry.
-/// On iOS: this currently no-ops — Phase 2 needs PushKit + APNS direct.
+Future<void> rememberCallerAvatars(Map<int, String?> avatars) async {
+  try {
+    final map = <String, String>{};
+    avatars.forEach((id, url) {
+      if (url != null && url.isNotEmpty) map['$id'] = url;
+    });
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_kAvatarCacheKey, jsonEncode(map));
+  } catch (_) {}
+}
+
+Future<String?> _callerAvatar(Map<String, dynamic> data) async {
+  try {
+    final prefs = await SharedPreferences.getInstance();
+    var raw = (data['caller_avatar'] ?? '').toString().trim();
+    if (raw.isEmpty) {
+      final stored = prefs.getString(_kAvatarCacheKey) ?? '';
+      if (stored.isNotEmpty) {
+        final decoded = jsonDecode(stored);
+        if (decoded is Map) {
+          raw = (decoded['${data['caller_id'] ?? ''}'] ?? '').toString().trim();
+        }
+      }
+    }
+    if (raw.isEmpty) return null;
+    if (raw.startsWith('http://') || raw.startsWith('https://')) return raw;
+    final base = (prefs.getString('server_base_url') ?? _kDefaultBaseUrl)
+        .trim()
+        .replaceAll(RegExp(r'/+$'), '');
+    if (base.isEmpty) return null;
+    return '$base/${raw.replaceAll(RegExp(r'^/+'), '')}';
+  } catch (_) {
+    return null;
+  }
+}
+
 Future<void> showIncomingCall(Map<String, dynamic> data) async {
   final callId = (data['call_id'] ?? '').toString();
   if (callId.isEmpty) {
@@ -116,8 +132,6 @@ Future<void> showIncomingCall(Map<String, dynamic> data) async {
     return;
   }
 
-  // Drop pushes that have been sitting in FCM's queue past the caller's
-  // ring timeout — better to silently miss than ring a phantom call.
   final sentAt = int.tryParse((data['sent_at'] ?? '').toString()) ?? 0;
   if (sentAt > 0) {
     final ageSec = (DateTime.now().millisecondsSinceEpoch ~/ 1000) - sentAt;
@@ -130,11 +144,13 @@ Future<void> showIncomingCall(Map<String, dynamic> data) async {
   final callerName = (data['caller_name'] ?? 'Unknown').toString();
   final media = (data['media'] ?? 'voice').toString();
   final isVideo = media == 'video';
+  final avatar = await _callerAvatar(data);
 
   await FlutterCallkitIncoming.showCallkitIncoming(
     CallKitParams(
       id: callId,
       nameCaller: callerName.isEmpty ? 'Unknown' : callerName,
+      avatar: avatar,
       appName: 'TinkerPro Support',
       handle: callerName,
       type: isVideo ? 1 : 0,
@@ -181,28 +197,17 @@ Future<void> showIncomingCall(Map<String, dynamic> data) async {
   );
 }
 
-/// Tear down the CallKit sheet locally (e.g. caller hung up before we
-/// answered, or our own `decline`). Idempotent.
 Future<void> dismissIncomingCall(String callId) async {
   if (callId.isEmpty) return;
   try {
     await FlutterCallkitIncoming.endCall(callId);
-  } catch (_) {
-    /* not currently shown — ignore */
-  }
+  } catch (_) {}
 }
 
-/// Transition the native CallKit entry from *ringing* to *connected* once we've
-/// answered. Without this the native incoming sheet / heads-up notification can
-/// linger after the user taps Accept (it never learns the call was picked up),
-/// and its ring `duration` timeout can still fire against a live call.
-/// Idempotent and a no-op on platforms without a native CallKit implementation.
 Future<void> markIncomingCallConnected(String callId) async {
   if (callId.isEmpty) return;
   if (!Platform.isAndroid && !Platform.isIOS) return;
   try {
     await FlutterCallkitIncoming.setCallConnected(callId);
-  } catch (_) {
-    /* not a CallKit-originated call — ignore */
-  }
+  } catch (_) {}
 }
