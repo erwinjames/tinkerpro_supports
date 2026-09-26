@@ -1,19 +1,14 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.USE_BIOMETRIC"/>
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
     <uses-permission android:name="android.permission.VIBRATE"/>
-    <!-- Chat MVP Phase 3 — camera capture for attachments. Gallery picks
-         go through the system Photo Picker (no permission needed on Android 13+);
-         file picks go through the SAF (no permission needed). -->
     <uses-permission android:name="android.permission.CAMERA"/>
 
-    <!-- Location reported to the server on app open so the web
-         activity log records where a staff session started. -->
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
 
-    <!-- WebRTC voice + video calls. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
     <uses-permission android:name="android.permission.BLUETOOTH"/>
@@ -23,16 +18,9 @@
     <uses-feature android:name="android.hardware.camera" android:required="false"/>
     <uses-feature android:name="android.hardware.microphone" android:required="false"/>
 
-    <!-- Killed-app incoming calls (flutter_callkit_incoming).
-         FOREGROUND_SERVICE + FOREGROUND_SERVICE_PHONE_CALL: required so the
-           callkit-incoming foreground service can run while ringing.
-         USE_FULL_SCREEN_INTENT (Android 14+): the system requires apps that
-           launch full-screen call UIs over the lockscreen to declare it.
-         SYSTEM_ALERT_WINDOW: lets the call notification pop over other apps.
-         REQUEST_IGNORE_BATTERY_OPTIMIZATIONS: makes high-priority FCM more
-           reliable on aggressive OEMs (Xiaomi, OPPO, etc.). -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT"/>
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
@@ -52,10 +40,7 @@
             android:theme="@style/LaunchTheme"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
             android:hardwareAccelerated="true"
-            android:windowSoftInputMode="adjustResize"
-            android:resizeableActivity="true"
-            android:allowEmbedded="true"
-            android:documentLaunchMode="always">
+            android:windowSoftInputMode="adjustResize">
             <meta-data
                 android:name="io.flutter.embedding.android.NormalTheme"
                 android:resource="@style/NormalTheme"
@@ -64,13 +49,25 @@
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="tinkerprochat"/>
+            </intent-filter>
         </activity>
+        <service
+            android:name="flutter.overlay.window.flutter_overlay_window.OverlayService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Messenger-style chat head that floats over other apps so staff can open new support chats in one tap"/>
+        </service>
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
 
-        <!-- FCM notification channel — must match the `channel_id` sent by the
-             PHP backend in mobileSendPushNotification() (tinkerpro_alerts). -->
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_channel_id"
             android:value="tinkerpro_alerts" />
@@ -79,6 +76,10 @@
             android:resource="@mipmap/ic_launcher" />
     </application>
     <queries>
+        <intent>
+            <action android:name="android.intent.action.VIEW"/>
+            <data android:scheme="tinkerprosupport"/>
+        </intent>
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>

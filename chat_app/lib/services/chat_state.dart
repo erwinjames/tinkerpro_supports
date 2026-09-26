@@ -40,6 +40,9 @@ class ChatInbox extends ChangeNotifier {
   bool _authFailed = false;
   bool get authFailed => _authFailed;
 
+  String? _authFailedMessage;
+  String? get authFailedMessage => _authFailedMessage;
+
   Future<void> load() async {
     if (_loading) return;
     _loading = true;
@@ -47,8 +50,10 @@ class ChatInbox extends ChangeNotifier {
     try {
       _conversations = await _service.inbox();
       _authFailed = false;
-    } on ChatAuthException {
+      _authFailedMessage = null;
+    } on ChatAuthException catch (e) {
       _authFailed = true;
+      _authFailedMessage = e.message.trim().isEmpty ? null : e.message.trim();
       _conversations = const [];
     }
     _loading = false;

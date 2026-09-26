@@ -4,13 +4,8 @@ import 'package:http/http.dart' as http;
 
 import '../api_client.dart';
 import 'ringtone_service.dart';
+import 'tone_prefs.dart';
 
-/// Pulls the notification sounds the user picked in the web app so the two
-/// clients cue identically.
-///
-/// The server resolves personal picks against the global defaults in
-/// SoundSettings::effectiveForUser, so the app just consumes the result
-/// rather than re-implementing that precedence.
 class SoundPrefsService {
   SoundPrefsService(this.api);
 
@@ -37,11 +32,12 @@ class SoundPrefsService {
         map,
         customLoader: _loadCustom,
       );
+      await RingtoneService.persist(map, _loadCustom);
+      await TonePrefs.applyToRingtoneService();
+      await TonePrefs.syncChannels();
     } catch (_) {}
   }
 
-  /// Uploaded sounds are streamed from `getUserSound`, which needs the
-  /// session cookie — hence a manual fetch rather than a URL source.
   Future<Uint8List?> _loadCustom(String event) async {
     try {
       final uri = Uri.parse(api.actionUrl('getUserSound', {'event': event}));

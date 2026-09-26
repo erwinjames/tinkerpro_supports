@@ -38,7 +38,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.tinkerpro.support"
+        applicationId = "com.tinkerpro.chat"
         // Firebase SDKs require minSdk 21+.
         minSdk = maxOf(21, flutter.minSdkVersion)
         targetSdk = flutter.targetSdkVersion

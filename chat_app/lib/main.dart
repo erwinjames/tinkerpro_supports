@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -7,11 +8,21 @@ import 'api_client.dart';
 import 'platform_info.dart';
 import 'push_service.dart';
 import 'services/auth_service.dart';
+import 'services/chat_head.dart';
 import 'services/chat_prefs.dart';
+import 'services/handoff_service.dart';
 import 'services/theme_prefs.dart';
+import 'services/tone_prefs.dart';
 import 'theme.dart';
 import 'screens/auth_screens.dart';
 import 'screens/chat_shell.dart';
+import 'screens/handoff_screen.dart';
+
+@pragma('vm:entry-point')
+void overlayMain() {
+  WidgetsFlutterBinding.ensureInitialized();
+  runApp(const ChatHeadOverlayApp());
+}
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -29,6 +40,12 @@ Future<void> main() async {
     FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
   }
 
+  if (kIsMobilePlatform) {
+    unawaited(TonePrefs.applyToRingtoneService().then((_) {
+      return TonePrefs.syncChannels();
+    }));
+  }
+
   final api = await ApiClient.load();
   final prefs = await SharedPreferences.getInstance();
   final chatPrefs = ChatPrefs(prefs);
@@ -40,7 +57,7 @@ Future<void> main() async {
   ));
 }
 
-class TinkerProChatApp extends StatelessWidget {
+class TinkerProChatApp extends StatefulWidget {
   const TinkerProChatApp({
     super.key,
     required this.api,
@@ -52,25 +69,137 @@ class TinkerProChatApp extends StatelessWidget {
   final ThemePrefs themePrefs;
 
   @override
-  Widget build(BuildContext context) {
-    final auth = AuthService(api);
-    final push = PushService(api);
+  State<TinkerProChatApp> createState() => _TinkerProChatAppState();
+}
 
+class _TinkerProChatAppState extends State<TinkerProChatApp> {
+  final GlobalKey<NavigatorState> _navigatorKey = GlobalKey<NavigatorState>();
+  final GlobalKey<ScaffoldMessengerState> _messengerKey =
+      GlobalKey<ScaffoldMessengerState>();
+
+  late final AuthService _auth = AuthService(widget.api);
+  late final PushService _push = PushService(widget.api);
+  late final HandoffService _handoff = HandoffService(widget.api);
+
+  bool _promptOpen = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _handoff.addListener(_onHandoffChanged);
+    if (widget.api.hasBaseUrl) unawaited(_handoff.bootstrap());
+  }
+
+  @override
+  void dispose() {
+    _handoff.removeListener(_onHandoffChanged);
+    _handoff.dispose();
+    super.dispose();
+  }
+
+  void _onHandoffChanged() {
+    final message = _handoff.message;
+    if (message != null && message.isNotEmpty) {
+      _handoff.clearMessage();
+      _messengerKey.currentState?.showSnackBar(SnackBar(content: Text(message)));
+    }
+
+    final offer = _handoff.offer;
+    if (offer != null && !_promptOpen) {
+      _promptOpen = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) => _showPrompt(offer));
+      return;
+    }
+    if (offer == null && _promptOpen) {
+      _promptOpen = false;
+      _navigatorKey.currentState?.popUntil((route) => route.isFirst);
+    }
+  }
+
+  void _showPrompt(HandoffOffer offer) {
+    final navigator = _navigatorKey.currentState;
+    if (navigator == null) {
+      _promptOpen = false;
+      return;
+    }
+    navigator
+        .push(
+          MaterialPageRoute<void>(
+            builder: (_) => ContinueAsScreen(
+              api: widget.api,
+              offer: offer,
+              signedInAs: widget.api.hasSession ? widget.api.username : null,
+              onContinue: _acceptHandoff,
+              onUseAnother: _handoff.dismiss,
+            ),
+          ),
+        )
+        .then((_) {
+      _promptOpen = false;
+      _handoff.dismiss();
+    });
+  }
+
+  Future<void> _acceptHandoff(bool remember) async {
+    final offer = _handoff.offer;
+    if (offer == null) return;
+    try {
+      await _auth.loginWithHandoff(offer.token, remember: remember);
+      final convId = offer.conversationId;
+      if (convId != null && convId > 0) {
+        _push.pendingChatNavigation.setTarget(convId);
+      }
+      _promptOpen = false;
+      _handoff.dismiss();
+      _navigatorKey.currentState?.pushAndRemoveUntil(
+        MaterialPageRoute<void>(
+          builder: (_) => ChatShell(
+            api: widget.api,
+            push: _push,
+            auth: _auth,
+            chatPrefs: widget.chatPrefs,
+            themePrefs: widget.themePrefs,
+          ),
+        ),
+        (_) => false,
+      );
+    } catch (error) {
+      _promptOpen = false;
+      _handoff.dismiss();
+      _messengerKey.currentState
+          ?.showSnackBar(SnackBar(content: Text(_handoffError(error))));
+    }
+  }
+
+  String _handoffError(Object error) {
+    var text = error.toString();
+    for (final prefix in ['Exception: ', 'HttpException: ']) {
+      if (text.startsWith(prefix)) text = text.substring(prefix.length);
+    }
+    return text.trim().isEmpty
+        ? 'That sign-in link is no longer valid.'
+        : text.trim();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: themePrefs,
+      animation: widget.themePrefs,
       builder: (context, _) => MaterialApp(
         title: 'TinkerPro Chat',
         debugShowCheckedModeBanner: false,
+        navigatorKey: _navigatorKey,
+        scaffoldMessengerKey: _messengerKey,
         scrollBehavior: const _NoScrollbar(),
         theme: lightTheme(),
         darkTheme: darkTheme(),
-        themeMode: themePrefs.value,
+        themeMode: widget.themePrefs.value,
         home: _RootRouter(
-          api: api,
-          auth: auth,
-          push: push,
-          chatPrefs: chatPrefs,
-          themePrefs: themePrefs,
+          api: widget.api,
+          auth: _auth,
+          push: _push,
+          chatPrefs: widget.chatPrefs,
+          themePrefs: widget.themePrefs,
         ),
       ),
     );
@@ -120,9 +249,6 @@ class _RootRouter extends StatelessWidget {
   }
 }
 
-/// Desktop builds get a Material scrollbar on every scrollable by default.
-/// The chat surfaces are dense enough that it reads as clutter, so it is
-/// dropped — the wheel, trackpad and touch scrolling are unaffected.
 class _NoScrollbar extends MaterialScrollBehavior {
   const _NoScrollbar();
 

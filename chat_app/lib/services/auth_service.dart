@@ -37,6 +37,51 @@ class AuthService {
     return session;
   }
 
+  Future<UserSession> loginWithHandoff(
+    String token, {
+    bool remember = true,
+  }) async {
+    await api.clearSession();
+
+    final res = await api.post('redeemAppHandoff', body: {
+      'token': token,
+      'remember': remember ? '1' : '0',
+    });
+    if (res['success'] != true) {
+      throw Exception(
+          res['message']?.toString() ?? 'That sign-in link is no longer valid.');
+    }
+    final session = UserSession.fromJson(res);
+    if (session.userId <= 0) {
+      throw Exception(
+          'Sign-in succeeded but server did not return a user id. '
+          'Please contact support.');
+    }
+    await api.setUserId(session.userId);
+    if (session.username.isNotEmpty && session.username != '—') {
+      await api.setUsername(session.username);
+    }
+    await api.setUserRole(session.role);
+    await api.setPermissions(session.permissions);
+    return session;
+  }
+
+  Future<UserSession> adoptSession(Map<String, dynamic> res) async {
+    final session = UserSession.fromJson(res);
+    if (session.userId <= 0) {
+      throw Exception(
+          'Sign-in succeeded but server did not return a user id. '
+          'Please contact support.');
+    }
+    await api.setUserId(session.userId);
+    if (session.username.isNotEmpty && session.username != '—') {
+      await api.setUsername(session.username);
+    }
+    await api.setUserRole(session.role);
+    await api.setPermissions(session.permissions);
+    return session;
+  }
+
   Future<String> googleClientId() async {
     try {
       final res =
@@ -47,11 +92,15 @@ class AuthService {
     }
   }
 
-  Future<UserSession> loginWithGoogle(String idToken) async {
+  Future<UserSession> loginWithGoogle(
+    String idToken, {
+    bool remember = true,
+  }) async {
     await api.clearSession();
     final res = await api.post('mobileOAuthLogin', body: {
       'provider': 'google',
       'id_token': idToken,
+      'remember': remember ? '1' : '0',
     });
     if (res['success'] != true) {
       throw Exception(res['message']?.toString() ?? 'Google sign-in failed');

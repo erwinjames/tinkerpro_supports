@@ -1,82 +1,70 @@
 package com.tinkerpro.support
 
 import android.content.Intent
-import android.os.Bundle
-import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 
-/**
- * Hosts a single MethodChannel ("com.tinkerpro.support/chat_bubble") that
- * Flutter calls into for chat-head notifications. Also reads the
- * `chat_conversation_id` intent extra (set by ChatBubble's PendingIntent)
- * so taps on a bubble or banner navigate to the right thread.
- */
-class MainActivity : FlutterActivity() {
+class MainActivity : FlutterFragmentActivity() {
 
     private val channelName = "com.tinkerpro.support/chat_bubble"
-    private var pendingChannel: MethodChannel? = null
+    private val linkChannelName = "com.tinkerpro.support/app_link"
+    private var bubbleChannel: MethodChannel? = null
+    private var linkChannel: MethodChannel? = null
+    private var pendingLink: Map<String, Any?>? = null
+    private var dartReady = false
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        val channel = MethodChannel(
-            flutterEngine.dartExecutor.binaryMessenger,
-            channelName,
-        )
-        pendingChannel = channel
-        channel.setMethodCallHandler { call, result ->
-            try {
-                when (call.method) {
-                    "show" -> {
-                        val convId = call.argument<Int>("conversationId") ?: 0
-                        val sender = call.argument<String>("senderName") ?: "Someone"
-                        val senderId = call.argument<Int>("senderId") ?: 0
-                        val body = call.argument<String>("body") ?: ""
-                        if (convId > 0) {
-                            ChatBubble.show(
-                                applicationContext,
-                                conversationId = convId,
-                                senderName = sender,
-                                senderId = senderId,
-                                body = body,
-                            )
-                        }
-                        result.success(true)
-                    }
-                    "cancel" -> {
-                        val convId = call.argument<Int>("conversationId") ?: 0
-                        if (convId > 0) {
-                            ChatBubble.cancel(applicationContext, convId)
-                        }
-                        result.success(true)
-                    }
-                    else -> result.notImplemented()
+        bubbleChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
+        linkChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, linkChannelName)
+        linkChannel?.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "consumeInitialLink" -> {
+                    dartReady = true
+                    val link = pendingLink
+                    pendingLink = null
+                    result.success(link)
                 }
-            } catch (e: Throwable) {
-                result.error("CHAT_BUBBLE_ERROR", e.message, null)
+                else -> result.notImplemented()
             }
         }
-
-        // Drain any cold-start intent (e.g. user tapped a bubble while the
-        // app was killed). For warm taps we go through onNewIntent.
+        handleLinkIntent(intent)
         forwardChatIntent(intent)
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        handleLinkIntent(intent)
         forwardChatIntent(intent)
     }
 
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
+    private fun handleLinkIntent(intent: Intent?) {
+        val data = intent?.data ?: return
+        if (data.scheme != "tinkerprochat") return
+        val handoff = data.getQueryParameter("handoff").orEmpty()
+        if (handoff.isEmpty()) return
+        val payload = mapOf(
+            "handoff" to handoff,
+            "conversationId" to (data.getQueryParameter("conversation")?.toIntOrNull() ?: 0),
+        )
+        if (dartReady) {
+            linkChannel?.invokeMethod("onLink", payload)
+        } else {
+            pendingLink = payload
+        }
     }
 
     private fun forwardChatIntent(intent: Intent?) {
-        val convId = intent?.getIntExtra("chat_conversation_id", 0) ?: 0
+        var convId = intent?.getIntExtra("chat_conversation_id", 0) ?: 0
+        if (convId <= 0) {
+            val data = intent?.data
+            if (data != null && data.scheme == "tinkerprochat") {
+                convId = data.getQueryParameter("conversation")?.toIntOrNull() ?: 0
+            }
+        }
         if (convId <= 0) return
-        // Push to Flutter via the same channel; Flutter side dedupes if
-        // it's already showing this thread.
-        pendingChannel?.invokeMethod(
+        bubbleChannel?.invokeMethod(
             "openConversation",
             mapOf("conversationId" to convId),
         )

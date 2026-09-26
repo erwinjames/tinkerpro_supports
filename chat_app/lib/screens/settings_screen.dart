@@ -13,11 +13,17 @@ import '../models/profile_models.dart';
 import '../push_service.dart';
 import '../services/chat_prefs.dart';
 import '../services/profile_service.dart';
+import '../services/announcement_service.dart';
 import '../services/auth_service.dart';
+import '../services/biometric_auth.dart';
+import '../services/bubble_permission.dart';
+import '../services/chat_head.dart';
+import '../services/tone_prefs.dart';
 import '../services/theme_prefs.dart';
 import '../theme.dart';
 import '../widgets/premium.dart';
 import 'auth_screens.dart';
+import 'tone_picker_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({
@@ -41,20 +47,386 @@ class SettingsScreen extends StatefulWidget {
   State<SettingsScreen> createState() => _SettingsScreenState();
 }
 
-class _SettingsScreenState extends State<SettingsScreen> {
+class _SettingsScreenState extends State<SettingsScreen>
+    with WidgetsBindingObserver {
   bool _loggingOut = false;
+  BubbleStatus? _bubbleStatus;
+  ToneChoice _messageTone = ToneChoice.web;
+  ToneChoice _callTone = ToneChoice.web;
+  bool _bubbleBusy = false;
+  _BubbleWait _bubbleWait = _BubbleWait.none;
   bool _changingServer = false;
+  bool _checkingAnnouncements = false;
+  String _announcementStatus = 'Not checked yet';
 
   late final ProfileService _profile = ProfileService(widget.api);
   ProfileInfo? _account;
   bool _loadingProfile = true;
   bool _avatarBusy = false;
 
+  late final BiometricAuth _biometrics = BiometricAuth(widget.api);
+  bool _fingerprintSupported = false;
+  bool _fingerprintEnabled = false;
+  bool _fingerprintBusy = false;
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     widget.chatPrefs?.addListener(_onPrefsChanged);
     _loadProfile();
+    _loadFingerprint();
+    _refreshBubbleStatus();
+    _loadTones();
+    if (widget.api.isSuperAdmin) _loadAgentHours();
+  }
+
+  String _hoursLabel = 'Loading…';
+
+  Future<void> _loadAgentHours() async {
+    final hours = await _profile.agentHours();
+    if (!mounted) return;
+    setState(() {
+      _hoursLabel = hours == null
+          ? 'Unavailable'
+          : hours.enabled
+          ? '${hours.start} – ${hours.end}'
+          : 'Off';
+    });
+  }
+
+  Future<void> _editAlias() async {
+    final account = _account;
+    if (account == null) {
+      _toast('Profile not loaded yet');
+      return;
+    }
+    final controller = TextEditingController(text: account.chatAlias);
+    final value = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Chat alias'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            TextField(
+              controller: controller,
+              autofocus: true,
+              maxLength: 60,
+              decoration: const InputDecoration(hintText: 'e.g. Maya'),
+            ),
+            Text(
+              'Shown to website visitors instead of your real name once you '
+              'accept their ticket. Leave blank to appear as “Support agent”.',
+              style: Theme.of(ctx).textTheme.bodySmall,
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(controller.text),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (value == null || !mounted) return;
+    final res = await _profile.saveChatAlias(account, value);
+    if (!mounted) return;
+    if (res.ok) {
+      setState(() => _account = account.copyWith(chatAlias: value.trim()));
+      _toast('Chat alias saved');
+    } else {
+      _toast(res.message ?? 'Could not save the alias');
+    }
+  }
+
+  Future<void> _editAgentHours() async {
+    final hours = await _profile.agentHours();
+    if (!mounted) return;
+    if (hours == null) {
+      _toast('Could not load operating hours');
+      return;
+    }
+    TimeOfDay parse(String raw, TimeOfDay fallback) {
+      final parts = raw.split(':');
+      final h = parts.isNotEmpty ? int.tryParse(parts[0]) : null;
+      final m = parts.length > 1 ? int.tryParse(parts[1]) : null;
+      if (h == null || m == null) return fallback;
+      return TimeOfDay(hour: h.clamp(0, 23), minute: m.clamp(0, 59));
+    }
+
+    String fmt(TimeOfDay t) =>
+        '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+    var enabled = hours.enabled;
+    var start = parse(hours.start, const TimeOfDay(hour: 8, minute: 0));
+    var end = parse(hours.end, const TimeOfDay(hour: 17, minute: 0));
+    final save = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) => AlertDialog(
+          title: const Text('Agent operating hours'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  value: enabled,
+                  onChanged: (v) => setLocal(() => enabled = v),
+                  title: const Text('Enable operating hours'),
+                  subtitle: const Text(
+                    'If enabled, the chatbot will only escalate to an agent '
+                    'during these hours. Outside these hours, visitors will '
+                    'be asked to leave a message.',
+                  ),
+                ),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.schedule_outlined),
+                  title: const Text('Start Time'),
+                  trailing: Text(start.format(ctx)),
+                  onTap: () async {
+                    final picked = await showTimePicker(
+                      context: ctx,
+                      initialTime: start,
+                    );
+                    if (picked != null) setLocal(() => start = picked);
+                  },
+                ),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.schedule_outlined),
+                  title: const Text('End Time'),
+                  trailing: Text(end.format(ctx)),
+                  onTap: () async {
+                    final picked = await showTimePicker(
+                      context: ctx,
+                      initialTime: end,
+                    );
+                    if (picked != null) setLocal(() => end = picked);
+                  },
+                ),
+                Text(
+                  'Times are in the server timezone '
+                  '(${hours.tz.isEmpty ? '—' : hours.tz}).',
+                  style: Theme.of(ctx).textTheme.bodySmall,
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: const Text('Save'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (save != true || !mounted) return;
+    final res = await _profile.saveAgentHours(
+      enabled: enabled,
+      start: fmt(start),
+      end: fmt(end),
+    );
+    if (!mounted) return;
+    _toast(res.ok ? 'Agent hours saved' : (res.message ?? 'Could not save'));
+    if (res.ok) _loadAgentHours();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) return;
+    if (_bubbleWait == _BubbleWait.none) {
+      _refreshBubbleStatus();
+    } else {
+      _resumeBubbleGrant();
+    }
+  }
+
+  Future<void> _loadTones() async {
+    final message = await TonePrefs.read(ToneSlot.message);
+    final call = await TonePrefs.read(ToneSlot.call);
+    if (!mounted) return;
+    setState(() {
+      _messageTone = message;
+      _callTone = call;
+    });
+  }
+
+  Future<void> _pickTone(ToneSlot slot) async {
+    final current = slot == ToneSlot.message ? _messageTone : _callTone;
+    final picked = await Navigator.of(context).push<ToneChoice>(
+      MaterialPageRoute<ToneChoice>(
+        builder: (_) => TonePickerScreen(slot: slot, current: current),
+      ),
+    );
+    if (picked == null) return;
+    await TonePrefs.write(slot, picked);
+    if (!mounted) return;
+    setState(() {
+      if (slot == ToneSlot.message) {
+        _messageTone = picked;
+      } else {
+        _callTone = picked;
+      }
+    });
+  }
+
+  Future<BubbleStatus> _refreshBubbleStatus() async {
+    final st = await BubblePermission.status();
+    if (mounted) setState(() => _bubbleStatus = st);
+    return st;
+  }
+
+  Future<void> _onBubbleToggle(bool on) async {
+    final cp = widget.chatPrefs;
+    if (cp == null || _bubbleBusy) return;
+    if (!on) {
+      await cp.setBubbleEnabled(false);
+      await ChatHead.close();
+      return;
+    }
+    setState(() => _bubbleBusy = true);
+    try {
+      await _enableBubbles(cp);
+    } finally {
+      if (mounted) setState(() => _bubbleBusy = false);
+    }
+  }
+
+  Future<void> _enableBubbles(ChatPrefs cp) async {
+    var st = await _refreshBubbleStatus();
+    if (!st.supported) {
+      _toast('Chat heads need Android 6 or newer.');
+      return;
+    }
+    if (!st.notifications) {
+      await BubblePermission.requestNotifications();
+      st = await _refreshBubbleStatus();
+      if (!st.notifications) {
+        if (!mounted) return;
+        final go = await _askForSettings(
+          title: 'ALLOW NOTIFICATIONS',
+          body: 'Chat heads are built on notifications. Turn on '
+              'notifications for TinkerPro Chat, then come back here.',
+        );
+        if (go != true) return;
+        _bubbleWait = _BubbleWait.notifications;
+        await BubblePermission.openNotificationSettings();
+        return;
+      }
+    }
+    if (!st.overlay) {
+      if (!mounted) return;
+      final go = await _askForSettings(
+        title: 'ALLOW CHAT HEADS',
+        body: 'Chat heads float over other apps, like Messenger. On the next '
+            'screen, turn on "Display over other apps" for TinkerPro Chat, '
+            'then go back.',
+      );
+      if (go != true) return;
+      await BubblePermission.requestOverlay();
+      st = await _refreshBubbleStatus();
+      if (!st.overlay) {
+        _toast('Display over other apps is still off for TinkerPro Chat.');
+        return;
+      }
+    }
+    await cp.setBubbleEnabled(true);
+    _toast('Chat heads are on.');
+  }
+
+  Future<void> _resumeBubbleGrant() async {
+    final wait = _bubbleWait;
+    _bubbleWait = _BubbleWait.none;
+    final cp = widget.chatPrefs;
+    final st = await _refreshBubbleStatus();
+    if (cp == null || !mounted) return;
+    if (st.ready) {
+      await cp.setBubbleEnabled(true);
+      _toast('Chat heads are on.');
+      return;
+    }
+    if (wait == _BubbleWait.notifications && st.notifications) {
+      await _onBubbleToggle(true);
+      return;
+    }
+    _toast(st.notifications
+        ? 'Display over other apps is still off for TinkerPro Chat.'
+        : 'Notifications are still off for TinkerPro Chat.');
+  }
+
+  Future<bool?> _askForSettings({required String title, required String body}) {
+    return showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: context.brand.surface,
+        shape: const RoundedRectangleBorder(),
+        title: Text(title, style: Theme.of(context).textTheme.labelLarge),
+        content: Text(body, style: Theme.of(context).textTheme.bodyMedium),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: Text('NOT NOW',
+                style: Theme.of(context).textTheme.labelMedium),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: Text('OPEN SETTINGS',
+                style: Theme.of(context)
+                    .textTheme
+                    .labelMedium
+                    ?.copyWith(color: Brand.signal)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _loadFingerprint() async {
+    final supported = await _biometrics.deviceCanScan();
+    final enabled = await _biometrics.isEnabledForCurrentUser();
+    if (!mounted) return;
+    setState(() {
+      _fingerprintSupported = supported;
+      _fingerprintEnabled = enabled;
+    });
+  }
+
+  Future<void> _onFingerprintToggle(bool value) async {
+    setState(() => _fingerprintBusy = true);
+    try {
+      if (value) {
+        final ok = await _biometrics.enable(
+          label: _account?.displayName ?? widget.api.username ?? '',
+        );
+        if (mounted && ok) setState(() => _fingerprintEnabled = true);
+      } else {
+        await _biometrics.disable();
+        if (mounted) setState(() => _fingerprintEnabled = false);
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(error.toString())),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _fingerprintBusy = false);
+    }
   }
 
   Future<void> _loadProfile() async {
@@ -133,6 +505,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     widget.chatPrefs?.removeListener(_onPrefsChanged);
     super.dispose();
   }
@@ -179,6 +552,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
       ),
       (_) => false,
+    );
+  }
+
+  Future<void> _checkAnnouncements() async {
+    setState(() => _checkingAnnouncements = true);
+    final service = AnnouncementService(widget.api);
+    await service.refresh();
+    if (!mounted) return;
+    setState(() {
+      _checkingAnnouncements = false;
+      _announcementStatus = service.lastStatus;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(service.lastStatus),
+        duration: const Duration(seconds: 6),
+      ),
     );
   }
 
@@ -258,6 +648,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
             icon: Icons.dns_outlined,
             onPressed: _changeServer,
           ),
+          const SizedBox(height: 20),
+          StationDataRow(
+            label: 'Signed in as',
+            value: widget.api.userId == null
+                ? 'unknown'
+                : '${widget.api.username ?? '?'} (id ${widget.api.userId})',
+          ),
+          const SizedBox(height: 20),
+          StationDataRow(label: 'Announcements', value: _announcementStatus),
+          const SizedBox(height: 20),
+          SignalButton(
+            label: _checkingAnnouncements ? 'Checking…' : 'Check announcements',
+            busy: _checkingAnnouncements,
+            icon: Icons.campaign_outlined,
+            onPressed: _checkAnnouncements,
+          ),
           if (tp != null) ...[
             const SizedBox(height: 40),
             Text('Appearance', style: Theme.of(context).textTheme.labelMedium),
@@ -272,14 +678,69 @@ class _SettingsScreenState extends State<SettingsScreen> {
             const SizedBox(height: 6),
             const Hairline(),
             const SizedBox(height: 16),
-            _BubbleToggleRow(
-              enabled: cp.bubbleEnabled,
-              onChanged: cp.setBubbleEnabled,
-            ),
-            const SizedBox(height: 20),
+            if (TonePrefs.supported) ...[
+              _ToneRow(
+                label: 'Message tone',
+                value: _messageTone.displayLabel,
+                icon: Icons.notifications_active_outlined,
+                onTap: () => _pickTone(ToneSlot.message),
+              ),
+              const SizedBox(height: 20),
+              _ToneRow(
+                label: 'Call ringtone',
+                value: _callTone.displayLabel,
+                icon: Icons.ring_volume_outlined,
+                onTap: () => _pickTone(ToneSlot.call),
+              ),
+              const SizedBox(height: 20),
+            ],
+            if (_fingerprintSupported) ...[
+              _FingerprintToggleRow(
+                enabled: _fingerprintEnabled,
+                busy: _fingerprintBusy,
+                onChanged: _onFingerprintToggle,
+              ),
+              const SizedBox(height: 20),
+            ],
+            if (BubblePermission.platformSupported) ...[
+              _BubbleToggleRow(
+                enabled: cp.bubbleEnabled && (_bubbleStatus?.ready ?? false),
+                blocked: cp.bubbleEnabled &&
+                    _bubbleStatus != null &&
+                    !_bubbleStatus!.ready,
+                supported: _bubbleStatus?.supported ?? true,
+                busy: _bubbleBusy,
+                onChanged: _onBubbleToggle,
+              ),
+              const SizedBox(height: 20),
+            ],
             _ThemeRow(
               current: cp.theme,
               onTap: _pickTheme,
+            ),
+          ],
+          const SizedBox(height: 40),
+          Text('Chat agent', style: Theme.of(context).textTheme.labelMedium),
+          const SizedBox(height: 6),
+          const Hairline(),
+          const SizedBox(height: 16),
+          _ToneRow(
+            label: 'Chat alias',
+            value: _loadingProfile
+                ? 'Loading…'
+                : (_account?.chatAlias.isNotEmpty ?? false)
+                ? _account!.chatAlias
+                : 'Support agent (default)',
+            icon: Icons.badge_outlined,
+            onTap: _editAlias,
+          ),
+          if (widget.api.isSuperAdmin) ...[
+            const SizedBox(height: 20),
+            _ToneRow(
+              label: 'Agent operating hours',
+              value: _hoursLabel,
+              icon: Icons.schedule_outlined,
+              onTap: _editAgentHours,
             ),
           ],
           const SizedBox(height: 40),
@@ -287,7 +748,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           const SizedBox(height: 6),
           const Hairline(),
           const SizedBox(height: 16),
-          const StationDataRow(label: 'Build', value: 'TinkerPro Chat 2.0.0'),
+          const StationDataRow(label: 'Build', value: 'TinkerPro Chat 2.0.4'),
 
           const SizedBox(height: 40),
           SignalButton(
@@ -606,13 +1067,72 @@ class _ThemeModeTab extends StatelessWidget {
   }
 }
 
+class _ToneRow extends StatelessWidget {
+  const _ToneRow({
+    required this.label,
+    required this.value,
+    required this.icon,
+    required this.onTap,
+  });
+
+  final String label;
+  final String value;
+  final IconData icon;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final text = Theme.of(context).textTheme;
+    return InkWell(
+      onTap: onTap,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(icon, size: 18, color: context.brand.paperDim),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(label, style: text.labelMedium),
+                    const SizedBox(height: 4),
+                    Text(
+                      value,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: text.bodyMedium?.copyWith(color: Brand.signal),
+                    ),
+                  ],
+                ),
+              ),
+              Icon(Icons.chevron_right, size: 20, color: context.brand.paperDim),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Container(height: 1, color: context.brand.rule),
+        ],
+      ),
+    );
+  }
+}
+
+enum _BubbleWait { none, notifications }
+
 class _BubbleToggleRow extends StatelessWidget {
   const _BubbleToggleRow({
     required this.enabled,
+    required this.blocked,
+    required this.supported,
+    required this.busy,
     required this.onChanged,
   });
 
   final bool enabled;
+  final bool blocked;
+  final bool supported;
+  final bool busy;
   final Future<void> Function(bool) onChanged;
 
   @override
@@ -627,12 +1147,20 @@ class _BubbleToggleRow extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('Chat bubble notifications', style: text.labelMedium),
+                  Text('Chat heads', style: text.labelMedium),
                   const SizedBox(height: 4),
                   Text(
-                    'Float a chat-head over other apps for new messages '
-                    '(Android 11+ only; user must allow bubbles).',
-                    style: text.bodySmall,
+                    !supported
+                        ? 'Needs Android 6 or newer.'
+                        : blocked
+                            ? 'Display over other apps is off. Turn on to '
+                                'allow chat heads again.'
+                            : 'Float a Messenger-style chat head over other '
+                                'apps for new messages. Tap it to open the '
+                                'chat, drag it to the X to dismiss.',
+                    style: blocked
+                        ? text.bodySmall?.copyWith(color: Brand.signal)
+                        : text.bodySmall,
                   ),
                 ],
               ),
@@ -641,9 +1169,11 @@ class _BubbleToggleRow extends StatelessWidget {
             Switch(
               value: enabled,
               activeThumbColor: Brand.signal,
-              onChanged: (v) {
-                onChanged(v);
-              },
+              onChanged: (!supported || busy)
+                  ? null
+                  : (v) {
+                      onChanged(v);
+                    },
             ),
           ],
         ),
@@ -804,6 +1334,54 @@ class _BubblePreview extends StatelessWidget {
         border: Border.all(color: border, width: 1),
         borderRadius: BorderRadius.circular(4),
       ),
+    );
+  }
+}
+
+class _FingerprintToggleRow extends StatelessWidget {
+  const _FingerprintToggleRow({
+    required this.enabled,
+    required this.busy,
+    required this.onChanged,
+  });
+
+  final bool enabled;
+  final bool busy;
+  final Future<void> Function(bool) onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final text = Theme.of(context).textTheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Fingerprint sign-in', style: text.labelMedium),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Scan your fingerprint to sign in on this phone instead '
+                    'of typing your password.',
+                    style: text.bodySmall,
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            Switch(
+              value: enabled,
+              activeThumbColor: Brand.signal,
+              onChanged: busy ? null : (v) => onChanged(v),
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        Container(height: 1, color: context.brand.rule),
+      ],
     );
   }
 }

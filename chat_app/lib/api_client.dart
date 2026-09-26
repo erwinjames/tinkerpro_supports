@@ -80,11 +80,8 @@ class ApiClient {
 
   Map<String, bool> get permissions => Map.unmodifiable(_permissions);
 
-  /// Role slug from the server session (`super_admin`, `admin`, `user`, …).
   String? get userRole => _userRole;
 
-  /// Mirrors the backend's PERM_FULL_ACCESS_ROLES, which is `['super_admin']`.
-  /// Gates the few actions reserved for full-access accounts.
   bool get isSuperAdmin =>
       (_userRole ?? '').trim().toLowerCase() == 'super_admin';
 
@@ -177,23 +174,50 @@ class ApiClient {
     return _uri(action, query).toString();
   }
 
+  static Map<String, String> _parseCookieJar(String stored) {
+    final jar = <String, String>{};
+    for (final part in stored.split(';')) {
+      final pair = part.trim();
+      final eq = pair.indexOf('=');
+      if (eq <= 0) continue;
+      jar[pair.substring(0, eq)] = pair.substring(eq + 1);
+    }
+    return jar;
+  }
+
   Future<void> _absorbCookie(http.Response response) async {
     final setCookie = response.headers['set-cookie'];
     if (setCookie == null || setCookie.isEmpty) return;
 
-    final allSessIds = RegExp(r'PHPSESSID=([^;,\s]+)')
-        .allMatches(setCookie)
-        .toList();
-    if (allSessIds.isNotEmpty) {
-      _cookie = 'PHPSESSID=${allSessIds.last.group(1)}';
-      await _prefs.setString(_kCookieKey, _cookie);
-      return;
+    final jar = _parseCookieJar(_cookie);
+    for (final raw in setCookie.split(RegExp(r',(?=\s*[A-Za-z0-9_\-]+=)'))) {
+      final segments = raw.split(';');
+      final pair = segments.first.trim();
+      final eq = pair.indexOf('=');
+      if (eq <= 0) continue;
+      final name = pair.substring(0, eq);
+      final value = pair.substring(eq + 1);
+      final expired = value.isEmpty ||
+          value == 'deleted' ||
+          segments.skip(1).any((a) {
+            final attr = a.trim().toLowerCase();
+            return attr == 'max-age=0' || attr.startsWith('max-age=-');
+          });
+      if (expired) {
+        jar.remove(name);
+      } else {
+        jar[name] = value;
+      }
     }
 
-    final firstPair = setCookie.split(';').first.trim();
-    if (firstPair.isEmpty) return;
-    _cookie = firstPair;
-    await _prefs.setString(_kCookieKey, _cookie);
+    final next = jar.entries.map((e) => '${e.key}=${e.value}').join('; ');
+    if (next == _cookie) return;
+    _cookie = next;
+    if (next.isEmpty) {
+      await _prefs.remove(_kCookieKey);
+    } else {
+      await _prefs.setString(_kCookieKey, next);
+    }
   }
 
   Future<Map<String, dynamic>> get(String action,
@@ -340,9 +364,6 @@ class ApiClient {
 
   Map<String, dynamic> _decode(http.Response response) {
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      // The API explains itself in the body — rate-limit lockouts say which
-      // limit was hit and how long to wait. Prefer that over a bare status
-      // code, which tells the user nothing actionable.
       final serverMessage = _messageFromBody(response.body);
       throw HttpException(
         serverMessage ??

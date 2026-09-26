@@ -4,12 +4,14 @@ import 'package:flutter/material.dart';
 
 import '../api_client.dart';
 import '../push_service.dart';
+import '../services/announcement_service.dart';
 import '../services/auth_service.dart';
 import '../services/call_service.dart';
 import '../services/chat_prefs.dart';
 import '../services/chat_realtime.dart';
 import '../services/chat_service.dart';
 import '../services/chat_state.dart';
+import '../services/support_app_launcher.dart';
 import '../services/incoming_call_service.dart';
 import '../services/location_service.dart';
 import '../services/notification_service.dart';
@@ -17,6 +19,7 @@ import '../services/sound_prefs_service.dart';
 import '../services/theme_prefs.dart';
 import '../theme.dart';
 import '../widgets/premium.dart';
+import 'announcement_dialog.dart';
 import 'auth_screens.dart';
 import 'call_screen.dart';
 import 'chat_inbox_screen.dart';
@@ -50,6 +53,8 @@ class _ChatShellState extends State<ChatShell> with WidgetsBindingObserver {
   CallService? _callService;
   NotificationCenter? _notifications;
   StreamSubscription<IncomingCallEvent>? _incomingCallSub;
+  StreamSubscription<Map<String, dynamic>>? _announcementSub;
+  AnnouncementService? _announcements;
   bool _callScreenOpen = false;
   int? _myUserId;
   bool _chatStarted = false;
@@ -63,18 +68,15 @@ class _ChatShellState extends State<ChatShell> with WidgetsBindingObserver {
 
     _chatService = ChatService(widget.api);
     _chatRealtime = ChatRealtimeService(widget.api);
+    _announcements = AnnouncementService(widget.api);
     widget.push.registerCurrentDevice();
 
+    unawaited(SupportAppLauncher.instance.refresh());
     _startIfPermitted();
     _reportLocation();
     SoundPrefsService(widget.api).load();
   }
 
-  /// Chat is gated on the `chat` permission, matching the web sidebar and the
-  /// full support app. Start immediately when the cached map already grants
-  /// it, then re-check against the server — a permission granted on the web
-  /// since last launch lights the app up without a re-login, and one revoked
-  /// there closes it on next open.
   Future<void> _startIfPermitted() async {
     if (widget.api.hasPermission('chat')) {
       _chatStarted = true;
@@ -89,9 +91,6 @@ class _ChatShellState extends State<ChatShell> with WidgetsBindingObserver {
     }
   }
 
-  /// Prompts for location on open and reports it so the web activity log
-  /// records where this session was opened. Fire-and-forget: chat never
-  /// waits on it, and a refused prompt is not an error.
   Future<void> _reportLocation() async {
     await LocationService(widget.api).reportOnOpen();
   }
@@ -114,8 +113,11 @@ class _ChatShellState extends State<ChatShell> with WidgetsBindingObserver {
     if (!mounted) return;
     final uid = probe.userId;
     if (uid == null) {
-      setState(() => _chatBootstrapError = probe.error ??
-          'Could not load chat. Check your connection or sign in again.');
+      setState(
+        () => _chatBootstrapError =
+            probe.error ??
+            'Could not load chat. Check your connection or sign in again.',
+      );
       return;
     }
 
@@ -151,8 +153,10 @@ class _ChatShellState extends State<ChatShell> with WidgetsBindingObserver {
       }
     });
 
-    final notifications =
-        NotificationCenter(NotificationService(widget.api), _chatRealtime);
+    final notifications = NotificationCenter(
+      NotificationService(widget.api),
+      _chatRealtime,
+    );
 
     setState(() {
       _myUserId = uid;
@@ -166,9 +170,10 @@ class _ChatShellState extends State<ChatShell> with WidgetsBindingObserver {
     inbox.addListener(_onInboxChange);
 
     widget.push.bindCurrentlyViewedConv(_chatRealtime.currentlyViewedConv);
-    widget.push.bindChatPrefs(widget.chatPrefs);
     widget.push.pendingChatNavigation.addListener(_consumePendingChatNav);
     _chatRealtime.currentlyViewedConv.addListener(_onCurrentConvChanged);
+
+    _startAnnouncements();
 
     unawaited(_chatRealtime.connect(uid));
     unawaited(inbox.load());
@@ -177,9 +182,32 @@ class _ChatShellState extends State<ChatShell> with WidgetsBindingObserver {
     _consumePendingChatNav();
   }
 
-  /// Accepting from the CallKit sheet with the app closed fires the event
-  /// before anything is listening, so the call is lost and the user just
-  /// lands in the app. Replay it from the plugin's active-call list.
+  void _startAnnouncements() {
+    final announcements = _announcements;
+    if (announcements == null) return;
+
+    announcements.addListener(_onAnnouncementsChanged);
+    _announcementSub?.cancel();
+    _announcementSub = _chatRealtime.announcementEvents.listen((data) {
+      announcements.ingest(data);
+    });
+    unawaited(announcements.refresh());
+  }
+
+  void _onAnnouncementsChanged() {
+    if (!mounted) return;
+    final announcements = _announcements;
+    if (announcements == null || !announcements.hasPending) return;
+    if (SupportAppLauncher.instance.installed) return;
+    if (_callScreenOpen || AnnouncementDialog.isOpen) return;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (_callScreenOpen || AnnouncementDialog.isOpen) return;
+      AnnouncementDialog.show(context, service: announcements, api: widget.api);
+    });
+  }
+
   Future<void> _resumeAcceptedCall(CallService calls) async {
     final pending = await IncomingCallEvents.instance.pendingAcceptedCall();
     if (pending == null || !mounted) return;
@@ -199,6 +227,15 @@ class _ChatShellState extends State<ChatShell> with WidgetsBindingObserver {
   }
 
   Future<void> _handleStaleSession() async {
+    final reason = _chatInbox?.authFailedMessage;
+    if (reason != null && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(reason.toUpperCase()),
+          duration: const Duration(seconds: 6),
+        ),
+      );
+    }
     try {
       await widget.push.releaseCurrentDevice();
     } catch (_) {}
@@ -262,9 +299,9 @@ class _ChatShellState extends State<ChatShell> with WidgetsBindingObserver {
     final error = calls.lastError;
     if (error != null) {
       calls.lastError = null;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(error)),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error)));
     }
 
     if (calls.isActive && !_callScreenOpen) {
@@ -304,9 +341,11 @@ class _ChatShellState extends State<ChatShell> with WidgetsBindingObserver {
         _chatRealtime.pause();
         break;
       case AppLifecycleState.resumed:
+        unawaited(SupportAppLauncher.instance.refresh());
         _chatRealtime.resume();
         _chatInbox?.reload();
         _notifications?.load();
+        unawaited(_announcements?.refresh() ?? Future<void>.value());
         break;
       case AppLifecycleState.inactive:
         break;
@@ -320,6 +359,9 @@ class _ChatShellState extends State<ChatShell> with WidgetsBindingObserver {
     _incomingCallSub?.cancel();
     _callService?.removeListener(_onCallChange);
     _callService?.dispose();
+    _announcementSub?.cancel();
+    _announcements?.removeListener(_onAnnouncementsChanged);
+    _announcements?.dispose();
     _notifications?.dispose();
     _chatRealtime.dispose();
     _chatInbox?.dispose();
@@ -383,8 +425,11 @@ class _AccessDenied extends StatelessWidget {
                     color: brand.surfaceHi,
                     shape: BoxShape.circle,
                   ),
-                  child: Icon(Icons.lock_outline,
-                      size: 24, color: brand.paperDim),
+                  child: Icon(
+                    Icons.lock_outline,
+                    size: 24,
+                    color: brand.paperDim,
+                  ),
                 ),
                 const SizedBox(height: 16),
                 Text(
@@ -403,10 +448,7 @@ class _AccessDenied extends StatelessWidget {
                 const SizedBox(height: 24),
                 SizedBox(
                   width: 220,
-                  child: GhostButton(
-                    label: 'Sign out',
-                    onPressed: onSignOut,
-                  ),
+                  child: GhostButton(label: 'Sign out', onPressed: onSignOut),
                 ),
               ],
             ),

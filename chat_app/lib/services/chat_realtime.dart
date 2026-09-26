@@ -99,6 +99,8 @@ class ChatRealtimeService {
   final _pinEvents = StreamController<PinUpdate>.broadcast();
   final _appNotificationEvents =
       StreamController<AppNotification>.broadcast();
+  final _announcementEvents =
+      StreamController<Map<String, dynamic>>.broadcast();
   final _readSyncEvents =
       StreamController<ConversationReadSync>.broadcast();
 
@@ -119,6 +121,9 @@ class ChatRealtimeService {
       _appNotificationEvents.stream;
 
   Stream<ConversationReadSync> get readSyncEvents => _readSyncEvents.stream;
+
+  Stream<Map<String, dynamic>> get announcementEvents =>
+      _announcementEvents.stream;
 
   final ValueNotifier<int?> currentlyViewedConv = ValueNotifier<int?>(null);
 
@@ -189,6 +194,7 @@ class ChatRealtimeService {
     await _callSignalEvents.close();
     await _pinEvents.close();
     await _readSyncEvents.close();
+    await _announcementEvents.close();
     await _appNotificationEvents.close();
     currentlyViewedConv.dispose();
   }
@@ -328,12 +334,20 @@ class ChatRealtimeService {
       case 'app.notification':
         _forwardAppNotification(data);
         break;
+      case 'announcement.published':
+        _forwardAnnouncement(data);
+        break;
     }
   }
 
   void _forwardAppNotification(Map<String, dynamic>? data) {
     if (data == null) return;
     _appNotificationEvents.add(AppNotification.fromJson(data));
+  }
+
+  void _forwardAnnouncement(Map<String, dynamic>? data) {
+    if (data == null) return;
+    _announcementEvents.add(data);
   }
 
   Map<String, dynamic>? _decodeData(dynamic raw) {

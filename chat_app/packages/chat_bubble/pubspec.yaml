@@ -1,0 +1,19 @@
+name: chat_bubble
+description: Android chat-head bubble notifications for TinkerPro Chat, registered on every Flutter engine.
+version: 1.0.0
+publish_to: 'none'
+
+environment:
+  sdk: ^3.11.4
+  flutter: ">=3.24.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: com.tinkerpro.chatbubble
+        pluginClass: ChatBubblePlugin

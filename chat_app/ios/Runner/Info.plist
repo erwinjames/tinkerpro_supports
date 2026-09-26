@@ -2,6 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Use Face ID or your fingerprint to sign in to your TinkerPro account.</string>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
 
@@ -94,6 +96,21 @@
 		<string>UIInterfaceOrientationPortraitUpsideDown</string>
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>tinkerprosupport</string>
+	</array>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.tinkerpro.chat</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>tinkerprochat</string>
+			</array>
+		</dict>
 	</array>
 </dict>
 </plist>

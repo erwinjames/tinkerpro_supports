@@ -5,6 +5,7 @@ import 'package:google_sign_in/google_sign_in.dart';
 
 import '../api_client.dart';
 import '../push_service.dart';
+import '../services/biometric_auth.dart';
 import '../services/chat_prefs.dart';
 import '../services/auth_service.dart';
 import '../services/theme_prefs.dart';
@@ -144,10 +145,88 @@ class _LoginScreenState extends State<LoginScreen> {
 
   String? _googleClientId;
 
+  late final BiometricAuth _biometrics = BiometricAuth(widget.api);
+  bool _fingerprintReady = false;
+  bool _fingerprintBusy = false;
+  String _fingerprintLabel = '';
+
   @override
   void initState() {
     super.initState();
     _loadGoogleConfig();
+    _loadFingerprint();
+  }
+
+  Future<void> _loadFingerprint() async {
+    final ready = await _biometrics.isEnabled() && await _biometrics.deviceCanScan();
+    if (!ready) return;
+    final label = await _biometrics.enrolledLabel();
+    if (!mounted) return;
+    setState(() {
+      _fingerprintReady = true;
+      _fingerprintLabel = label;
+    });
+    await _signInWithFingerprint(auto: true);
+  }
+
+  Future<void> _signInWithFingerprint({bool auto = false}) async {
+    if (_fingerprintBusy || _busy) return;
+    setState(() => _fingerprintBusy = true);
+    try {
+      final res = await _biometrics.signIn(remember: _remember);
+      if (res == null) return;
+      await widget.auth.adoptSession(res);
+      if (!mounted) return;
+      _goHome();
+    } catch (error) {
+      if (!mounted) return;
+      final enabled = await _biometrics.isEnabled();
+      if (mounted) setState(() => _fingerprintReady = enabled);
+      if (!mounted || auto) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(_friendlyError(error)),
+          duration: const Duration(seconds: 5),
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _fingerprintBusy = false);
+    }
+  }
+
+  Future<void> _offerFingerprint() async {
+    if (await _biometrics.isEnabled()) return;
+    if (!await _biometrics.deviceCanScan()) return;
+    if (!mounted) return;
+    final wants = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Use your fingerprint next time?'),
+        content: const Text(
+          'Sign in to TinkerPro Chat by scanning your fingerprint instead of '
+          'typing your password on this phone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Not now'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Turn on'),
+          ),
+        ],
+      ),
+    );
+    if (wants != true) return;
+    try {
+      await _biometrics.enable(label: widget.api.username ?? '');
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(_friendlyError(error))),
+      );
+    }
   }
 
   Future<void> _loadGoogleConfig() async {
@@ -178,16 +257,29 @@ class _LoginScreenState extends State<LoginScreen> {
     );
   }
 
+  String _friendlyError(Object error) {
+    var text = error.toString();
+    for (final prefix in ['Exception: ', 'HttpException: ', 'ChatAuthException: ']) {
+      if (text.startsWith(prefix)) text = text.substring(prefix.length);
+    }
+    return text.trim().isEmpty ? 'Sign-in failed. Please try again.' : text.trim();
+  }
+
   Future<void> _submit() async {
     setState(() => _busy = true);
     try {
       await widget.auth.login(_email.text, _password.text,
           remember: _remember);
       if (!mounted) return;
+      await _offerFingerprint();
+      if (!mounted) return;
       _goHome();
     } catch (error) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Login failed: $error')),
+        SnackBar(
+          content: Text(_friendlyError(error)),
+          duration: const Duration(seconds: 6),
+        ),
       );
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -215,13 +307,18 @@ class _LoginScreenState extends State<LoginScreen> {
       if (idToken == null || idToken.isEmpty) {
         throw Exception('Google did not return an ID token.');
       }
-      await widget.auth.loginWithGoogle(idToken);
+      await widget.auth.loginWithGoogle(idToken, remember: _remember);
+      if (!mounted) return;
+      await _offerFingerprint();
       if (!mounted) return;
       _goHome();
     } catch (error) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Google sign-in failed: $error')),
+          SnackBar(
+            content: Text(_friendlyError(error)),
+            duration: const Duration(seconds: 6),
+          ),
         );
       }
     } finally {
@@ -338,6 +435,16 @@ class _LoginScreenState extends State<LoginScreen> {
                   busy: _busy,
                   onPressed: _submit,
                 ),
+                if (_fingerprintReady) ...[
+                  const SizedBox(height: 14),
+                  _FingerprintButton(
+                    busy: _fingerprintBusy,
+                    label: _fingerprintLabel,
+                    onPressed: _fingerprintBusy
+                        ? null
+                        : () => _signInWithFingerprint(),
+                  ),
+                ],
                 if (_googleClientId != null && _googleClientId!.isNotEmpty) ...[
                   const SizedBox(height: 22),
                   const _OrDivider(),
@@ -434,6 +541,63 @@ class _GoogleButton extends StatelessWidget {
                   Text('CONTINUE WITH GOOGLE',
                       style: text.labelLarge
                           ?.copyWith(letterSpacing: 1.5, color: context.brand.paper)),
+                ],
+              ),
+      ),
+    );
+  }
+}
+
+class _FingerprintButton extends StatelessWidget {
+  const _FingerprintButton({
+    required this.busy,
+    required this.label,
+    required this.onPressed,
+  });
+
+  final bool busy;
+  final String label;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final text = Theme.of(context).textTheme;
+    final brand = context.brand;
+    return InkWell(
+      onTap: onPressed,
+      child: Container(
+        height: 52,
+        decoration: BoxDecoration(
+          color: brand.surface,
+          border: Border.all(color: brand.signal, width: 1),
+          borderRadius: BorderRadius.circular(Brand.radiusSm),
+        ),
+        alignment: Alignment.center,
+        child: busy
+            ? const SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(
+                    strokeWidth: 2, color: Brand.signal),
+              )
+            : Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.fingerprint, size: 22, color: brand.signalInk),
+                  const SizedBox(width: 10),
+                  Flexible(
+                    child: Text(
+                      label.isEmpty
+                          ? 'SIGN IN WITH FINGERPRINT'
+                          : 'FINGERPRINT — ${label.toUpperCase()}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: text.labelLarge?.copyWith(
+                        letterSpacing: 1.2,
+                        color: brand.paper,
+                      ),
+                    ),
+                  ),
                 ],
               ),
       ),

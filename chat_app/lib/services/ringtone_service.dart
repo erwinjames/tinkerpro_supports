@@ -1,11 +1,14 @@
+import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
-/// Mirrors PRESETS in layout/audio-cues.php so a sound picked on the web
-/// plays identically here — same frequencies, durations and relative gain.
 class SoundPreset {
   const SoundPreset(this.pattern, this.gain);
   final List<Seg> pattern;
@@ -38,16 +41,26 @@ const Map<String, SoundPreset> kSoundPresets = {
   'visitor': SoundPreset([
     Seg(1318.51, 0.07), Seg(0, 0.03), Seg(1046.50, 0.15),
   ], 0.15),
+  'handoff': SoundPreset([
+    Seg(622.25, 0.10), Seg(0, 0.03), Seg(830.61, 0.10), Seg(0, 0.03),
+    Seg(622.25, 0.10), Seg(0, 0.03), Seg(1108.73, 0.26),
+  ], 0.19),
 };
 
-/// SoundSettings::FACTORY on the server.
 const Map<String, String> kSoundFactoryDefaults = {
   'notify': 'chime',
   'incoming': 'classic',
   'react': 'pop',
   'sent': 'none',
   'fb': 'messenger',
+  'fbmove': 'handoff',
 };
+
+const List<String> kPushSoundEvents = ['notify', 'fb', 'fbmove'];
+const String _kEffectiveKey = 'sound_effective';
+
+const MethodChannel _toneChannel =
+    MethodChannel('com.tinkerpro.support/chat_bubble');
 
 class RingtoneService {
   RingtoneService._();
@@ -63,15 +76,94 @@ class RingtoneService {
   bool _initStarted = false;
   Future<void>? _initFuture;
 
-  /// Effective per-event sound names from the server, resolved there against
-  /// the user's own picks and the global defaults.
   Map<String, String> _events = const {};
 
-  /// Fetches the bytes of an uploaded custom sound for an event.
   Future<Uint8List?> Function(String event)? _customLoader;
 
   final Map<String, Uint8List> _presetCache = {};
   final Map<String, Uint8List> _customCache = {};
+
+  Object? _messageTone;
+  Object? _callTone;
+
+  void applyLocalTones({Object? message, Object? call}) {
+    _messageTone = message;
+    _callTone = call;
+  }
+
+  String? _localKindOf(Object? tone) {
+    if (tone == null) return null;
+    try {
+      final kind = (tone as dynamic).kind;
+      return kind?.name as String?;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  String _localValueOf(Object? tone) {
+    try {
+      return ((tone as dynamic).value as String?) ?? '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  Future<bool> _playLocal(Object? tone, {required bool loop}) async {
+    final kind = _localKindOf(tone);
+    if (kind == null || kind == 'web') return false;
+    if (kind == 'silent') return true;
+    if (kind == 'preset') {
+      final bytes = _presetBytes(_localValueOf(tone));
+      if (bytes == null) return false;
+      await _playBytes(bytes, loop: loop);
+      return true;
+    }
+    try {
+      await _toneChannel.invokeMethod('playPreview', {
+        'uri': _localValueOf(tone),
+        'loop': loop,
+      });
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> _playBytes(Uint8List bytes, {required bool loop}) async {
+    await _init();
+    final player = loop ? _ringPlayer : _pingPlayer;
+    await player.stop();
+    await player.setReleaseMode(loop ? ReleaseMode.loop : ReleaseMode.release);
+    await player.play(BytesSource(bytes));
+  }
+
+  Future<void> previewPreset(String name) async {
+    final bytes = _presetBytes(name);
+    if (bytes == null) return;
+    try {
+      await _playBytes(bytes, loop: false);
+    } catch (e) {
+      debugPrint('[ringtone] previewPreset failed: $e');
+    }
+  }
+
+  Future<void> stopPreview() async {
+    if (!_initStarted) return;
+    try {
+      await _pingPlayer.stop();
+    } catch (_) {}
+  }
+
+  String valueFor(String event) => _valueFor(event);
+
+  Future<Uint8List?> bytesForEvent(
+    String event, {
+    String? presetOverride,
+  }) async {
+    if (presetOverride != null) return _presetBytes(presetOverride);
+    return _bytesFor(event);
+  }
 
   void applyPreferences(
     Map<String, String> effective, {
@@ -98,7 +190,6 @@ class RingtoneService {
         _customCache[event] = loaded;
         return loaded;
       }
-      // Upload missing or unreachable — fall back to the factory tone.
       return _presetBytes(kSoundFactoryDefaults[event] ?? 'chime');
     }
     return _presetBytes(value);
@@ -140,6 +231,7 @@ class RingtoneService {
   Future<void> startIncoming() async {
     await _init();
     try {
+      if (await _playLocal(_callTone, loop: true)) return;
       await _ringbackPlayer.stop();
       await _ringPlayer.stop();
       final bytes = await _bytesFor('incoming') ?? _ringBytes;
@@ -165,6 +257,9 @@ class RingtoneService {
   }
 
   Future<void> stop() async {
+    try {
+      await _toneChannel.invokeMethod('stopPreview');
+    } catch (_) {}
     if (!_initStarted) return;
     try {
       await _ringPlayer.stop();
@@ -174,18 +269,87 @@ class RingtoneService {
     }
   }
 
-  /// New-message cue. Facebook page threads use the `fb` slot, everything
-  /// else `notify` — the same split the web app makes.
-  Future<void> ping({bool facebook = false}) async {
+  Future<void> ping({bool facebook = false}) =>
+      playEvent(facebook ? 'fb' : 'notify');
+
+  Future<Duration> playEvent(String event) async {
     await _init();
     try {
+      if (await _playLocal(_messageTone, loop: false)) return Duration.zero;
       await _pingPlayer.stop();
-      final bytes = await _bytesFor(facebook ? 'fb' : 'notify') ?? _pingBytes;
+      if (_valueFor(event) == 'none') return Duration.zero;
+      final bytes = await _bytesFor(event) ?? _pingBytes;
       if (bytes != null) {
         await _pingPlayer.play(BytesSource(bytes));
+        return _estimateDuration(bytes);
       }
     } catch (e) {
-      debugPrint('[ringtone] ping failed: $e');
+      debugPrint('[ringtone] play $event failed: $e');
+    }
+    return Duration.zero;
+  }
+
+  Duration _estimateDuration(Uint8List bytes) {
+    if (bytes.length > 44 &&
+        String.fromCharCodes(bytes.sublist(0, 4)) == 'RIFF') {
+      final ms = ((bytes.length - 44) / (_sampleRate * 2) * 1000).round();
+      return Duration(milliseconds: ms.clamp(0, 5000));
+    }
+    return const Duration(seconds: 3);
+  }
+
+  static Future<Directory> _soundDir() async {
+    final base = await getApplicationSupportDirectory();
+    final dir = Directory('${base.path}/notification_sounds');
+    if (!await dir.exists()) await dir.create(recursive: true);
+    return dir;
+  }
+
+  static Future<void> persist(
+    Map<String, String> effective,
+    Future<Uint8List?> Function(String event) customLoader,
+  ) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_kEffectiveKey, jsonEncode(effective));
+      final dir = await _soundDir();
+      for (final event in kPushSoundEvents) {
+        final file = File('${dir.path}/$event.bin');
+        if (effective[event] != 'custom') {
+          if (await file.exists()) await file.delete();
+          continue;
+        }
+        final bytes = await customLoader(event);
+        if (bytes != null && bytes.isNotEmpty) {
+          await file.writeAsBytes(bytes, flush: true);
+        }
+      }
+    } catch (e) {
+      debugPrint('[ringtone] persist failed: $e');
+    }
+  }
+
+  Future<void> loadFromDisk() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.reload();
+      final raw = prefs.getString(_kEffectiveKey);
+      if (raw == null || raw.isEmpty) return;
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return;
+      final map = <String, String>{};
+      decoded.forEach((k, v) {
+        if (v is String && v.isNotEmpty) map[k.toString()] = v;
+      });
+      _customCache.clear();
+      applyPreferences(map, customLoader: (event) async {
+        final dir = await _soundDir();
+        final file = File('${dir.path}/$event.bin');
+        if (!await file.exists()) return null;
+        return file.readAsBytes();
+      });
+    } catch (e) {
+      debugPrint('[ringtone] loadFromDisk failed: $e');
     }
   }
 

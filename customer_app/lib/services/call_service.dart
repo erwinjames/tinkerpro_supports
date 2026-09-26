@@ -39,13 +39,7 @@ class CallService extends ChangeNotifier {
     required this.shadowUserId,
     this.conversationId = 0,
     List<Map<String, dynamic>>? iceServers,
-  }) : _iceServers = iceServers ??
-            const [
-              {'urls': 'stun:stun.l.google.com:19302'},
-              {'urls': 'stun:stun1.l.google.com:19302'},
-              // Production: drop in a TURN server here.
-              // {'urls': 'turn:turn.example.com:3478', 'username': '…', 'credential': '…'}
-            ] {
+  }) : _iceOverride = iceServers {
     _signalSub = realtime.callSignalEvents.listen(_onSignal);
   }
 
@@ -63,7 +57,12 @@ class CallService extends ChangeNotifier {
   /// in which case every admin rings as before.
   final int conversationId;
 
-  final List<Map<String, dynamic>> _iceServers;
+  final List<Map<String, dynamic>>? _iceOverride;
+  List<Map<String, dynamic>> _ice = const [
+    {'urls': 'stun:stun.l.google.com:19302'},
+    {'urls': 'stun:stun1.l.google.com:19302'},
+  ];
+  DateTime? _iceExpiresAt;
   StreamSubscription<CallSignal>? _signalSub;
 
   // ── Public state (read-only views for the UI) ────────────────────────
@@ -163,6 +162,7 @@ class CallService extends ChangeNotifier {
     _pendingIce.clear();
 
     await _ensureRenderers();
+    await _refreshIce();
     unawaited(RingtoneService.instance.startRingback());
     notifyListeners();
 
@@ -284,6 +284,10 @@ class CallService extends ChangeNotifier {
     if (role != CallRole.callee || _pendingOffer == null) return;
     unawaited(RingtoneService.instance.stop());
     phase = CallPhase.connecting;
+    // Dismiss the incoming UI on our OWN other surfaces (portal web, another
+    // session) — they ring the same private-user-{me} channel. Sent after the
+    // phase flip so our own echo is ignored (we only dismiss while `ringing`).
+    _signalHandledElsewhere();
     _calleeRingTimeout?.cancel();
     _calleeRingTimeout = null;
     // Auto-end if ICE never completes. Same 30s guard as the staff app.
@@ -296,6 +300,7 @@ class CallService extends ChangeNotifier {
     notifyListeners();
 
     await _ensureRenderers();
+    await _refreshIce();
 
     try {
       _localStream = await _getMedia(media);
@@ -350,6 +355,9 @@ class CallService extends ChangeNotifier {
     final pid = peerId;
     final cid = callId;
     final wireMedia = _mediaWire();
+    // Dismiss the incoming UI on our own other surfaces before cleanup wipes
+    // the call id (they ring the same private-user-{me} channel).
+    _signalHandledElsewhere();
     _cleanup(silent: true);
     if (pid != null && cid != null) {
       unawaited(chat.signal(
@@ -461,6 +469,14 @@ class CallService extends ChangeNotifier {
           }
         } catch (_) {}
         break;
+      case 'handled':
+        // Another of our OWN surfaces accepted or declined this same incoming
+        // call. Silently dismiss our still-ringing UI — don't signal the
+        // caller. Ignored once we've moved past `ringing`.
+        if (role == CallRole.callee && phase == CallPhase.ringing) {
+          _cleanup(silent: true);
+        }
+        break;
       case 'decline':
       case 'busy':
       case 'end':
@@ -528,7 +544,7 @@ class CallService extends ChangeNotifier {
 
   Future<RTCPeerConnection> _createPeer() async {
     final pc = await createPeerConnection({
-      'iceServers': _iceServers,
+      'iceServers': _ice,
       'iceTransportPolicy': 'all',
       'sdpSemantics': 'unified-plan',
     });
@@ -596,6 +612,52 @@ class CallService extends ChangeNotifier {
     };
     return pc;
   }
+
+  /// Pull fresh ICE config (STUN + ephemeral TURN credentials) from the
+  /// server, caching it for half the credential lifetime so a call started
+  /// near the boundary stays valid for its whole duration. On any failure we
+  /// keep the previous config — public STUN alone still covers most direct
+  /// calls, though not a peer behind symmetric NAT.
+  ///
+  /// Entries whose `urls` is a list are expanded to one entry per URL, which
+  /// every flutter_webrtc platform accepts.
+  Future<void> _refreshIce() async {
+    if (_iceOverride != null) {
+      _ice = _iceOverride;
+      return;
+    }
+    final now = DateTime.now();
+    if (_iceExpiresAt != null && now.isBefore(_iceExpiresAt!)) return;
+
+    final res = await chat.iceServers();
+    if (res == null) return;
+
+    final out = <Map<String, dynamic>>[];
+    for (final entry in (res['iceServers'] as List)) {
+      if (entry is! Map) continue;
+      final m = Map<String, dynamic>.from(entry);
+      final urls = m['urls'];
+      final list = urls is List ? urls : [urls];
+      for (final u in list) {
+        if (u == null) continue;
+        final one = <String, dynamic>{'urls': u.toString()};
+        if (m['username'] != null) one['username'] = m['username'].toString();
+        if (m['credential'] != null) {
+          one['credential'] = m['credential'].toString();
+        }
+        out.add(one);
+      }
+    }
+    if (out.isEmpty) return;
+
+    _ice = out;
+    final ttl = (res['ttl'] as num?)?.toInt() ?? 43200;
+    _iceExpiresAt = now.add(Duration(seconds: (ttl ~/ 2).clamp(150, 86400)));
+    if (res['has_turn'] != true) {
+      debugPrint('[call] no TURN configured — calls will fail behind symmetric NAT');
+    }
+  }
+
 
   Future<MediaStream> _getMedia(CallMedia mediaKind) {
     final constraints = <String, dynamic>{
@@ -688,6 +750,20 @@ class CallService extends ChangeNotifier {
   }
 
   String _mediaWire() => media == CallMedia.video ? 'video' : 'voice';
+
+  /// Broadcast a `handled` signal to our OWN user channel so any other surface
+  /// (portal web, another session) still ringing this same incoming call
+  /// dismisses it. Fire-and-forget; no-op without a call id.
+  void _signalHandledElsewhere() {
+    final cid = callId;
+    if (cid == null) return;
+    unawaited(chat.signal(
+      peerId: shadowUserId,
+      kind: 'handled',
+      callId: cid,
+      media: _mediaWire(),
+    ));
+  }
 
   Future<void> _ensureRenderers() async {
     if (_renderersReady) return;

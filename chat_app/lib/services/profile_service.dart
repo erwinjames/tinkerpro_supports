@@ -63,6 +63,61 @@ class ProfileService {
     }
   }
 
+  Future<ProfileResult> saveChatAlias(ProfileInfo current, String alias) async {
+    try {
+      final res = await _api.post(
+        'updateSelfAccount',
+        body: {
+          'full_name': current.fullName,
+          'email': current.email,
+          'chat_alias': alias.trim(),
+        },
+      );
+      return ProfileResult(
+        ok: _okStatus(res),
+        message: res['message']?.toString(),
+      );
+    } catch (_) {
+      return ProfileResult(ok: false, message: 'Network error');
+    }
+  }
+
+  Future<({bool enabled, String start, String end, String tz})?>
+      agentHours() async {
+    try {
+      final res = await _api.get('getAgentHoursSettings');
+      if (res['status'] != 'success') return null;
+      final on = res['enabled'];
+      return (
+        enabled: on == true || on == 1 || on == '1',
+        start: (res['start'] ?? '08:00').toString(),
+        end: (res['end'] ?? '17:00').toString(),
+        tz: (res['tz'] ?? '').toString(),
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<ProfileResult> saveAgentHours({
+    required bool enabled,
+    required String start,
+    required String end,
+  }) async {
+    try {
+      final res = await _api.post(
+        'saveAgentHoursSettings',
+        body: {'enabled': enabled ? '1' : '0', 'start': start, 'end': end},
+      );
+      return ProfileResult(
+        ok: _okStatus(res),
+        message: res['message']?.toString(),
+      );
+    } catch (_) {
+      return ProfileResult(ok: false, message: 'Network error');
+    }
+  }
+
   bool _okStatus(Map<String, dynamic> res) =>
       res['status'] == 'success' || res['success'] == true;
 }

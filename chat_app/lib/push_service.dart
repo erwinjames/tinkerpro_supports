@@ -7,13 +7,14 @@ import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 import 'api_client.dart';
-import 'services/chat_prefs.dart';
+import 'services/chat_head.dart';
 import 'services/incoming_call_service.dart';
+import 'services/tone_prefs.dart';
 
 const MethodChannel _chatBubbleChannel =
     MethodChannel('com.tinkerpro.support/chat_bubble');
 
-const String _kChatChannelId = 'tinkerpro_chat';
+const String _kChatChannelId = 'tinkerpro_chat_default';
 const String _kChatChannelName = 'TinkerPro Chat';
 const String _kAlertsChannelId = 'tinkerpro_alerts';
 const String _kAlertsChannelName = 'TinkerPro Alerts';
@@ -39,29 +40,40 @@ Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
     final convId =
         int.tryParse((data['conversation_id'] ?? '').toString()) ?? 0;
     if (convId > 0 && Platform.isAndroid) {
-      await _cancelBubble(convId);
+      final handled = await _cancelBubble(convId);
+      await ChatHead.markConversationRead(convId);
       await _ensureBgLocalInit();
-      await _bgLocalPlugin.cancel(convId);
+      if (!handled) await _bgLocalPlugin.cancel(convId);
+      await _bgLocalPlugin.cancel(-convId);
     }
     return;
   }
 
   if (Platform.isAndroid) {
+    if ((data['event'] ?? '').toString() == 'fb_moved') {
+      await _ensureBgLocalInit();
+      await _showMovedBanner(_bgLocalPlugin, Map<String, dynamic>.from(data));
+      return;
+    }
     if (type == 'chat.message') {
-
-      final bubblesAllowed = await ChatPrefs.bubbleEnabledFromDisk();
-      final shown = bubblesAllowed ? await _tryShowBubble(data) : false;
+      final shown = await _tryShowBubble(data);
       if (!shown) {
         await _ensureBgLocalInit();
         await _showChatBanner(_bgLocalPlugin, data);
       }
+      await ChatHead.showForMessage(Map<String, dynamic>.from(data));
     }
   }
 }
 
+String _soundEventFor(Map<String, dynamic> data) =>
+    (data['source'] ?? '').toString() == 'facebook' ? 'fb' : 'notify';
+
 Future<bool> _tryShowBubble(Map<String, dynamic> data) async {
   try {
+    final channelId = await TonePrefs.channelFor(_soundEventFor(data));
     await _chatBubbleChannel.invokeMethod('show', <String, dynamic>{
+      'channelId': channelId ?? '',
       'conversationId':
           int.tryParse((data['conversation_id'] ?? '').toString()) ?? 0,
       'senderId':
@@ -79,12 +91,15 @@ Future<bool> _tryShowBubble(Map<String, dynamic> data) async {
   }
 }
 
-Future<void> _cancelBubble(int conversationId) async {
+Future<bool> _cancelBubble(int conversationId) async {
   try {
     await _chatBubbleChannel.invokeMethod('cancel', <String, dynamic>{
       'conversationId': conversationId,
     });
-  } catch (_) {}
+    return true;
+  } catch (_) {
+    return false;
+  }
 }
 
 Future<void> _ensureBgLocalInit() async {
@@ -110,17 +125,46 @@ Future<void> _showChatBanner(
   final preview = (data['preview'] ?? '').toString();
   final convId =
       int.tryParse((data['conversation_id'] ?? '').toString()) ?? 0;
+  final channelId =
+      await TonePrefs.channelFor(_soundEventFor(data)) ?? _kChatChannelId;
   await plugin.show(
     convId == 0 ? 0 : convId,
     senderName,
     preview.isEmpty ? 'You have a new message' : preview,
-    const NotificationDetails(
+    NotificationDetails(
       android: AndroidNotificationDetails(
-        _kChatChannelId,
+        channelId,
         _kChatChannelName,
         channelDescription: 'New chat messages.',
         importance: Importance.high,
         priority: Priority.high,
+      ),
+    ),
+    payload: 'chat:$convId',
+  );
+}
+
+Future<void> _showMovedBanner(
+    FlutterLocalNotificationsPlugin plugin, Map<String, dynamic> data) async {
+  final title =
+      (data['thread_name'] ?? data['sender_name'] ?? 'Facebook chat moved')
+          .toString();
+  final body = (data['preview'] ?? '').toString();
+  final convId =
+      int.tryParse((data['conversation_id'] ?? '').toString()) ?? 0;
+  final channelId = await TonePrefs.channelFor('fbmove') ?? _kChatChannelId;
+  await plugin.show(
+    convId == 0 ? 0 : -convId,
+    title,
+    body.isEmpty ? 'A Facebook chat was moved to agents' : body,
+    NotificationDetails(
+      android: AndroidNotificationDetails(
+        channelId,
+        _kChatChannelName,
+        channelDescription: 'New chat messages.',
+        importance: Importance.high,
+        priority: Priority.high,
+        category: AndroidNotificationCategory.message,
       ),
     ),
     payload: 'chat:$convId',
@@ -155,11 +199,6 @@ class PushService {
     _currentlyViewedConv = notifier;
   }
 
-  ChatPrefs? _chatPrefs;
-  void bindChatPrefs(ChatPrefs prefs) {
-    _chatPrefs = prefs;
-  }
-
   final PendingChatNavigation pendingChatNavigation = PendingChatNavigation();
 
   Future<void> initialize() async {
@@ -192,6 +231,10 @@ class PushService {
         importance: Importance.high,
       ),
     );
+    await androidPlugin?.deleteNotificationChannel('tinkerpro_chat');
+    await androidPlugin?.deleteNotificationChannel('tinkerpro_chat_messages');
+    await TonePrefs.applyToRingtoneService();
+    await TonePrefs.syncChannels();
 
     await FirebaseMessaging.instance
         .requestPermission(alert: true, badge: true, sound: true);
@@ -223,6 +266,7 @@ class PushService {
   Future<void> dismissBubble(int conversationId) async {
     if (!_initialized) return;
     await _cancelBubble(conversationId);
+    await ChatHead.dismissConversation(conversationId);
   }
 
   Future<void> _handleForegroundFcm(RemoteMessage message) async {
@@ -238,9 +282,16 @@ class PushService {
       final convId =
           int.tryParse((message.data['conversation_id'] ?? '').toString()) ?? 0;
       if (convId > 0) {
-        await _cancelBubble(convId);
-        await _local.cancel(convId);
+        final handled = await _cancelBubble(convId);
+        await ChatHead.markConversationRead(convId);
+        if (!handled) await _local.cancel(convId);
+        await _local.cancel(-convId);
       }
+      return;
+    }
+
+    if ((message.data['event'] ?? '').toString() == 'fb_moved') {
+      await _showMovedBanner(_local, message.data);
       return;
     }
 
@@ -251,14 +302,11 @@ class PushService {
           int.tryParse((message.data['conversation_id'] ?? '').toString()) ?? 0;
       final viewing = _currentlyViewedConv?.value;
       if (convId > 0 && viewing == convId) {
-
         await _cancelBubble(convId);
         return;
       }
 
-      final bubblesAllowed = _chatPrefs?.bubbleEnabled ?? true;
-      final shown =
-          bubblesAllowed ? await _tryShowBubble(message.data) : false;
+      final shown = await _tryShowBubble(message.data);
       if (!shown) {
         await _showChatBanner(_local, message.data);
       }
