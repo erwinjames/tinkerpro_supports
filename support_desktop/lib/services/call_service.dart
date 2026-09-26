@@ -9,27 +9,16 @@ import 'chat_realtime.dart';
 import 'chat_service.dart';
 import 'ringtone_service.dart';
 
-// Desktop build: there is no native CallKit/incoming-call sheet (that's the
-// mobile killed-app push path). Incoming calls arrive live over the realtime
-// signaling channel instead, so the CallKit dismiss is a no-op here.
 Future<void> dismissIncomingCall(String callId) async {}
 
-/// Phase of a call. Maps 1:1 with the JS `call.state` machine on the web side.
 enum CallPhase { idle, calling, ringing, connecting, connected, ended }
 
-/// Voice or video. Drives whether we request a video track from the OS and
-/// whether the call screen renders the remote video.
 enum CallMedia { voice, video }
 
-/// Caller (we initiated) vs callee (they initiated, we're answering).
 enum CallRole { caller, callee }
 
-/// Upper bound on mesh size. Every participant uploads their media once per
-/// other participant, so this stops a large channel from melting the device.
 const int kMeshMaxPeers = 6;
 
-/// One remote participant: their peer connection, media, and video surface.
-/// A two-party call is just a mesh with a single entry.
 class CallParticipant {
   CallParticipant({required this.id, required this.name});
 
@@ -39,6 +28,7 @@ class CallParticipant {
   MediaStream? stream;
   final RTCVideoRenderer renderer = RTCVideoRenderer();
   final List<RTCIceCandidate> pendingIce = [];
+  String? avatarUrl;
   bool connected = false;
   bool rendererReady = false;
 
@@ -48,23 +38,6 @@ class CallParticipant {
       name.trim().isEmpty ? '?' : name.trim()[0].toUpperCase();
 }
 
-/// Single in-flight call, two-party or group. Group calls run as a full mesh
-/// (every participant holds a peer connection to every other), which is why
-/// [kMeshMaxPeers] is deliberately small — beyond that an SFU is required.
-///
-/// Lifecycle:
-///   * caller: open → calling → ringing → connecting → connected → ended
-///   * callee: receive offer → ringing → accept/decline → connecting → connected → ended
-///
-/// Mesh formation: the caller fans an offer out to every invitee, carrying the
-/// roster. Each callee that accepts broadcasts `join` to the rest; whichever
-/// side has the lower user id sends the offer, so two peers never dial each
-/// other at once. Invitees still ringing ignore joins and announce themselves
-/// when they accept, so the mesh converges regardless of accept order.
-///
-/// Consumers listen via `addListener`; the call screen (re-)renders on each
-/// notification. The service owns the streams, peer connections, renderers,
-/// and timer; UI only consumes.
 class CallService extends ChangeNotifier {
   CallService({
     required this.realtime,
@@ -86,12 +59,13 @@ class CallService extends ChangeNotifier {
   DateTime? _iceExpiresAt;
   StreamSubscription<CallSignal>? _signalSub;
 
-  // ── Public state (read-only views for the UI) ────────────────────────
   CallPhase phase = CallPhase.idle;
   CallRole? role;
   CallMedia media = CallMedia.voice;
   int? peerId;
   String peerName = '';
+  String? peerAvatarUrl;
+  String? myAvatarUrl;
   String? callId;
 
   bool isGroup = false;
@@ -104,55 +78,101 @@ class CallService extends ChangeNotifier {
   bool _frontCamera = true;
   DateTime? startedAt;
 
-  /// Self-preview surface. The call screen wires this to a [RTCVideoView].
   final RTCVideoRenderer localRenderer = RTCVideoRenderer();
   bool _renderersReady = false;
 
-  // ── Internals ────────────────────────────────────────────────────────
   final Map<int, CallParticipant> _peers = {};
   List<Map<String, dynamic>> _roster = [];
   bool _announced = false;
 
   MediaStream? _localStream;
-  RTCSessionDescription? _pendingOffer; // callee: cached until accept()
+  RTCSessionDescription? _pendingOffer;
 
-  /// ICE candidates that arrive on the wire BEFORE the offer signal does.
-  /// Keyed by `callId|fromId` so a stale call's leftover candidates can never
-  /// bleed into a new call, and a mesh peer's candidates can't be applied to
-  /// the wrong connection. Drained inside [_drainIce].
   final Map<String, List<RTCIceCandidate>> _earlyIce = {};
 
   Timer? _timer;
-  Timer? _ringTimeout;        // caller-side 45s "no answer" guard
-  Timer? _calleeRingTimeout;  // callee-side 60s "caller never followed up" guard
-  Timer? _connectingTimeout;  // 30s guard for stuck connecting phase (ICE never completes)
-  Timer? _staleTimeout;       // group: prune invitees who never answered
+  Timer? _ringTimeout;
+  Timer? _calleeRingTimeout;
+  Timer? _connectingTimeout;
+  Timer? _staleTimeout;
 
-  /// Every remote participant, ordered by join. The call screen builds its
-  /// grid from this; a two-party call yields exactly one entry.
+  static final Map<int, String?> _avatarCache = {};
+
+  Map<String, String> get avatarHeaders => chat.api.authHeaders();
+
+  String? _absoluteAvatar(String? rel) {
+    final raw = rel?.trim() ?? '';
+    if (raw.isEmpty) return null;
+    if (raw.startsWith('http://') || raw.startsWith('https://')) return raw;
+    return '${chat.api.baseUrl}/${raw.replaceAll(RegExp(r'^/+'), '')}';
+  }
+
+  Future<Map<int, String?>?> _fetchDirectoryAvatars() async {
+    try {
+      final res = await chat.api.get('chat.directory');
+      if (res['success'] != true) return null;
+      final raw = res['users'];
+      if (raw is! List) return null;
+      final out = <int, String?>{};
+      for (final u in raw.whereType<Map>()) {
+        final id = int.tryParse('${u['id'] ?? ''}') ?? 0;
+        if (id <= 0) continue;
+        out[id] = _absoluteAvatar(u['avatar']?.toString());
+      }
+      return out;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _resolveAvatars() async {
+    final wanted = <int>{myUserId, ..._peers.keys};
+    if (peerId != null) wanted.add(peerId!);
+    final missing = wanted.where((i) => i > 0 && !_avatarCache.containsKey(i));
+    if (missing.isNotEmpty) {
+      final found = await _fetchDirectoryAvatars();
+      if (found == null || found.isEmpty) return;
+      _avatarCache.addAll(found);
+      for (final id in wanted) {
+        _avatarCache.putIfAbsent(id, () => null);
+      }
+    }
+
+    var changed = false;
+    for (final p in _peers.values) {
+      final url = _avatarCache[p.id];
+      if (p.avatarUrl != url) {
+        p.avatarUrl = url;
+        changed = true;
+      }
+    }
+    final mine = _avatarCache[myUserId];
+    if (myAvatarUrl != mine) {
+      myAvatarUrl = mine;
+      changed = true;
+    }
+    final theirs = peerId == null ? null : _avatarCache[peerId!];
+    if (peerAvatarUrl != theirs) {
+      peerAvatarUrl = theirs;
+      changed = true;
+    }
+    if (changed) notifyListeners();
+  }
+
   List<CallParticipant> get participants => _peers.values.toList();
 
-  /// Primary remote video surface — the only one in a two-party call. Null
-  /// before anyone is added, so the call screen must null-check.
   RTCVideoRenderer? get remoteRenderer =>
       _peers.isEmpty ? null : _peers.values.first.renderer;
 
   bool get isActive =>
       phase != CallPhase.idle && phase != CallPhase.ended;
 
-  /// True only when a real peer connection is established or actively
-  /// negotiating media. Distinct from [isActive], which is also true for
-  /// stuck "calling" / "ringing" phases that never reached the network.
   bool get isInLiveCall =>
       phase == CallPhase.connecting || phase == CallPhase.connected;
 
-  /// True when an incoming offer is sitting in front of the user awaiting
-  /// accept/decline. Used by the chat thread screen to give a different
-  /// message ("ANSWER INCOMING CALL FIRST") instead of force-resetting.
   bool get isIncomingRinging =>
       phase == CallPhase.ringing && role == CallRole.callee;
 
-  /// Display title — the group name for a mesh call, the peer's name for a DM.
   String get title => isGroup
       ? (groupName.isEmpty ? 'Group call' : groupName)
       : peerName;
@@ -169,10 +189,6 @@ class CallService extends ChangeNotifier {
     return '$mm:$ss';
   }
 
-  // ── Outgoing call ────────────────────────────────────────────────────
-
-  /// Initiate a two-party call to [peerId]. Returns false if a call is already
-  /// active or if media access was denied.
   Future<bool> placeCall({
     required int peerId,
     required String peerName,
@@ -187,9 +203,6 @@ class CallService extends ChangeNotifier {
     );
   }
 
-  /// Initiate a mesh call across a group/channel. [members] is every invitee
-  /// except me, as `{'id': int, 'name': String}`. Returns false when a call is
-  /// already active, the roster is empty or oversized, or media was denied.
   Future<bool> placeGroupCall({
     required int conversationId,
     required String groupName,
@@ -264,7 +277,6 @@ class CallService extends ChangeNotifier {
       await _offerTo(p);
     }
 
-    // Auto-cancel if no one answers within 45 s.
     _ringTimeout = Timer(const Duration(seconds: 45), () {
       if (phase == CallPhase.calling || phase == CallPhase.ringing) {
         end(silent: false, reason: 'No answer');
@@ -313,8 +325,6 @@ class CallService extends ChangeNotifier {
     }
   }
 
-  // ── Peer registry ────────────────────────────────────────────────────
-
   Future<CallParticipant> _addPeer(int id, String name) async {
     final existing = _peers[id];
     if (existing != null) {
@@ -322,7 +332,9 @@ class CallService extends ChangeNotifier {
       return existing;
     }
     final p = CallParticipant(id: id, name: name.isEmpty ? 'User' : name);
+    p.avatarUrl = _avatarCache[id];
     _peers[id] = p;
+    unawaited(_resolveAvatars());
     try {
       await p.renderer.initialize();
       p.rendererReady = true;
@@ -358,8 +370,6 @@ class CallService extends ChangeNotifier {
     }
   }
 
-  /// One participant dropped out. In a two-party call that ends everything;
-  /// in a mesh the call survives until the last peer is gone.
   void _peerLeft(int id) {
     if (!isGroup) {
       _cleanup(silent: true);
@@ -394,15 +404,11 @@ class CallService extends ChangeNotifier {
     notifyListeners();
   }
 
-  // ── Incoming call ────────────────────────────────────────────────────
-
   Future<void> _receiveOffer(CallSignal sig) async {
-    // Already in this same call → a mesh peer is dialing us directly.
     if (isActive && callId == sig.callId) {
       await _answerPeerOffer(sig);
       return;
     }
-    // Already in a different call → politely tell the other side we're busy.
     if (isActive) {
       chat.signal(
         peerId: sig.fromId,
@@ -443,12 +449,8 @@ class CallService extends ChangeNotifier {
 
     await _addPeer(sig.fromId, peerName);
 
-    // Foreground ringtone — kicks in only when CallKit isn't already
-    // covering the ring (i.e. the offer arrived via Pusher in-app, not
-    // via FCM data push waking up the killed app).
     unawaited(RingtoneService.instance.startIncoming());
 
-    // Acknowledge so the caller can flip to "Ringing…"
     chat.signal(
       peerId: sig.fromId,
       kind: 'ringing',
@@ -456,8 +458,6 @@ class CallService extends ChangeNotifier {
       media: _mediaWire(),
     );
 
-    // Auto-decline if the user never picks up. Without this, a caller who
-    // hangs up before we accept would leave us stuck in `ringing` forever.
     _calleeRingTimeout?.cancel();
     _calleeRingTimeout = Timer(const Duration(seconds: 60), () {
       if (phase == CallPhase.ringing && role == CallRole.callee) {
@@ -476,8 +476,6 @@ class CallService extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// A peer we're already in a call with sent us an offer — the mesh pairing
-  /// path. We have media up, so answer immediately without ringing the user.
   Future<void> _answerPeerOffer(CallSignal sig) async {
     if (_localStream == null || callId == null) return;
     if (_peers.length >= kMeshMaxPeers && !_peers.containsKey(sig.fromId)) return;
@@ -512,22 +510,13 @@ class CallService extends ChangeNotifier {
     }
   }
 
-  /// Callee answers. Spins up local media + peer connection, replies with
-  /// SDP answer, and drains queued ICE.
   Future<void> accept() async {
     if (role != CallRole.callee || _pendingOffer == null) return;
     unawaited(RingtoneService.instance.stop());
     phase = CallPhase.connecting;
-    // Dismiss the incoming UI on our OWN other surfaces (web, mobile, another
-    // desktop session) — they ring the same private-user-{me} channel. Sent
-    // after the phase flip so our own echo is ignored (we only dismiss while
-    // still `ringing`).
     _signalHandledElsewhere();
     _calleeRingTimeout?.cancel();
     _calleeRingTimeout = null;
-    // If ICE never completes (peer's answer lost, NAT issues, no TURN, etc.)
-    // the connecting phase would otherwise hang forever — UI buttons remain
-    // visible but the user has no signal that the call is wedged. Auto-end.
     _connectingTimeout?.cancel();
     _connectingTimeout = Timer(const Duration(seconds: 30), () {
       if (phase == CallPhase.connecting) {
@@ -547,8 +536,6 @@ class CallService extends ChangeNotifier {
           '${_localStream!.getVideoTracks().length} video');
       localRenderer.srcObject = _localStream;
     } catch (_) {
-      // Fire-and-forget the decline so a slow signal POST can't wedge us in
-      // the connecting state — _fail() tears the call down immediately.
       unawaited(chat.signal(
         peerId: callerId,
         kind: 'decline',
@@ -592,10 +579,6 @@ class CallService extends ChangeNotifier {
     }
   }
 
-  /// Tell every other invitee we're in. Whoever is already in the call pairs
-  /// with us; the lower user id always sends the offer so both sides never
-  /// dial each other at once. Invitees still ringing ignore this and announce
-  /// themselves when they accept.
   void _announceJoin() {
     final cid = callId;
     if (cid == null) return;
@@ -616,9 +599,6 @@ class CallService extends ChangeNotifier {
   Future<void> _handleJoin(CallSignal sig) async {
     if (_localStream == null || callId == null) return;
     if (sig.fromId == 0 || sig.fromId == myUserId) return;
-    // A join can only happen in a mesh. Trusting it here is what lets a
-    // cold-start callee — whose cached push offer carried no roster — still
-    // discover the rest of the call.
     isGroup = true;
     final incoming = _parseRoster(sig.payload?['roster']);
     if (_roster.isEmpty && incoming.isNotEmpty) {
@@ -657,14 +637,6 @@ class CallService extends ChangeNotifier {
     return out;
   }
 
-  /// Killed-app path: user just tapped Accept on the native CallKit sheet.
-  /// We don't have the offer SDP yet (the Soketi `offer` signal was missed
-  /// while the app wasn't running), so we seed local state, fetch the
-  /// cached SDP from the server, then run the normal accept() flow.
-  ///
-  /// Idempotent on the same callId — a duplicate Accept (e.g. CallKit
-  /// firing twice on cold start) is a no-op while we're already setting
-  /// up that call.
   Future<void> acceptIncomingFromPush({
     required String callId,
     required int callerId,
@@ -676,7 +648,6 @@ class CallService extends ChangeNotifier {
       return;
     }
     if (isActive) {
-      // Some other call is in flight — politely busy out the new one.
       await chat.signal(
         peerId: callerId,
         kind: 'busy',
@@ -686,9 +657,6 @@ class CallService extends ChangeNotifier {
       return;
     }
 
-    // The cached offer carries no roster, so a group call answered from a
-    // cold start starts out looking two-party. The `join` other participants
-    // send on their own accept promotes it back to a mesh (see [_handleJoin]).
     isGroup = false;
     groupName = '';
     groupConversationId = 0;
@@ -707,10 +675,8 @@ class CallService extends ChangeNotifier {
     _frontCamera = true;
     startedAt = null;
     notifyListeners();
+    unawaited(_resolveAvatars());
 
-    // Send the `ringing` ack now so the caller flips from "Calling…" to
-    // "Ringing…" while we're still fetching the SDP. (The actual SDP-set
-    // and `answer` happen inside accept() below.)
     await chat.signal(
       peerId: callerId,
       kind: 'ringing',
@@ -720,8 +686,6 @@ class CallService extends ChangeNotifier {
 
     final cached = await chat.fetchPendingOffer();
     if (cached == null || cached['call_id'] != callId) {
-      // Caller hung up between push send and our accept — nothing to
-      // negotiate. Tell them and clean up.
       debugPrint('[call] acceptIncomingFromPush — no cached offer for $callId');
       await chat.signal(
         peerId: callerId,
@@ -741,9 +705,6 @@ class CallService extends ChangeNotifier {
     await accept();
   }
 
-  /// Killed-app path: user tapped Decline on the native CallKit sheet.
-  /// Send the decline signal so the caller stops ringing; no local call
-  /// state to clean up because we never seeded any.
   Future<void> declineIncomingFromPush({
     required String callId,
     required int callerId,
@@ -758,18 +719,11 @@ class CallService extends ChangeNotifier {
     );
   }
 
-  /// Callee declines. Notifies caller and cleans up local state.
   Future<void> decline() async {
     unawaited(RingtoneService.instance.stop());
-    // Capture peer/call/media BEFORE cleanup wipes them, then tear down the
-    // UI first so the incoming screen dismisses instantly — don't gate the
-    // user's escape on a slow/failed `decline` POST (the caller will hit
-    // their own ring timeout if the signal never lands).
     final pid = callerId != 0 ? callerId : peerId;
     final cid = callId;
     final wireMedia = _mediaWire();
-    // Dismiss the incoming UI on our own other surfaces before cleanup wipes
-    // the call id (they ring the same private-user-{me} channel).
     _signalHandledElsewhere();
     _cleanup(silent: true);
     if (pid != null && pid != 0 && cid != null) {
@@ -782,13 +736,10 @@ class CallService extends ChangeNotifier {
     }
   }
 
-  // ── Inbound signaling (offer/answer/ICE/control) ────────────────────
-
   Future<void> _onSignal(CallSignal sig) async {
     debugPrint('[call] ← ${sig.kind} from ${sig.fromId} callId ${sig.callId}');
 
     if (sig.kind == 'offer') {
-      // Fresh offer for a different callId while we're busy → reject.
       if (isActive && callId != sig.callId) {
         await chat.signal(
           peerId: sig.fromId,
@@ -802,15 +753,11 @@ class CallService extends ChangeNotifier {
       return;
     }
 
-    // ICE may race ahead of offer/answer SDP. Buffer pre-offer ICE keyed
-    // on callId + sender so it isn't lost when the callee hasn't seen the
-    // offer yet, and can't be applied to the wrong mesh connection.
     if (sig.kind == 'ice' && (!isActive || callId != sig.callId)) {
       _bufferEarlyIce(sig);
       return;
     }
 
-    // All other kinds must match the in-flight call.
     if (!isActive || callId != sig.callId) return;
 
     if (sig.kind == 'join') {
@@ -829,10 +776,7 @@ class CallService extends ChangeNotifier {
             sig.payload!['type']?.toString(),
           ));
           await _drainIce(p);
-          // Peer answered — silence the caller's ringback.
           unawaited(RingtoneService.instance.stop());
-          // A callee whose offer arrived without a roster (cold-start push)
-          // learns the rest of the mesh from this.
           if (isGroup && role == CallRole.caller) {
             unawaited(chat.signal(
               peerId: sig.fromId,
@@ -874,11 +818,6 @@ class CallService extends ChangeNotifier {
         }
         break;
       case 'handled':
-        // Another of our OWN surfaces (web, desktop, another mobile session)
-        // accepted or declined this same incoming call. Silently dismiss our
-        // still-ringing UI — don't signal the caller; the surface that handled
-        // it already did. Ignored once we've moved past `ringing` (so our own
-        // accept-echo can't tear down the live call we just answered).
         if (role == CallRole.callee && phase == CallPhase.ringing) {
           _cleanup(silent: true);
         }
@@ -919,8 +858,6 @@ class CallService extends ChangeNotifier {
     }
     p.pendingIce.clear();
   }
-
-  // ── Peer connection wiring ───────────────────────────────────────────
 
   Future<RTCPeerConnection> _createPeer(CallParticipant p) async {
     final pc = await createPeerConnection({
@@ -994,14 +931,6 @@ class CallService extends ChangeNotifier {
     }
   }
 
-  /// Pull fresh ICE config (STUN + ephemeral TURN credentials) from the
-  /// server, caching it for half the credential lifetime so a call started
-  /// near the boundary stays valid for its whole duration. On any failure we
-  /// keep the previous config — public STUN alone still covers most direct
-  /// calls, though not a peer behind symmetric NAT.
-  ///
-  /// Entries whose `urls` is a list are expanded to one entry per URL, which
-  /// every flutter_webrtc platform accepts.
   Future<void> _refreshIce() async {
     if (_iceOverride != null) {
       _ice = _iceOverride;
@@ -1039,7 +968,6 @@ class CallService extends ChangeNotifier {
     }
   }
 
-
   Future<MediaStream> _getMedia(CallMedia mediaKind) {
     final constraints = <String, dynamic>{
       'audio': true,
@@ -1053,8 +981,6 @@ class CallService extends ChangeNotifier {
     };
     return navigator.mediaDevices.getUserMedia(constraints);
   }
-
-  // ── User actions ─────────────────────────────────────────────────────
 
   void toggleMute() {
     if (_localStream == null) return;
@@ -1085,8 +1011,6 @@ class CallService extends ChangeNotifier {
     } catch (_) {}
   }
 
-  /// End the call. If [silent] is true, no `end` signal is sent (used when
-  /// we're responding to a remote `end`/`decline`/`busy` so we don't echo).
   Future<void> end({bool silent = false, String? reason}) async {
     debugPrint('[call] end() phase=$phase silent=$silent reason=$reason');
     unawaited(RingtoneService.instance.stop());
@@ -1094,14 +1018,8 @@ class CallService extends ChangeNotifier {
     final cid = callId;
     final wasActive = isActive;
     final wireMedia = _mediaWire();
-    // Cleanup first so the UI pops even if the network round-trip below
-    // is slow / fails. Don't gate the user's escape on a successful POST.
     _cleanup(silent: true);
     if (!silent && wasActive && cid != null) {
-      // Fire-and-forget: don't await. If this fails (offline, 401, etc.)
-      // we've still cleaned up locally — the peer will hit their own
-      // ringing/connecting timeout. Awaiting here used to hold the Future
-      // open with no UI consequence, which was confusing during debugging.
       for (final pid in targets) {
         unawaited(chat.signal(
           peerId: pid,
@@ -1113,20 +1031,12 @@ class CallService extends ChangeNotifier {
     }
   }
 
-  /// Nuke any in-flight call state without sending an `end` signal. Used by
-  /// [_placeCall] in the chat thread to recover from a stuck `calling` /
-  /// `ringing` (caller side) without forcing the user to restart the app.
-  /// Safe to call from any phase — silent on idle.
   void forceReset() {
     if (phase == CallPhase.idle) return;
     _cleanup(silent: true);
   }
 
   void _cleanup({required bool silent}) {
-    // Dismiss any native incoming-call sheet (Android CallKit shown from the
-    // FCM background path). Without this, a caller hanging up before we
-    // answer leaves the heads-up incoming UI stuck on screen. Idempotent and
-    // a no-op for outgoing calls / platforms without CallKit.
     final dismissCallId = callId;
     if (dismissCallId != null && dismissCallId.isNotEmpty) {
       unawaited(dismissIncomingCall(dismissCallId));
@@ -1161,10 +1071,6 @@ class CallService extends ChangeNotifier {
       } catch (_) {}
     }
 
-    // Only touch the renderer if it was actually initialized. Declining an
-    // incoming call tears down before accept() ever calls _ensureRenderers,
-    // and setting srcObject on an uninitialized renderer throws
-    // "Call initialize before setting the stream".
     if (_renderersReady) {
       localRenderer.srcObject = null;
     }
@@ -1173,6 +1079,7 @@ class CallService extends ChangeNotifier {
     role = null;
     peerId = null;
     peerName = '';
+    peerAvatarUrl = null;
     callId = null;
     media = CallMedia.voice;
     muted = false;
@@ -1189,10 +1096,6 @@ class CallService extends ChangeNotifier {
 
     notifyListeners();
 
-    // Settle to idle on the next tick so the UI can fade out the "ended"
-    // state if it wants to. Guard on _disposed: dispose() calls _cleanup and
-    // then super.dispose() synchronously, so this timer would otherwise fire
-    // notifyListeners() on an already-disposed notifier (e.g. on hot restart).
     Future<void>.delayed(const Duration(milliseconds: 50), () {
       if (_disposed) return;
       if (phase == CallPhase.ended) {
@@ -1203,15 +1106,11 @@ class CallService extends ChangeNotifier {
   }
 
   void _fail(String _) {
-    // Cleanup, no signal — caller hasn't sent anything actionable yet.
     _cleanup(silent: true);
   }
 
   String _mediaWire() => media == CallMedia.video ? 'video' : 'voice';
 
-  /// Broadcast a `handled` signal to our OWN user channel so any other surface
-  /// (web, mobile, another desktop session) still ringing this same
-  /// incoming call dismisses it. Fire-and-forget; no-op without a call id.
   void _signalHandledElsewhere() {
     final cid = callId;
     if (cid == null) return;
@@ -1232,8 +1131,8 @@ class CallService extends ChangeNotifier {
   static String _newCallId() {
     final r = Random.secure();
     final bytes = List<int>.generate(16, (_) => r.nextInt(256));
-    bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
-    bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 1
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
     String hex(int n, int width) =>
         n.toRadixString(16).padLeft(width, '0');
     final s = StringBuffer();
