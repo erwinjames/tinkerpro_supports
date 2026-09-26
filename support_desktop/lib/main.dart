@@ -75,6 +75,7 @@ const String kLiveServerUrl = 'https://support.tinkerpro.io';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  if (kDebugMode) SharedPreferences.setPrefix('flutter.dev.');
 
   await windowManager.ensureInitialized();
   const windowOptions = WindowOptions(

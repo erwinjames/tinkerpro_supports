@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -62,6 +63,11 @@ class ApiClient {
     _coolDownMessage = message;
   }
 
+  static bool _isLoopback(String url) {
+    final host = Uri.tryParse(url)?.host.toLowerCase() ?? '';
+    return host == 'localhost' || host == '::1' || host.startsWith('127.');
+  }
+
   static Future<ApiClient> load() async {
     final prefs = await SharedPreferences.getInstance();
     Map<String, bool> perms = const {};
@@ -74,9 +80,23 @@ class ApiClient {
         }
       } catch (_) {}
     }
+    var base = prefs.getString(_kBaseUrlKey) ?? _kDefaultBaseUrl;
+    if (kReleaseMode && _isLoopback(base) && !_isLoopback(_kDefaultBaseUrl)) {
+      base = _kDefaultBaseUrl;
+      perms = const {};
+      await prefs.setString(_kBaseUrlKey, base);
+      for (final k in [
+        _kCookieKey,
+        _kUserIdKey,
+        _kUsernameKey,
+        _kPermissionsKey,
+      ]) {
+        await prefs.remove(k);
+      }
+    }
     return ApiClient._(
       prefs,
-      prefs.getString(_kBaseUrlKey) ?? _kDefaultBaseUrl,
+      base,
       prefs.getString(_kCookieKey) ?? '',
       prefs.getInt(_kUserIdKey),
       prefs.getString(_kUsernameKey),
