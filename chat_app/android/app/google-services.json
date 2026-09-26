@@ -7,6 +7,25 @@
   "client": [
     {
       "client_info": {
+        "mobilesdk_app_id": "1:878606218018:android:d46eb30a0a80436fc62b7b",
+        "android_client_info": {
+          "package_name": "com.tinkerpro.chat"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAsRA27RikpA8k8rufV_49VQCu9Uj-6aqg"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
         "mobilesdk_app_id": "1:878606218018:android:1beb58876692c7a7c62b7b",
         "android_client_info": {
           "package_name": "com.tinkerpro.support"
