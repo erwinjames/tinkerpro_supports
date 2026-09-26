@@ -2,11 +2,7 @@
 // row shape returned by `api.php` (data: [...], totalRecords: N).
 
 class PosVersion {
-  PosVersion({
-    required this.id,
-    required this.version,
-    required this.date,
-  });
+  PosVersion({required this.id, required this.version, required this.date});
 
   final int id;
 
@@ -17,10 +13,10 @@ class PosVersion {
   final String date;
 
   factory PosVersion.fromJson(Map<String, dynamic> json) => PosVersion(
-        id: _asInt(json['id']),
-        version: (json['version'] ?? '').toString(),
-        date: (json['date'] ?? '').toString(),
-      );
+    id: _asInt(json['id']),
+    version: (json['version'] ?? '').toString(),
+    date: (json['date'] ?? '').toString(),
+  );
 }
 
 int _asInt(Object? value) {

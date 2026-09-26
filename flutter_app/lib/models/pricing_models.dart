@@ -28,14 +28,14 @@ class Pricing {
   bool get hasImage => image.isNotEmpty;
 
   factory Pricing.fromJson(Map<String, dynamic> json) => Pricing(
-        id: _asInt(json['id']),
-        title: (json['title'] ?? '').toString(),
-        price: (json['price'] ?? '').toString(),
-        image: (json['image'] ?? '').toString(),
-        businessTypeId: _asInt(json['business_type_id']),
-        businessTypeName: (json['business_type_name'] ?? '').toString(),
-        features: _features(json['features']),
-      );
+    id: _asInt(json['id']),
+    title: (json['title'] ?? '').toString(),
+    price: (json['price'] ?? '').toString(),
+    image: (json['image'] ?? '').toString(),
+    businessTypeId: _asInt(json['business_type_id']),
+    businessTypeName: (json['business_type_name'] ?? '').toString(),
+    features: _features(json['features']),
+  );
 
   static List<PricingFeature> _features(Object? raw) {
     if (raw is List) {
@@ -64,13 +64,13 @@ class PricingFeature {
   final String categoryName;
 
   factory PricingFeature.fromJson(Map<String, dynamic> json) => PricingFeature(
-        id: _asInt(json['id']),
-        name: (json['name'] ?? '').toString(),
-        categoryId: json['category_id'] == null
-            ? null
-            : _asInt(json['category_id']),
-        categoryName: (json['category_name'] ?? '').toString(),
-      );
+    id: _asInt(json['id']),
+    name: (json['name'] ?? '').toString(),
+    categoryId: json['category_id'] == null
+        ? null
+        : _asInt(json['category_id']),
+    categoryName: (json['category_name'] ?? '').toString(),
+  );
 }
 
 class PricingCategory {
@@ -99,9 +99,9 @@ class BusinessType {
   final String name;
 
   factory BusinessType.fromJson(Map<String, dynamic> json) => BusinessType(
-        id: _asInt(json['id']),
-        name: (json['name'] ?? '').toString(),
-      );
+    id: _asInt(json['id']),
+    name: (json['name'] ?? '').toString(),
+  );
 }
 
 int _asInt(Object? value) {

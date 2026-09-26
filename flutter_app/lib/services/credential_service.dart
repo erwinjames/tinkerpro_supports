@@ -28,12 +28,9 @@ class CredentialService {
   /// Verify the emailed OTP. Sets the server-side session flag that unlocks
   /// the credentials endpoints.
   Future<CredentialResult> verifyOtp(String otp) => _mutate(
-        'verifyCredentialsOTP',
-        {
-          'user_id': '${currentUserId ?? ''}',
-          'otp_code': otp.trim(),
-        },
-      );
+    'verifyCredentialsOTP',
+    {'user_id': '${currentUserId ?? ''}', 'otp_code': otp.trim()},
+  );
 
   /// Fetch all stored credentials. Requires a prior successful [verifyOtp].
   /// Returns an empty list on any failure so the UI still renders.
@@ -68,7 +65,9 @@ class CredentialService {
       _mutate('deleteCredential', {'id': '$id'});
 
   Future<CredentialResult> _mutate(
-      String action, Map<String, String> body) async {
+    String action,
+    Map<String, String> body,
+  ) async {
     try {
       final res = await _api.post(action, body: body);
       final ok = res['success'] == true || res['status'] == 'success';

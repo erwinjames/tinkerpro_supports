@@ -4,18 +4,6 @@ import 'dart:typed_data';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/foundation.dart';
 
-/// In-app audio cues — foreground incoming-call ringtone, outgoing ringback,
-/// and chat-message ping.
-///
-/// Killed/background incoming calls already get the system ringtone via
-/// [FlutterCallkitIncoming] (see incoming_call_service.dart), so this
-/// service only matters when the app is in the foreground and the
-/// CallService receives an offer directly from Pusher.
-///
-/// We synthesize the WAV bytes on first use rather than ship sound assets:
-/// keeps the app small and avoids a binary commit. Three independent
-/// AudioPlayer instances let the chat ping fire while a call is ringing
-/// without one cancelling the other.
 class RingtoneService {
   RingtoneService._();
   static final RingtoneService instance = RingtoneService._();
@@ -27,6 +15,7 @@ class RingtoneService {
   Uint8List? _ringBytes;
   Uint8List? _ringbackBytes;
   Uint8List? _pingBytes;
+  Uint8List? _fbPingBytes;
   bool _initStarted = false;
   Future<void>? _initFuture;
 
@@ -35,16 +24,27 @@ class RingtoneService {
     _initStarted = true;
     _initFuture = () async {
       _ringBytes = _wav([
-        const _Seg(440, 0.4), const _Seg(0, 0.05),
-        const _Seg(480, 0.4), const _Seg(0, 0.15),
-        const _Seg(440, 0.4), const _Seg(0, 0.05),
-        const _Seg(480, 0.4), const _Seg(0, 1.8),
+        const _Seg(440, 0.4),
+        const _Seg(0, 0.05),
+        const _Seg(480, 0.4),
+        const _Seg(0, 0.15),
+        const _Seg(440, 0.4),
+        const _Seg(0, 0.05),
+        const _Seg(480, 0.4),
+        const _Seg(0, 1.8),
       ]);
-      _ringbackBytes = _wav([
-        const _Seg(440, 1.2), const _Seg(0, 2.8),
-      ]);
+      _ringbackBytes = _wav([const _Seg(440, 1.2), const _Seg(0, 2.8)]);
       _pingBytes = _wav([
-        const _Seg(660, 0.10), const _Seg(0, 0.04), const _Seg(880, 0.14),
+        const _Seg(660, 0.10),
+        const _Seg(0, 0.04),
+        const _Seg(880, 0.14),
+      ]);
+      _fbPingBytes = _wav([
+        const _Seg(784, 0.08),
+        const _Seg(0, 0.03),
+        const _Seg(988, 0.08),
+        const _Seg(0, 0.03),
+        const _Seg(1175, 0.12),
       ]);
       try {
         await _ringPlayer.setReleaseMode(ReleaseMode.loop);
@@ -93,12 +93,13 @@ class RingtoneService {
     }
   }
 
-  Future<void> ping() async {
+  Future<void> ping({bool facebook = false}) async {
     await _init();
     try {
       await _pingPlayer.stop();
-      if (_pingBytes != null) {
-        await _pingPlayer.play(BytesSource(_pingBytes!));
+      final bytes = facebook ? _fbPingBytes : _pingBytes;
+      if (bytes != null) {
+        await _pingPlayer.play(BytesSource(bytes));
       }
     } catch (e) {
       debugPrint('[ringtone] ping failed: $e');
@@ -113,11 +114,6 @@ class RingtoneService {
     } catch (_) {}
   }
 
-  // ── WAV synthesis ──────────────────────────────────────────────────────
-  // 16-bit mono PCM at 22.05 kHz — enough fidelity for sine tones and
-  // keeps the byte count small. Each segment is either a sine tone
-  // (freq > 0) or silence (freq == 0). Tones get a short fade in/out so
-  // loop seams and segment boundaries don't click.
   static const int _sampleRate = 22050;
   static const double _gain = 0.4;
 
@@ -169,8 +165,12 @@ class RingtoneService {
 
   List<int> _ascii(String s) => s.codeUnits;
   List<int> _le16(int v) => [v & 0xff, (v >> 8) & 0xff];
-  List<int> _le32(int v) =>
-      [v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff, (v >> 24) & 0xff];
+  List<int> _le32(int v) => [
+    v & 0xff,
+    (v >> 8) & 0xff,
+    (v >> 16) & 0xff,
+    (v >> 24) & 0xff,
+  ];
 }
 
 class _Seg {

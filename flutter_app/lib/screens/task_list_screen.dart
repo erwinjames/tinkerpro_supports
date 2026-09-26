@@ -1,11 +1,3 @@
-/// Phase 1 — read-only Task tab. Renders the To do / Doing / Done
-/// sections matching the admin PHP layout. Tap-through, edits, and
-/// subtask drawers land in subsequent phases.
-///
-/// Backend dependency: needs an `api.php?action=getTasks` action that
-/// mirrors the SELECT in `utils/models/task-facade.php` and returns JSON
-/// `{success, tasks: [...]}`. Until that ships the screen shows a
-/// recoverable error state with retry.
 library;
 
 import 'dart:async';
@@ -29,25 +21,16 @@ class TaskListScreen extends StatefulWidget {
   State<TaskListScreen> createState() => _TaskListScreenState();
 }
 
-/// Top-of-screen section switcher — mirrors the web admin's
-/// "Projects / Tasks / Reporting" tab nav (reporting deferred).
 enum _Section { tasks, projects }
 
 class _TaskListScreenState extends State<TaskListScreen>
     with WidgetsBindingObserver {
   late Future<List<TaskItem>> _future;
-  /// Signature of the most recently rendered list. Used to skip
-  /// rebuilds when the periodic poll returns identical data — which
-  /// is what was yanking the user's scroll position back to the top
-  /// every 10 seconds.
   String? _lastSig;
   Timer? _pollTimer;
   static const Duration _pollInterval = Duration(seconds: 10);
 
   _Section _section = _Section.tasks;
-  /// Active project filter — when set, [listTasks] is called with this
-  /// id so only that project's tasks show. Cleared by tapping the
-  /// "Clear filter" pill in the Tasks header.
   int? _projectFilter;
   String? _projectFilterName;
 
@@ -66,14 +49,9 @@ class _TaskListScreenState extends State<TaskListScreen>
     super.dispose();
   }
 
-  /// Pause/resume polling on app lifecycle changes so a backgrounded
-  /// app doesn't burn network or wake the device on a 10s cadence.
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      // Resuming after a stretch of background time is the most likely
-      // moment something changed server-side, so reload immediately
-      // rather than waiting up to 10s for the next poll tick.
       _silentReload();
       _startPolling();
     } else {
@@ -86,10 +64,6 @@ class _TaskListScreenState extends State<TaskListScreen>
     _pollTimer = Timer.periodic(_pollInterval, (_) => _silentReload());
   }
 
-  /// Hash the bits of each task that change the rendered output, so we
-  /// can short-circuit identical poll responses. Order matters here —
-  /// reordering counts as a change because the server sorts by
-  /// sort_order / priority / due_date.
   String _signatureOf(List<TaskItem> tasks) {
     final b = StringBuffer();
     for (final t in tasks) {
@@ -107,42 +81,28 @@ class _TaskListScreenState extends State<TaskListScreen>
     return b.toString();
   }
 
-  /// Re-fetch without flashing the spinner. Compares the new list to
-  /// what's already on screen via a cheap string signature and only
-  /// triggers a setState when something actually changed — that way a
-  /// quiet 10s poll while the user is scrolling doesn't rebuild the
-  /// ListView and reset the scroll offset.
   Future<void> _silentReload() async {
     if (!mounted) return;
     try {
       final fresh = await widget.service.listTasks(projectId: _projectFilter);
       if (!mounted) return;
       final sig = _signatureOf(fresh);
-      if (sig == _lastSig) return; // no-op, scroll stays put
+      if (sig == _lastSig) return;
       _lastSig = sig;
       setState(() {
         _future = Future.value(fresh);
       });
-    } catch (_) {
-      // Swallow — periodic poll shouldn't surface error toasts.
-      // The user-initiated pull-to-refresh path still shows errors.
-    }
+    } catch (_) {}
   }
 
   Future<void> _reload() async {
     setState(() {
       _future = widget.service.listTasks(projectId: _projectFilter);
-      // Force the next silent-poll comparison to treat whatever lands
-      // next as fresh, so the user's explicit pull-to-refresh always
-      // surfaces in the UI even if the server hasn't changed anything.
       _lastSig = null;
     });
     await _future;
   }
 
-  /// Called from the Projects view when the user taps a project card.
-  /// Filters the task list to that project and switches the active
-  /// section back to Tasks.
   void _onOpenProject(Project p) {
     setState(() {
       _projectFilter = p.id;
@@ -169,78 +129,111 @@ class _TaskListScreenState extends State<TaskListScreen>
   @override
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
+    final b = context.brand;
     final inTasks = _section == _Section.tasks;
-    final eyebrow = inTasks ? 'MY TASKS' : 'PROJECTS';
+    final eyebrow = inTasks ? 'My tasks' : 'Projects';
+    final canPop = Navigator.of(context).canPop();
     return Scaffold(
-      backgroundColor: context.brand.canvas,
+      backgroundColor: b.canvas,
       floatingActionButton: inTasks
           ? FloatingActionButton.extended(
               onPressed: _openAddTask,
-              backgroundColor: context.brand.signal,
-              foregroundColor: context.brand.canvas,
-              icon: const Icon(Icons.add),
-              label: const Text('ADD TASK',
-                  style: TextStyle(
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 1.5,
-                  )),
+              icon: const Icon(Icons.add_rounded),
+              label: const Text('Add task'),
             )
           : null,
-      body: SafeArea(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            // Section tabs — Projects / Tasks toggle, matches the web
-            // admin's nav. Reporting parity comes in a later phase.
-            _SectionTabs(
-              active: _section,
-              onChanged: (s) => setState(() => _section = s),
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(20, 18, 20, 12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(eyebrow,
-                      style: text.labelLarge?.copyWith(
-                          letterSpacing: 2.4, color: context.brand.paperDim)),
-                  const SizedBox(height: 6),
-                  Text(
-                    inTasks ? 'Get things done' : 'Browse and pin work',
-                    style: text.headlineMedium
-                        ?.copyWith(color: context.brand.paper),
-                  ),
-                  if (inTasks && _projectFilter != null)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 10),
-                      child: _FilterChip(
-                        label: 'Filtered by ${_projectFilterName ?? "project"}',
-                        onClear: () {
-                          setState(() {
-                            _projectFilter = null;
-                            _projectFilterName = null;
-                            _lastSig = null;
-                          });
-                          _reload();
-                        },
+      body: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          AppHeaderBand(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  children: [
+                    if (canPop) ...[
+                      AppIconButton(
+                        icon: Icons.arrow_back_rounded,
+                        tooltip: 'Back',
+                        onPressed: () => Navigator.of(context).maybePop(),
+                      ),
+                      const SizedBox(width: 12),
+                    ],
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            eyebrow,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: text.labelMedium?.copyWith(
+                              color: Brand.orange,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: 0.4,
+                            ),
+                          ),
+                          Semantics(
+                            header: true,
+                            child: Text(
+                              inTasks
+                                  ? 'Get things done'
+                                  : 'Browse and pin work',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: text.headlineLarge?.copyWith(
+                                color: Colors.white,
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
                     ),
-                ],
+                  ],
+                ),
+                const SizedBox(height: 14),
+                _SectionTabs(
+                  active: _section,
+                  onChanged: (s) => setState(() => _section = s),
+                ),
+              ],
+            ),
+          ),
+          if (inTasks && _projectFilter != null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 14, 20, 0),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: _FilterChip(
+                  label: 'Filtered by ${_projectFilterName ?? "project"}',
+                  onClear: () {
+                    setState(() {
+                      _projectFilter = null;
+                      _projectFilterName = null;
+                      _lastSig = null;
+                    });
+                    _reload();
+                  },
+                ),
               ),
             ),
-            const Hairline(),
-            Expanded(
+          const SizedBox(height: 12),
+          Expanded(
+            child: SafeArea(
+              top: false,
               child: inTasks
                   ? RefreshIndicator(
-                      color: context.brand.signal,
-                      backgroundColor: context.brand.surface,
                       onRefresh: _reload,
                       child: FutureBuilder<List<TaskItem>>(
                         future: _future,
                         builder: (context, snap) {
-                          if (snap.connectionState ==
-                              ConnectionState.waiting) {
-                            return const _CenteredSpinner();
+                          if (snap.connectionState == ConnectionState.waiting) {
+                            return const SkeletonList(
+                              count: 6,
+                              avatar: false,
+                              padding: EdgeInsets.fromLTRB(20, 4, 20, 20),
+                            );
                           }
                           if (snap.hasError) {
                             return _ErrorState(
@@ -265,15 +258,13 @@ class _TaskListScreenState extends State<TaskListScreen>
                       onOpenProject: _onOpenProject,
                     ),
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
 
   Future<void> _openTask(TaskItem task) async {
-    // Phase 2 detail screen — opens the full-screen drawer-style view.
-    // After it returns, refresh in case the user edited anything.
     final changed = await Navigator.of(context).push<bool>(
       MaterialPageRoute(
         builder: (_) => TaskDetailScreen(
@@ -287,27 +278,19 @@ class _TaskListScreenState extends State<TaskListScreen>
   }
 
   Future<void> _toggleTask(TaskItem task) async {
-    final next =
-        task.isDone ? TaskStatus.pending : TaskStatus.completed;
-    // Optimistic: update the in-flight future's cached list so the
-    // checkbox flips immediately. The next reload reconciles with the
-    // server's truth.
+    final next = task.isDone ? TaskStatus.pending : TaskStatus.completed;
     try {
       await widget.service.toggleStatus(task.id, next);
       _reload();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Toggle failed: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Toggle failed: $e')));
     }
   }
 }
 
-/// Splits the loaded tasks into the three buckets the admin uses
-/// (todo / doing / done) and renders them as collapsible-feeling
-/// sections. Phase 2: rows are tap-into and the round checkbox toggles
-/// status via the parent screen's callbacks.
 class _TaskSections extends StatelessWidget {
   const _TaskSections({
     required this.tasks,
@@ -337,39 +320,54 @@ class _TaskSections extends StatelessWidget {
           break;
       }
     }
-    Widget row(TaskItem t) => _TaskRow(
-          task: t,
-          onTap: () => onOpen(t),
-          onToggle: () => onToggle(t),
-        );
+    var seq = 0;
+    Widget row(TaskItem t) => _Rise(
+      index: seq++,
+      child: _TaskRow(
+        task: t,
+        onTap: () => onOpen(t),
+        onToggle: () => onToggle(t),
+      ),
+    );
+    Widget head(String title, int count, Color tone, IconData icon) => _Rise(
+      index: seq++,
+      child: _SectionHeader(title: title, count: count, tone: tone, icon: icon),
+    );
     return ListView(
-      // PageStorageKey persists the scroll offset across rebuilds —
-      // when a real server-side change triggers a FutureBuilder
-      // rebuild, the ListView keeps the user where they were instead
-      // of snapping to the top.
       key: const PageStorageKey<String>('tk-task-list'),
-      padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
+      padding: const EdgeInsets.fromLTRB(20, 4, 20, 96),
       physics: const AlwaysScrollableScrollPhysics(),
       children: [
-        _SectionHeader(title: 'TO DO', count: todo.length, tone: context.brand.paperDim),
+        _Rise(
+          index: seq++,
+          child: _MomentumHero(
+            todo: todo.length,
+            doing: doing.length,
+            done: done.length,
+          ),
+        ),
+        const SizedBox(height: 18),
+        head(
+          'To do',
+          todo.length,
+          Brand.info,
+          Icons.radio_button_unchecked_rounded,
+        ),
         ...todo.map(row),
-        if (todo.isEmpty) _SectionEmpty(label: 'Nothing on the runway.'),
-        const SizedBox(height: 24),
-        _SectionHeader(
-          title: 'DOING',
-          count: doing.length,
-          tone: const Color(0xFFE05A2A), // amber-rose, matches PHP --tk-overdue
+        if (todo.isEmpty) const _SectionEmpty(label: 'Nothing on the runway.'),
+        const SizedBox(height: 20),
+        head(
+          'Doing',
+          doing.length,
+          Brand.warning,
+          Icons.local_fire_department_rounded,
         ),
         ...doing.map(row),
-        if (doing.isEmpty) _SectionEmpty(label: 'Nothing overdue. Nice.'),
-        const SizedBox(height: 24),
-        _SectionHeader(
-          title: 'DONE',
-          count: done.length,
-          tone: const Color(0xFF35A776),
-        ),
+        if (doing.isEmpty) const _SectionEmpty(label: 'Nothing overdue. Nice.'),
+        const SizedBox(height: 20),
+        head('Done', done.length, Brand.success, Icons.check_circle_rounded),
         ...done.map(row),
-        if (done.isEmpty) _SectionEmpty(label: 'Nothing completed yet.'),
+        if (done.isEmpty) const _SectionEmpty(label: 'Nothing completed yet.'),
       ],
     );
   }
@@ -380,40 +378,146 @@ class _SectionHeader extends StatelessWidget {
     required this.title,
     required this.count,
     required this.tone,
+    required this.icon,
   });
 
   final String title;
   final int count;
   final Color tone;
+  final IconData icon;
 
   @override
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
+    final reduce = MediaQuery.maybeOf(context)?.disableAnimations ?? false;
     return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.only(bottom: 10),
       child: Row(
         children: [
-          Text(title,
-              style: text.labelLarge
-                  ?.copyWith(letterSpacing: 2.0, color: tone)),
+          Icon(icon, size: 16, color: tone),
           const SizedBox(width: 8),
-          Container(
-            padding:
-                const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-            decoration: BoxDecoration(
-              color: context.brand.surfaceHi,
-              borderRadius: BorderRadius.circular(999),
-              border: Border.all(color: context.brand.rule),
+          Text(title, style: text.titleMedium),
+          const SizedBox(width: 8),
+          AnimatedSwitcher(
+            duration: reduce
+                ? Duration.zero
+                : const Duration(milliseconds: 240),
+            transitionBuilder: (child, anim) => FadeTransition(
+              opacity: anim,
+              child: ScaleTransition(scale: anim, child: child),
             ),
-            child: Text(
-              count.toString(),
-              style: text.labelSmall?.copyWith(
-                color: context.brand.paperDim,
-                fontFeatures: const [],
-              ),
+            child: GlowBadge(
+              key: ValueKey<int>(count),
+              label: count.toString(),
+              color: tone,
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _MomentumHero extends StatelessWidget {
+  const _MomentumHero({
+    required this.todo,
+    required this.doing,
+    required this.done,
+  });
+
+  final int todo;
+  final int doing;
+  final int done;
+
+  @override
+  Widget build(BuildContext context) {
+    final text = Theme.of(context).textTheme;
+    final b = context.brand;
+    final total = todo + doing + done;
+    final ratio = total == 0 ? 0.0 : done / total;
+    return GlassPanel(
+      accent: doing > 0 ? Brand.warning : b.signal,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  'Momentum',
+                  style: text.labelMedium?.copyWith(
+                    color: b.signal,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.4,
+                  ),
+                ),
+              ),
+              GlowBadge(
+                label: '$done of $total done',
+                color: done == total && total > 0 ? Brand.success : b.signal,
+                icon: Icons.check_circle_outline_rounded,
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          _ProgressBar(value: ratio, color: Brand.success),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              GlowBadge(
+                label: '$todo to do',
+                color: Brand.info,
+                icon: Icons.radio_button_unchecked_rounded,
+              ),
+              const SizedBox(width: 8),
+              GlowBadge(
+                label: '$doing doing',
+                color: Brand.warning,
+                icon: Icons.local_fire_department_rounded,
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ProgressBar extends StatelessWidget {
+  const _ProgressBar({required this.value, required this.color});
+
+  final double value;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    final b = context.brand;
+    final reduce = MediaQuery.maybeOf(context)?.disableAnimations ?? false;
+    final target = value < 0 ? 0.0 : (value > 1 ? 1.0 : value);
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(999),
+      child: Container(
+        height: 8,
+        color: b.isDark
+            ? Colors.white.withValues(alpha: 0.12)
+            : Brand.navy.withValues(alpha: 0.1),
+        child: TweenAnimationBuilder<double>(
+          tween: Tween<double>(begin: 0, end: target),
+          duration: reduce ? Duration.zero : const Duration(milliseconds: 420),
+          curve: Curves.easeOutCubic,
+          builder: (_, v, _) => Align(
+            alignment: Alignment.centerLeft,
+            child: FractionallySizedBox(
+              widthFactor: v,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(999),
+                  color: color,
+                ),
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -426,23 +530,41 @@ class _SectionEmpty extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final b = context.brand;
     return Container(
-      margin: const EdgeInsets.only(bottom: 4),
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
       decoration: BoxDecoration(
-        color: context.brand.surface,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: context.brand.rule),
+        borderRadius: BorderRadius.circular(Brand.radiusLg),
+        border: Border.all(color: b.rule),
+        color: b.surfaceHi,
       ),
-      child: Text(
-        label,
-        style: Theme.of(context)
-            .textTheme
-            .bodySmall
-            ?.copyWith(color: context.brand.paperDim),
+      child: Row(
+        children: [
+          Icon(Icons.inbox_rounded, size: 16, color: b.paperDim),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(label, style: Theme.of(context).textTheme.bodySmall),
+          ),
+        ],
       ),
     );
   }
+}
+
+Color _priorityColor(TaskPriority p) {
+  switch (p) {
+    case TaskPriority.high:
+      return Brand.danger;
+    case TaskPriority.low:
+      return Brand.info;
+    case TaskPriority.medium:
+      return Brand.warning;
+  }
+}
+
+String _priorityLabel(TaskPriority p) {
+  final w = p.wire;
+  return w.isEmpty ? w : '${w[0].toUpperCase()}${w.substring(1)}';
 }
 
 class _TaskRow extends StatelessWidget {
@@ -459,137 +581,114 @@ class _TaskRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
+    final b = context.brand;
     final done = task.isDone;
-    return Container(
-      margin: const EdgeInsets.only(bottom: 8),
-      decoration: BoxDecoration(
-        color: context.brand.surface,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: context.brand.rule),
-      ),
-      child: Material(
-        color: Colors.transparent,
-        borderRadius: BorderRadius.circular(10),
-        child: InkWell(
-          onTap: onTap,
-          borderRadius: BorderRadius.circular(10),
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                GestureDetector(
-                  // Independent hit target — toggles the task without
-                  // opening the detail drawer when the user taps the
-                  // round circle on the leading edge.
-                  behavior: HitTestBehavior.opaque,
-                  onTap: onToggle,
-                  child: Container(
-                    width: 22,
-                    height: 22,
-                    margin: const EdgeInsets.only(top: 1, right: 10),
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: done ? const Color(0xFF35A776) : Colors.transparent,
-                      border: Border.all(
-                        color: done ? const Color(0xFF35A776) : context.brand.rule,
-                        width: 1.5,
+    final names = task.assignees
+        .map((a) => a.name)
+        .where((n) => n.trim().isNotEmpty)
+        .toList();
+    if (names.isEmpty && (task.primaryAssigneeName ?? '').isNotEmpty) {
+      names.add(task.primaryAssigneeName!);
+    }
+    final dueColor = task.isOverdue ? Brand.danger : b.paperDim;
+    final accent = done
+        ? Brand.success
+        : (task.isOverdue ? Brand.danger : _priorityColor(task.priority));
+    final flagged = task.isOverdue || task.priority == TaskPriority.high;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: AppCard(
+        onTap: onTap,
+        radius: Brand.radiusLg,
+        borderColor: flagged && !done ? accent.withValues(alpha: 0.42) : null,
+        padding: const EdgeInsets.all(14),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _CheckMorph(done: done, onToggle: onToggle),
+            const SizedBox(width: 4),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    task.title,
+                    style: text.titleSmall?.copyWith(
+                      color: done ? b.paperDim : b.paper,
+                      decoration: done
+                          ? TextDecoration.lineThrough
+                          : TextDecoration.none,
+                      decorationColor: b.paperDim,
+                    ),
+                  ),
+                  if (task.projectName != null &&
+                          task.projectName!.isNotEmpty ||
+                      task.parentTitle != null && task.parentTitle!.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: Wrap(
+                        spacing: 6,
+                        runSpacing: 4,
+                        children: [
+                          if (task.projectName?.isNotEmpty == true)
+                            _MetaChip(
+                              icon: Icons.folder_open_rounded,
+                              label: task.projectName!,
+                            ),
+                          if (task.parentTitle?.isNotEmpty == true)
+                            _MetaChip(
+                              icon: Icons.subdirectory_arrow_right_rounded,
+                              label: 'Subtask of ${task.parentTitle}',
+                            ),
+                        ],
                       ),
                     ),
-                    child: done
-                        ? const Icon(Icons.check, size: 12, color: Colors.white)
-                        : null,
-                  ),
-                ),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  task.title,
-                  style: text.titleSmall?.copyWith(
-                    color: done ? context.brand.paperDim : context.brand.paper,
-                    decoration:
-                        done ? TextDecoration.lineThrough : TextDecoration.none,
-                    decorationColor: context.brand.paperDim,
-                  ),
-                ),
-                if (task.projectName != null && task.projectName!.isNotEmpty ||
-                    task.parentTitle != null && task.parentTitle!.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 4),
-                    child: Wrap(
-                      spacing: 6,
-                      runSpacing: 4,
-                      children: [
-                        if (task.projectName?.isNotEmpty == true)
-                          _MetaChip(
-                            icon: Icons.folder_open_outlined,
-                            label: task.projectName!,
-                          ),
-                        if (task.parentTitle?.isNotEmpty == true)
-                          _MetaChip(
-                            icon: Icons.subdirectory_arrow_right,
-                            label: 'Subtask of ${task.parentTitle}',
-                          ),
-                      ],
-                    ),
-                  ),
-                Padding(
-                  padding: const EdgeInsets.only(top: 6),
-                  child: Row(
+                  const SizedBox(height: 10),
+                  Row(
                     children: [
-                      if (task.dueDate != null) ...[
-                        Icon(Icons.event,
-                            size: 12,
-                            color: task.isOverdue
-                                ? const Color(0xFFE05A2A)
-                                : context.brand.paperDim),
-                        const SizedBox(width: 4),
-                        Text(
-                          _shortDate(task.dueDate!),
-                          style: text.labelSmall?.copyWith(
-                              color: task.isOverdue
-                                  ? const Color(0xFFE05A2A)
-                                  : context.brand.paperDim),
-                        ),
-                        const SizedBox(width: 10),
-                      ],
-                      _PriorityDot(priority: task.priority),
-                      const SizedBox(width: 4),
-                      Text(
-                        task.priority.wire.toUpperCase(),
-                        style: text.labelSmall?.copyWith(
-                            color: context.brand.paperDim, letterSpacing: 1.5),
+                      GlowBadge(
+                        label: _priorityLabel(task.priority),
+                        color: _priorityColor(task.priority),
+                        icon: Icons.flag_rounded,
                       ),
-                      const Spacer(),
-                      if ((task.primaryAssigneeName ?? '').isNotEmpty)
-                        Container(
-                          width: 22,
-                          height: 22,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: context.brand.signal,
+                      if (task.dueDate != null) ...[
+                        const SizedBox(width: 8),
+                        if (task.isOverdue)
+                          Flexible(
+                            child: GlowBadge(
+                              label: 'Overdue · ${_shortDate(task.dueDate!)}',
+                              color: Brand.danger,
+                              icon: Icons.calendar_today_rounded,
+                            ),
+                          )
+                        else ...[
+                          Icon(
+                            Icons.calendar_today_rounded,
+                            size: 13,
+                            color: dueColor,
                           ),
-                          alignment: Alignment.center,
-                          child: Text(
-                            task.primaryAssigneeName![0].toUpperCase(),
-                            style: TextStyle(
-                              color: context.brand.canvas,
-                              fontSize: 10,
-                              fontWeight: FontWeight.w700,
+                          const SizedBox(width: 4),
+                          Flexible(
+                            child: Text(
+                              _shortDate(task.dueDate!),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: text.labelMedium?.copyWith(
+                                color: dueColor,
+                                fontWeight: FontWeight.w500,
+                              ),
                             ),
                           ),
-                        ),
+                        ],
+                      ],
+                      const Spacer(),
+                      if (names.isNotEmpty) _AvatarStack(names: names),
                     ],
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
-          ),
-              ],
-            ),
-          ),
+          ],
         ),
       ),
     );
@@ -597,35 +696,83 @@ class _TaskRow extends StatelessWidget {
 
   static String _shortDate(DateTime d) {
     const months = [
-      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
     ];
     return '${months[d.month - 1]} ${d.day}';
   }
 }
 
-class _PriorityDot extends StatelessWidget {
-  const _PriorityDot({required this.priority});
-  final TaskPriority priority;
+class _AvatarStack extends StatelessWidget {
+  const _AvatarStack({required this.names});
+
+  final List<String> names;
 
   @override
   Widget build(BuildContext context) {
-    Color c;
-    switch (priority) {
-      case TaskPriority.high:
-        c = const Color(0xFFE05A2A);
-        break;
-      case TaskPriority.low:
-        c = const Color(0xFF7AA3E0);
-        break;
-      case TaskPriority.medium:
-        c = const Color(0xFFE0B14C);
-        break;
+    final b = context.brand;
+    const size = 24.0;
+    const step = 16.0;
+    final shown = names.take(3).toList();
+    final extra = names.length - shown.length;
+    final count = shown.length + (extra > 0 ? 1 : 0);
+    final children = <Widget>[];
+    for (var i = 0; i < shown.length; i++) {
+      children.add(
+        Positioned(
+          left: i * step,
+          child: Container(
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              border: Border.all(color: b.surface, width: 2),
+            ),
+            child: Tooltip(
+              message: shown[i],
+              child: AppAvatar(name: shown[i], size: size),
+            ),
+          ),
+        ),
+      );
     }
-    return Container(
-      width: 8,
-      height: 8,
-      decoration: BoxDecoration(color: c, shape: BoxShape.circle),
+    if (extra > 0) {
+      children.add(
+        Positioned(
+          left: shown.length * step,
+          child: Container(
+            width: size + 4,
+            height: size + 4,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: b.surfaceHi,
+              border: Border.all(color: b.surface, width: 2),
+            ),
+            child: Text(
+              '+$extra',
+              style: TextStyle(
+                color: b.paperDim,
+                fontSize: 10,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+    return SizedBox(
+      width: (count - 1) * step + size + 4,
+      height: size + 4,
+      child: Stack(children: children),
     );
   }
 }
@@ -638,42 +785,27 @@ class _MetaChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final b = context.brand;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
       decoration: BoxDecoration(
-        color: context.brand.surfaceHi,
-        borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: context.brand.rule),
+        color: b.surfaceHi,
+        borderRadius: BorderRadius.circular(6),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(icon, size: 11, color: context.brand.paperDim),
+          Icon(icon, size: 12, color: b.paperDim),
           const SizedBox(width: 4),
-          Text(
-            label,
-            overflow: TextOverflow.ellipsis,
-            style: Theme.of(context)
-                .textTheme
-                .labelSmall
-                ?.copyWith(color: context.brand.paperDim, letterSpacing: 0.5),
+          Flexible(
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.labelMedium,
+            ),
           ),
         ],
-      ),
-    );
-  }
-}
-
-class _CenteredSpinner extends StatelessWidget {
-  const _CenteredSpinner();
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: SizedBox(
-        width: 20,
-        height: 20,
-        child:
-            CircularProgressIndicator(strokeWidth: 2, color: context.brand.signal),
       ),
     );
   }
@@ -685,27 +817,14 @@ class _EmptyState extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final text = Theme.of(context).textTheme;
     return ListView(
       physics: const AlwaysScrollableScrollPhysics(),
       padding: const EdgeInsets.fromLTRB(20, 40, 20, 20),
-      children: [
-        Center(
-          child: Column(
-            children: [
-              Icon(Icons.task_alt_outlined,
-                  size: 36, color: context.brand.paperDim),
-              const SizedBox(height: 12),
-              Text('No tasks yet',
-                  style: text.titleMedium?.copyWith(color: context.brand.paper)),
-              const SizedBox(height: 6),
-              Text(
-                'Tasks delegated to you will appear here.',
-                textAlign: TextAlign.center,
-                style: text.bodySmall?.copyWith(color: context.brand.paperDim),
-              ),
-            ],
-          ),
+      children: const [
+        EmptyState(
+          label: 'No tasks yet',
+          hint: 'Tasks delegated to you will appear here.',
+          icon: Icons.task_alt_rounded,
         ),
       ],
     );
@@ -719,35 +838,18 @@ class _ErrorState extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final text = Theme.of(context).textTheme;
     return ListView(
       physics: const AlwaysScrollableScrollPhysics(),
       padding: const EdgeInsets.fromLTRB(20, 40, 20, 20),
       children: [
-        Center(
-          child: Column(
-            children: [
-              Icon(Icons.error_outline,
-                  size: 36, color: context.brand.paperDim),
-              const SizedBox(height: 12),
-              Text('Could not load tasks',
-                  style: text.titleMedium?.copyWith(color: context.brand.paper)),
-              const SizedBox(height: 6),
-              Text(
-                error,
-                textAlign: TextAlign.center,
-                style: text.bodySmall?.copyWith(color: context.brand.paperDim),
-              ),
-              const SizedBox(height: 16),
-              OutlinedButton(
-                onPressed: onRetry,
-                style: OutlinedButton.styleFrom(
-                  side: BorderSide(color: context.brand.signal),
-                  foregroundColor: context.brand.signal,
-                ),
-                child: const Text('RETRY'),
-              ),
-            ],
+        EmptyState(
+          label: 'Could not load tasks',
+          hint: error,
+          icon: Icons.error_outline_rounded,
+          action: OutlinedButton.icon(
+            onPressed: onRetry,
+            icon: const Icon(Icons.refresh_rounded, size: 18),
+            label: const Text('Retry'),
           ),
         ),
       ],
@@ -755,9 +857,6 @@ class _ErrorState extends StatelessWidget {
   }
 }
 
-
-/// Top section tabs — PROJECTS / TASKS toggle. Matches the web admin
-/// shell so users get the same hierarchy on mobile.
 class _SectionTabs extends StatelessWidget {
   const _SectionTabs({required this.active, required this.onChanged});
 
@@ -766,37 +865,55 @@ class _SectionTabs extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final reduceMotion =
+        MediaQuery.maybeOf(context)?.disableAnimations ?? false;
     Widget tab(_Section s, String label, IconData icon) {
       final isActive = s == active;
       return Expanded(
-        child: Material(
-          color: Colors.transparent,
-          child: InkWell(
-            onTap: () => onChanged(s),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(vertical: 14),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(icon,
-                      size: 16,
-                      color: isActive
-                          ? context.brand.signal
-                          : context.brand.paperDim),
-                  const SizedBox(width: 8),
-                  Text(
-                    label,
-                    style: TextStyle(
-                      color: isActive
-                          ? context.brand.signal
-                          : context.brand.paperDim,
-                      fontWeight:
-                          isActive ? FontWeight.w700 : FontWeight.w500,
-                      letterSpacing: 2.0,
-                      fontSize: 11,
-                    ),
+        child: Semantics(
+          button: true,
+          selected: isActive,
+          child: AnimatedContainer(
+            duration: reduceMotion
+                ? Duration.zero
+                : const Duration(milliseconds: 180),
+            decoration: BoxDecoration(
+              color: isActive ? Colors.white : Colors.transparent,
+              borderRadius: BorderRadius.circular(Brand.radiusSm),
+            ),
+            child: Material(
+              color: Colors.transparent,
+              child: InkWell(
+                borderRadius: BorderRadius.circular(Brand.radiusSm),
+                onTap: () => onChanged(s),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(minHeight: 44),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(
+                        icon,
+                        size: 18,
+                        color: isActive
+                            ? Brand.orange
+                            : Colors.white.withValues(alpha: 0.78),
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        label,
+                        style: TextStyle(
+                          color: isActive
+                              ? Brand.navy
+                              : Colors.white.withValues(alpha: 0.85),
+                          fontWeight: isActive
+                              ? FontWeight.w700
+                              : FontWeight.w500,
+                          fontSize: 14,
+                        ),
+                      ),
+                    ],
                   ),
-                ],
+                ),
               ),
             ),
           ),
@@ -805,23 +922,23 @@ class _SectionTabs extends StatelessWidget {
     }
 
     return Container(
+      padding: const EdgeInsets.all(4),
       decoration: BoxDecoration(
-        border: Border(
-          bottom: BorderSide(color: context.brand.rule, width: 1),
-        ),
+        color: Colors.white.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(Brand.radius),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.14)),
       ),
       child: Row(
         children: [
-          tab(_Section.projects, "PROJECTS", Icons.folder_open_outlined),
-          tab(_Section.tasks, "TASKS", Icons.check_circle_outline),
+          tab(_Section.projects, 'Projects', Icons.folder_open_rounded),
+          const SizedBox(width: 4),
+          tab(_Section.tasks, 'Tasks', Icons.check_circle_outline_rounded),
         ],
       ),
     );
   }
 }
 
-/// Small dismissible pill shown under the Tasks header when a project
-/// filter is active. Tapping the × clears the filter and reloads.
 class _FilterChip extends StatelessWidget {
   const _FilterChip({required this.label, required this.onClear});
 
@@ -830,36 +947,163 @@ class _FilterChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final b = context.brand;
     return Container(
-      padding: const EdgeInsets.fromLTRB(10, 4, 4, 4),
+      padding: const EdgeInsets.fromLTRB(10, 2, 2, 2),
       decoration: BoxDecoration(
-        color: context.brand.signalGlow(0.12),
+        color: b.tint(b.signal),
         borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: context.brand.signal),
+        border: Border.all(color: b.signal.withValues(alpha: 0.45)),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(Icons.filter_alt_outlined,
-              size: 12, color: context.brand.signal),
+          Icon(Icons.filter_alt_rounded, size: 14, color: b.signal),
           const SizedBox(width: 6),
-          Text(
-            label,
-            style: TextStyle(
-              color: context.brand.signal,
-              fontWeight: FontWeight.w600,
-              fontSize: 12,
+          Flexible(
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: b.signal,
+                fontWeight: FontWeight.w600,
+                fontSize: 12.5,
+              ),
             ),
           ),
           IconButton(
             onPressed: onClear,
-            iconSize: 14,
+            tooltip: 'Clear filter',
+            iconSize: 16,
             padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
-            icon: Icon(Icons.close, color: context.brand.signal),
+            constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
+            icon: Icon(Icons.close_rounded, color: b.signal),
           ),
         ],
       ),
     );
   }
+}
+
+class _CheckMorph extends StatelessWidget {
+  const _CheckMorph({required this.done, required this.onToggle});
+
+  final bool done;
+  final VoidCallback onToggle;
+
+  @override
+  Widget build(BuildContext context) {
+    final b = context.brand;
+    final reduce = MediaQuery.maybeOf(context)?.disableAnimations ?? false;
+    return Semantics(
+      button: true,
+      checked: done,
+      label: done ? 'Mark as not done' : 'Mark as done',
+      child: InkResponse(
+        onTap: onToggle,
+        radius: 22,
+        child: SizedBox(
+          width: 44,
+          height: 44,
+          child: Align(
+            alignment: const Alignment(-0.6, -0.6),
+            child: TweenAnimationBuilder<double>(
+              tween: Tween<double>(begin: done ? 1 : 0, end: done ? 1 : 0),
+              duration: reduce
+                  ? Duration.zero
+                  : const Duration(milliseconds: 280),
+              curve: Curves.easeOutBack,
+              builder: (_, v, _) {
+                final t = v < 0 ? 0.0 : (v > 1 ? 1.0 : v);
+                return Container(
+                  width: 24,
+                  height: 24,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: Brand.success.withValues(alpha: t),
+                    border: Border.all(
+                      color:
+                          Color.lerp(b.paperDim, Brand.success, t) ??
+                          Brand.success,
+                      width: 1.5,
+                    ),
+                  ),
+                  child: Transform.scale(
+                    scale: v,
+                    child: Opacity(
+                      opacity: t,
+                      child: const Icon(
+                        Icons.check_rounded,
+                        size: 15,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _Rise extends StatefulWidget {
+  const _Rise({required this.index, required this.child});
+
+  final int index;
+  final Widget child;
+
+  @override
+  State<_Rise> createState() => _RiseState();
+}
+
+class _RiseState extends State<_Rise> with SingleTickerProviderStateMixin {
+  late final AnimationController _c = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 320),
+  );
+  late final Animation<double> _fade = CurvedAnimation(
+    parent: _c,
+    curve: Curves.easeOut,
+  );
+  late final Animation<Offset> _slide = Tween<Offset>(
+    begin: const Offset(0, 0.07),
+    end: Offset.zero,
+  ).animate(CurvedAnimation(parent: _c, curve: Curves.easeOutCubic));
+  bool _started = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_started) return;
+    _started = true;
+    if (MediaQuery.maybeOf(context)?.disableAnimations ?? false) {
+      _c.value = 1;
+      return;
+    }
+    final steps = widget.index < 0 ? 0 : (widget.index > 7 ? 7 : widget.index);
+    if (steps == 0) {
+      _c.forward();
+      return;
+    }
+    Future<void>.delayed(Duration(milliseconds: 45 * steps), () {
+      if (mounted) _c.forward();
+    });
+  }
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => FadeTransition(
+    opacity: _fade,
+    child: SlideTransition(position: _slide, child: widget.child),
+  );
 }

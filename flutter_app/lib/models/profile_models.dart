@@ -28,8 +28,9 @@ class ProfileInfo {
       fullName: (json['full_name'] ?? '').toString(),
       email: (json['email'] ?? '').toString(),
       username: (json['username'] ?? '').toString(),
-      profilePicture:
-          (pic == null || pic.toString().isEmpty) ? null : pic.toString(),
+      profilePicture: (pic == null || pic.toString().isEmpty)
+          ? null
+          : pic.toString(),
     );
   }
 
@@ -38,8 +39,9 @@ class ProfileInfo {
       fullName: fullName,
       email: email,
       username: username,
-      profilePicture:
-          clearPicture ? null : (profilePicture ?? this.profilePicture),
+      profilePicture: clearPicture
+          ? null
+          : (profilePicture ?? this.profilePicture),
     );
   }
 }

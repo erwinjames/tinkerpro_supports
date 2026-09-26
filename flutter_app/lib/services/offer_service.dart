@@ -145,10 +145,7 @@ class OfferService {
   }
 
   Future<OfferResult> delete(int id, {String? title}) =>
-      _mutate('deleteOffer', {
-        'id': '$id',
-        'title': ?title,
-      }, const {});
+      _mutate('deleteOffer', {'id': '$id', 'title': ?title}, const {});
 
   /// Encode each section as bracket-notation multipart fields/files so PHP
   /// rebuilds `$_POST['sections']` / `$_FILES['sections']` as nested arrays.
@@ -179,7 +176,11 @@ class OfferService {
     Map<String, String> files,
   ) async {
     try {
-      final res = await _api.postMultipart(action, fields: fields, files: files);
+      final res = await _api.postMultipart(
+        action,
+        fields: fields,
+        files: files,
+      );
       final ok = res['success'] == true || res['status'] == 'success';
       return OfferResult(ok: ok, message: res['message']?.toString());
     } catch (e) {

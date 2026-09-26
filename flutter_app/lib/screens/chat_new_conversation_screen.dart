@@ -7,13 +7,6 @@ import '../services/chat_service.dart';
 import '../theme.dart';
 import '../widgets/premium.dart';
 
-/// Entry point for starting a new conversation. Three tabs, matching the
-/// three conversation primitives:
-///   * DM      — pick one teammate, straight to a 1-on-1 thread.
-///   * GROUP   — name it, pick several teammates, start the group.
-///   * CHANNEL — browse discoverable channels / create a new one.
-///
-/// Pops with the resulting conversation id on success; null on cancel.
 class ChatNewConversationScreen extends StatefulWidget {
   const ChatNewConversationScreen({super.key, required this.service});
   final ChatService service;
@@ -23,8 +16,8 @@ class ChatNewConversationScreen extends StatefulWidget {
       _ChatNewConversationScreenState();
 }
 
-class _ChatNewConversationScreenState
-    extends State<ChatNewConversationScreen> with SingleTickerProviderStateMixin {
+class _ChatNewConversationScreenState extends State<ChatNewConversationScreen>
+    with SingleTickerProviderStateMixin {
   late final TabController _tabs;
 
   @override
@@ -41,29 +34,60 @@ class _ChatNewConversationScreenState
 
   @override
   Widget build(BuildContext context) {
+    final b = context.brand;
+    final text = Theme.of(context).textTheme;
     return StationScaffold(
-      stationNumber: '05',
-      stationLabel: 'CHAT · NEW',
-      title: 'Start a conversation.',
+      stationLabel: 'Chat',
+      title: 'New conversation',
+      compact: true,
       showBottomBrand: false,
       onBack: () => Navigator.of(context).pop(),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          TabBar(
-            controller: _tabs,
-            indicatorColor: Brand.signal,
-            indicatorWeight: 2,
-            labelColor: Brand.signal,
-            unselectedLabelColor: Brand.paperDim,
-            labelStyle: Theme.of(context).textTheme.labelLarge,
-            unselectedLabelStyle: Theme.of(context).textTheme.labelLarge,
-            dividerColor: Brand.rule,
-            tabs: const [
-              Tab(text: 'DM'),
-              Tab(text: 'GROUP'),
-              Tab(text: 'CHANNEL'),
-            ],
+          Container(
+            height: 48,
+            padding: const EdgeInsets.all(4),
+            decoration: BoxDecoration(
+              color: b.surfaceHi,
+              borderRadius: BorderRadius.circular(Brand.radius),
+            ),
+            child: TabBar(
+              controller: _tabs,
+              indicatorSize: TabBarIndicatorSize.tab,
+              indicator: BoxDecoration(
+                color: b.isDark ? const Color(0xFF12304F) : Brand.navy,
+                borderRadius: BorderRadius.circular(Brand.radiusSm + 1),
+              ),
+              labelColor: Colors.white,
+              unselectedLabelColor: b.paperDim,
+              labelStyle: text.labelLarge?.copyWith(
+                fontWeight: FontWeight.w700,
+              ),
+              unselectedLabelStyle: text.labelLarge,
+              dividerColor: Colors.transparent,
+              splashBorderRadius: BorderRadius.circular(Brand.radiusSm + 1),
+              tabs: const [
+                Tab(
+                  height: 40,
+                  child: _TabLabel(
+                    icon: Icons.person_outline_rounded,
+                    label: 'Direct',
+                  ),
+                ),
+                Tab(
+                  height: 40,
+                  child: _TabLabel(
+                    icon: Icons.groups_2_outlined,
+                    label: 'Group',
+                  ),
+                ),
+                Tab(
+                  height: 40,
+                  child: _TabLabel(icon: Icons.tag_rounded, label: 'Channel'),
+                ),
+              ],
+            ),
           ),
           const SizedBox(height: 16),
           Expanded(
@@ -82,7 +106,23 @@ class _ChatNewConversationScreenState
   }
 }
 
-// ─────────────────────────────────────── DM tab ─────────────────────────────
+class _TabLabel extends StatelessWidget {
+  const _TabLabel({required this.icon, required this.label});
+  final IconData icon;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 18),
+        const SizedBox(width: 6),
+        Flexible(child: Text(label, overflow: TextOverflow.ellipsis)),
+      ],
+    );
+  }
+}
 
 class _DMPickerTab extends StatefulWidget {
   const _DMPickerTab({required this.service});
@@ -124,7 +164,10 @@ class _DMPickerTabState extends State<_DMPickerTab> {
 
   void _onSearchChanged(String v) {
     _debounce?.cancel();
-    _debounce = Timer(const Duration(milliseconds: 350), () => _load(search: v));
+    _debounce = Timer(
+      const Duration(milliseconds: 350),
+      () => _load(search: v),
+    );
   }
 
   Future<void> _start(ChatUser u) async {
@@ -137,7 +180,7 @@ class _DMPickerTabState extends State<_DMPickerTab> {
       Navigator.of(context).pop(convId);
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('COULD NOT START CONVERSATION')),
+        const SnackBar(content: Text('Could not start conversation')),
       );
     }
   }
@@ -145,49 +188,50 @@ class _DMPickerTabState extends State<_DMPickerTab> {
   @override
   Widget build(BuildContext context) {
     return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        TextField(
+        AppSearchField(
           controller: _search,
+          hint: 'Search staff by name',
           onChanged: _onSearchChanged,
-          decoration: InputDecoration(
-            labelText: 'SEARCH STAFF',
-            suffixIcon: _search.text.isEmpty
-                ? null
-                : IconButton(
-                    icon: const Icon(Icons.close,
-                        size: 18, color: Brand.paperDim),
-                    onPressed: () {
-                      _search.clear();
-                      _load();
-                    },
-                  ),
-          ),
-          style: Theme.of(context).textTheme.titleMedium,
         ),
-        const SizedBox(height: 16),
+        const SizedBox(height: 14),
         Expanded(
           child: _loading
-              ? const _CenteredSpinner()
+              ? const SkeletonList(count: 7)
               : _users.isEmpty
-                  ? const EmptyState(
-                      label: 'No staff found',
-                      hint: 'Try a different search.',
-                    )
-                  : ListView.separated(
-                      itemCount: _users.length,
-                      separatorBuilder: (_, _) => const Hairline(),
-                      itemBuilder: (_, i) => _StaffRow(
-                        user: _users[i],
-                        onTap: _starting ? null : () => _start(_users[i]),
-                      ),
+              ? const EmptyState(
+                  icon: Icons.person_search_rounded,
+                  label: 'No staff found',
+                  hint: 'Try a different name or username.',
+                )
+              : ListView.separated(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  itemCount: _users.length,
+                  separatorBuilder: (_, _) => const SizedBox(height: 10),
+                  itemBuilder: (_, i) => _StaffRow(
+                    user: _users[i],
+                    avatarUrl: _avatarFor(widget.service, _users[i]),
+                    onTap: _starting ? null : () => _start(_users[i]),
+                    trailing: Icon(
+                      Icons.chevron_right_rounded,
+                      color: context.brand.paperDim,
                     ),
+                  ),
+                ),
         ),
       ],
     );
   }
 }
 
-// ─────────────────────────────────────── GROUP tab ──────────────────────────
+String? _avatarFor(ChatService service, ChatUser u) {
+  final rel = u.avatar;
+  if (rel == null || rel.isEmpty) return null;
+  if (rel.startsWith('http')) return rel;
+  final clean = rel.replaceAll(RegExp(r'^/+'), '');
+  return '${service.api.baseUrl}/$clean';
+}
 
 class _GroupComposerTab extends StatefulWidget {
   const _GroupComposerTab({required this.service});
@@ -203,6 +247,7 @@ class _GroupComposerTabState extends State<_GroupComposerTab> {
   Timer? _debounce;
   List<ChatUser> _users = const [];
   final Set<int> _selected = {};
+  final Map<int, ChatUser> _picked = {};
   bool _loading = true;
   bool _creating = false;
 
@@ -232,27 +277,35 @@ class _GroupComposerTabState extends State<_GroupComposerTab> {
 
   void _onSearchChanged(String v) {
     _debounce?.cancel();
-    _debounce = Timer(const Duration(milliseconds: 350), () => _load(search: v));
+    _debounce = Timer(
+      const Duration(milliseconds: 350),
+      () => _load(search: v),
+    );
   }
 
-  void _toggle(int id) {
+  void _toggle(ChatUser u) {
     setState(() {
-      if (!_selected.remove(id)) _selected.add(id);
+      if (_selected.remove(u.id)) {
+        _picked.remove(u.id);
+      } else {
+        _selected.add(u.id);
+        _picked[u.id] = u;
+      }
     });
   }
 
   Future<void> _create() async {
     final name = _name.text.trim();
     if (name.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('GROUP NAME REQUIRED')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Group name required')));
       return;
     }
     if (_selected.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('ADD AT LEAST ONE MEMBER')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Add at least one member')));
       return;
     }
     setState(() => _creating = true);
@@ -262,69 +315,118 @@ class _GroupComposerTabState extends State<_GroupComposerTab> {
     if (convId != null) {
       Navigator.of(context).pop(convId);
     } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('COULD NOT CREATE GROUP')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Could not create group')));
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    final b = context.brand;
+    final text = Theme.of(context).textTheme;
+    final picked = _picked.values.toList();
     return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         TextField(
           controller: _name,
-          decoration: const InputDecoration(labelText: 'GROUP NAME'),
-          style: Theme.of(context).textTheme.titleMedium,
+          textCapitalization: TextCapitalization.sentences,
+          decoration: const InputDecoration(
+            labelText: 'Group name',
+            prefixIcon: Icon(Icons.groups_2_outlined, size: 21),
+          ),
+          style: text.bodyLarge,
         ),
-        const SizedBox(height: 16),
-        TextField(
+        const SizedBox(height: 12),
+        AppSearchField(
           controller: _search,
+          hint: 'Search staff to add',
           onChanged: _onSearchChanged,
-          decoration: const InputDecoration(labelText: 'ADD MEMBERS'),
-          style: Theme.of(context).textTheme.titleMedium,
         ),
-        const SizedBox(height: 8),
+        const SizedBox(height: 12),
         Row(
           children: [
-            Text(
-              _selected.isEmpty
-                  ? 'NO MEMBERS SELECTED'
-                  : '${_selected.length} SELECTED',
-              style: Theme.of(context).textTheme.labelMedium,
+            Expanded(
+              child: Text(
+                _selected.isEmpty
+                    ? 'No members selected'
+                    : '${_selected.length} member${_selected.length == 1 ? '' : 's'} selected',
+                style: text.labelLarge?.copyWith(
+                  color: _selected.isEmpty ? b.paperDim : b.paper,
+                ),
+              ),
             ),
+            if (_selected.isNotEmpty)
+              TextButton(
+                onPressed: () => setState(() {
+                  _selected.clear();
+                  _picked.clear();
+                }),
+                child: const Text('Clear'),
+              ),
           ],
         ),
-        const SizedBox(height: 8),
+        if (picked.isNotEmpty) ...[
+          const SizedBox(height: 6),
+          SizedBox(
+            height: 40,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemCount: picked.length,
+              separatorBuilder: (_, _) => const SizedBox(width: 8),
+              itemBuilder: (_, i) {
+                final u = picked[i];
+                return InputChip(
+                  avatar: AppAvatar(
+                    name: u.displayName,
+                    size: 24,
+                    imageUrl: _avatarFor(widget.service, u),
+                  ),
+                  label: Text(u.displayName),
+                  deleteIcon: const Icon(Icons.close_rounded, size: 16),
+                  deleteButtonTooltipMessage: 'Remove ${u.displayName}',
+                  onDeleted: () => _toggle(u),
+                );
+              },
+            ),
+          ),
+        ],
+        const SizedBox(height: 12),
         Expanded(
           child: _loading
-              ? const _CenteredSpinner()
+              ? const SkeletonList(count: 6)
               : _users.isEmpty
-                  ? const EmptyState(label: 'No staff', hint: '—')
-                  : ListView.separated(
-                      itemCount: _users.length,
-                      separatorBuilder: (_, _) => const Hairline(),
-                      itemBuilder: (_, i) {
-                        final u = _users[i];
-                        return _StaffRow(
-                          user: u,
-                          onTap: () => _toggle(u.id),
-                          trailing: Icon(
-                            _selected.contains(u.id)
-                                ? Icons.check_box_outlined
-                                : Icons.check_box_outline_blank,
-                            color: _selected.contains(u.id)
-                                ? Brand.signal
-                                : Brand.paperDim,
-                            size: 20,
-                          ),
-                        );
-                      },
-                    ),
+              ? const EmptyState(
+                  icon: Icons.person_search_rounded,
+                  label: 'No staff found',
+                  hint: 'Try a different name or username.',
+                )
+              : ListView.separated(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  itemCount: _users.length,
+                  separatorBuilder: (_, _) => const SizedBox(height: 10),
+                  itemBuilder: (_, i) {
+                    final u = _users[i];
+                    final on = _selected.contains(u.id);
+                    return _StaffRow(
+                      user: u,
+                      avatarUrl: _avatarFor(widget.service, u),
+                      selected: on,
+                      onTap: () => _toggle(u),
+                      trailing: _SelectMark(selected: on),
+                    );
+                  },
+                ),
         ),
         const SizedBox(height: 12),
         SignalButton(
-          label: _creating ? 'Creating…' : 'Create group',
+          label: _creating
+              ? 'Creating…'
+              : (_selected.isEmpty
+                    ? 'Create group'
+                    : 'Create group (${_selected.length})'),
+          icon: Icons.group_add_rounded,
           busy: _creating,
           onPressed: _creating ? null : _create,
         ),
@@ -333,7 +435,32 @@ class _GroupComposerTabState extends State<_GroupComposerTab> {
   }
 }
 
-// ─────────────────────────────────────── CHANNEL tab ────────────────────────
+class _SelectMark extends StatelessWidget {
+  const _SelectMark({required this.selected});
+  final bool selected;
+
+  @override
+  Widget build(BuildContext context) {
+    final b = context.brand;
+    final reduce = MediaQuery.maybeOf(context)?.disableAnimations ?? false;
+    return AnimatedContainer(
+      duration: reduce ? Duration.zero : const Duration(milliseconds: 180),
+      width: 26,
+      height: 26,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: selected ? Brand.orange : Colors.transparent,
+        border: Border.all(
+          color: selected ? Brand.orange : b.paperDim,
+          width: 2,
+        ),
+      ),
+      child: selected
+          ? const Icon(Icons.check_rounded, size: 16, color: Colors.white)
+          : null,
+    );
+  }
+}
 
 class _ChannelBrowserTab extends StatefulWidget {
   const _ChannelBrowserTab({required this.service});
@@ -375,7 +502,10 @@ class _ChannelBrowserTabState extends State<_ChannelBrowserTab> {
 
   void _onSearchChanged(String v) {
     _debounce?.cancel();
-    _debounce = Timer(const Duration(milliseconds: 350), () => _load(search: v));
+    _debounce = Timer(
+      const Duration(milliseconds: 350),
+      () => _load(search: v),
+    );
   }
 
   Future<void> _join(ChannelBrief c) async {
@@ -387,9 +517,9 @@ class _ChannelBrowserTabState extends State<_ChannelBrowserTab> {
     if (ok) {
       Navigator.of(context).pop(c.id);
     } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('COULD NOT JOIN')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Could not join')));
     }
   }
 
@@ -397,7 +527,7 @@ class _ChannelBrowserTabState extends State<_ChannelBrowserTab> {
     if (_busy) return;
     final result = await showModalBottomSheet<int>(
       context: context,
-      backgroundColor: Brand.surface,
+      backgroundColor: context.brand.surface,
       isScrollControlled: true,
       builder: (_) => _CreateChannelSheet(service: widget.service),
     );
@@ -405,65 +535,75 @@ class _ChannelBrowserTabState extends State<_ChannelBrowserTab> {
     if (result != null) {
       Navigator.of(context).pop(result);
     } else {
-      _load(); // they may have created one then cancelled — cheap refresh
+      _load();
     }
   }
 
   @override
   Widget build(BuildContext context) {
     return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Row(
           children: [
             Expanded(
-              child: TextField(
+              child: AppSearchField(
                 controller: _search,
+                hint: 'Search channels',
                 onChanged: _onSearchChanged,
-                decoration: const InputDecoration(labelText: 'SEARCH CHANNELS'),
-                style: Theme.of(context).textTheme.titleMedium,
               ),
             ),
-            const SizedBox(width: 12),
-            IconButton(
+            const SizedBox(width: 10),
+            AppIconButton(
+              icon: Icons.add_rounded,
               tooltip: 'Create channel',
+              color: Brand.orange,
+              size: 48,
               onPressed: _busy ? null : _showCreate,
-              icon: const Icon(Icons.add, color: Brand.signal),
             ),
           ],
         ),
-        const SizedBox(height: 16),
+        const SizedBox(height: 14),
         Expanded(
           child: _loading
-              ? const _CenteredSpinner()
+              ? const SkeletonList(count: 6)
               : _channels.isEmpty
-                  ? const EmptyState(
-                      label: 'No channels',
-                      hint: 'Create one to get started.',
-                    )
-                  : ListView.separated(
-                      itemCount: _channels.length,
-                      separatorBuilder: (_, _) => const Hairline(),
-                      itemBuilder: (_, i) => _ChannelRow(
-                        channel: _channels[i],
-                        onTap: _busy
-                            ? null
-                            : () {
-                                final c = _channels[i];
-                                if (c.joined) {
-                                  Navigator.of(context).pop(c.id);
-                                } else if (c.isPrivate) {
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(
-                                      content: Text(
-                                          'PRIVATE — ASK A MEMBER TO ADD YOU'),
-                                    ),
-                                  );
-                                } else {
-                                  _join(c);
-                                }
-                              },
-                      ),
-                    ),
+              ? EmptyState(
+                  icon: Icons.tag_rounded,
+                  label: 'No channels',
+                  hint: 'Create one to get started.',
+                  action: GhostButton(
+                    label: 'Create channel',
+                    icon: Icons.add_rounded,
+                    onPressed: _showCreate,
+                  ),
+                )
+              : ListView.separated(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  itemCount: _channels.length,
+                  separatorBuilder: (_, _) => const SizedBox(height: 10),
+                  itemBuilder: (_, i) => _ChannelRow(
+                    channel: _channels[i],
+                    onTap: _busy
+                        ? null
+                        : () {
+                            final c = _channels[i];
+                            if (c.joined) {
+                              Navigator.of(context).pop(c.id);
+                            } else if (c.isPrivate) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text(
+                                    'Private — ask a member to add you',
+                                  ),
+                                ),
+                              );
+                            } else {
+                              _join(c);
+                            }
+                          },
+                  ),
+                ),
         ),
       ],
     );
@@ -494,9 +634,9 @@ class _CreateChannelSheetState extends State<_CreateChannelSheet> {
   Future<void> _create() async {
     final name = _name.text.trim();
     if (name.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('CHANNEL NAME REQUIRED')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Channel name required')));
       return;
     }
     setState(() => _busy = true);
@@ -513,77 +653,113 @@ class _CreateChannelSheetState extends State<_CreateChannelSheet> {
   @override
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
+    final b = context.brand;
     return Padding(
       padding: EdgeInsets.only(
         bottom: MediaQuery.of(context).viewInsets.bottom,
       ),
-      child: Container(
-        padding: const EdgeInsets.all(24),
-        decoration: const BoxDecoration(
-          color: Brand.surface,
-          border: Border(top: BorderSide(color: Brand.signal, width: 2)),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text('NEW CHANNEL', style: text.labelLarge),
-            const SizedBox(height: 8),
-            const Hairline(),
-            const SizedBox(height: 20),
-            TextField(
-              controller: _name,
-              decoration: const InputDecoration(labelText: 'CHANNEL NAME'),
-              style: text.titleMedium,
-            ),
-            const SizedBox(height: 14),
-            TextField(
-              controller: _topic,
-              decoration: const InputDecoration(labelText: 'TOPIC (OPTIONAL)'),
-              style: text.titleMedium,
-            ),
-            const SizedBox(height: 18),
-            Row(
-              children: [
-                Expanded(
-                  child: _VisibilityOption(
-                    label: 'PUBLIC',
-                    hint: 'Anyone can join',
-                    selected: _visibility == 'public',
-                    onTap: () => setState(() => _visibility = 'public'),
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 10, 20, 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Center(
+                child: Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: b.rule,
+                    borderRadius: BorderRadius.circular(2),
                   ),
                 ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: _VisibilityOption(
-                    label: 'PRIVATE',
-                    hint: 'Invite-only',
-                    selected: _visibility == 'private',
-                    onTap: () => setState(() => _visibility = 'private'),
+              ),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  const IconTile(icon: Icons.tag_rounded),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('New channel', style: text.titleLarge),
+                        Text(
+                          'Topic-based space for your team',
+                          style: text.bodySmall,
+                        ),
+                      ],
+                    ),
                   ),
+                ],
+              ),
+              const SizedBox(height: 20),
+              TextField(
+                controller: _name,
+                decoration: const InputDecoration(
+                  labelText: 'Channel name',
+                  prefixIcon: Icon(Icons.tag_rounded, size: 20),
                 ),
-              ],
-            ),
-            const SizedBox(height: 20),
-            Row(
-              children: [
-                Expanded(
-                  child: GhostButton(
-                    label: 'Cancel',
-                    onPressed: () => Navigator.of(context).pop(),
+                style: text.bodyLarge,
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _topic,
+                decoration: const InputDecoration(
+                  labelText: 'Topic (optional)',
+                  prefixIcon: Icon(Icons.short_text_rounded, size: 20),
+                ),
+                style: text.bodyLarge,
+              ),
+              const SizedBox(height: 16),
+              Text('Visibility', style: text.labelLarge),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: _VisibilityOption(
+                      icon: Icons.public_rounded,
+                      label: 'Public',
+                      hint: 'Anyone can join',
+                      selected: _visibility == 'public',
+                      onTap: () => setState(() => _visibility = 'public'),
+                    ),
                   ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: SignalButton(
-                    label: 'Create',
-                    busy: _busy,
-                    onPressed: _busy ? null : _create,
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: _VisibilityOption(
+                      icon: Icons.lock_outline_rounded,
+                      label: 'Private',
+                      hint: 'Invite-only',
+                      selected: _visibility == 'private',
+                      onTap: () => setState(() => _visibility = 'private'),
+                    ),
                   ),
-                ),
-              ],
-            ),
-          ],
+                ],
+              ),
+              const SizedBox(height: 20),
+              Row(
+                children: [
+                  Expanded(
+                    child: GhostButton(
+                      label: 'Cancel',
+                      onPressed: () => Navigator.of(context).pop(),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: SignalButton(
+                      label: 'Create',
+                      busy: _busy,
+                      onPressed: _busy ? null : _create,
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -592,12 +768,14 @@ class _CreateChannelSheetState extends State<_CreateChannelSheet> {
 
 class _VisibilityOption extends StatelessWidget {
   const _VisibilityOption({
+    required this.icon,
     required this.label,
     required this.hint,
     required this.selected,
     required this.onTap,
   });
 
+  final IconData icon;
   final String label;
   final String hint;
   final bool selected;
@@ -606,26 +784,35 @@ class _VisibilityOption extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
-    return InkWell(
-      onTap: onTap,
-      child: Container(
+    final b = context.brand;
+    return Semantics(
+      button: true,
+      selected: selected,
+      child: AppCard(
         padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
-          color: selected ? Brand.signalGlow(0.12) : Colors.transparent,
-          border: Border.all(
-            color: selected ? Brand.signal : Brand.rule,
-            width: 1,
-          ),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+        color: selected ? b.tint(Brand.orange, 0.10) : null,
+        borderColor: selected ? Brand.orange : null,
+        onTap: onTap,
+        child: Row(
           children: [
-            Text(label,
-                style: text.labelLarge?.copyWith(
-                  color: selected ? Brand.signal : Brand.paper,
-                )),
-            const SizedBox(height: 4),
-            Text(hint, style: text.bodySmall),
+            Icon(icon, size: 20, color: selected ? Brand.orange : b.paperDim),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(label, style: text.titleSmall),
+                  const SizedBox(height: 2),
+                  Text(hint, style: text.bodySmall),
+                ],
+              ),
+            ),
+            if (selected)
+              const Icon(
+                Icons.check_circle_rounded,
+                size: 18,
+                color: Brand.orange,
+              ),
           ],
         ),
       ),
@@ -641,72 +828,62 @@ class _ChannelRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
-    return InkWell(
+    final topic = channel.topic;
+    final members =
+        '${channel.memberCount} member${channel.memberCount == 1 ? '' : 's'}';
+    return AppCard(
+      padding: const EdgeInsets.all(14),
+      radius: Brand.radiusLg,
       onTap: onTap,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 14),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 42),
         child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Icon(
-              channel.isPrivate ? Icons.lock_outline : Icons.tag,
-              size: 18,
-              color: channel.joined ? Brand.signal : Brand.paperDim,
+            IconTile(
+              icon: channel.isPrivate
+                  ? Icons.lock_outline_rounded
+                  : Icons.tag_rounded,
+              color: channel.joined ? Brand.orange : Brand.info,
+              size: 42,
             ),
             const SizedBox(width: 12),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(channel.name, style: text.titleSmall),
-                  if (channel.topic != null && channel.topic!.isNotEmpty) ...[
-                    const SizedBox(height: 3),
-                    Text(
-                      channel.topic!,
-                      style: text.bodySmall,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ],
-                  const SizedBox(height: 4),
                   Text(
-                    '${channel.memberCount} MEMBER${channel.memberCount == 1 ? '' : 'S'}',
-                    style: text.labelMedium,
+                    channel.name,
+                    style: text.titleSmall,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    topic != null && topic.isNotEmpty
+                        ? '$members · $topic'
+                        : members,
+                    style: text.bodySmall,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                   ),
                 ],
               ),
             ),
             const SizedBox(width: 8),
-            Text(
-              channel.joined
-                  ? 'JOINED'
-                  : (channel.isPrivate ? 'PRIVATE' : 'JOIN'),
-              style: text.labelMedium?.copyWith(
-                color: channel.joined
-                    ? Brand.signal
-                    : (channel.isPrivate ? Brand.paperDim : Brand.signal),
-              ),
+            StatusPill(
+              label: channel.joined
+                  ? 'Joined'
+                  : (channel.isPrivate ? 'Private' : 'Join'),
+              color: channel.joined
+                  ? Brand.success
+                  : (channel.isPrivate ? Brand.warning : Brand.orange),
+              icon: channel.joined
+                  ? Icons.check_rounded
+                  : (channel.isPrivate
+                        ? Icons.lock_outline_rounded
+                        : Icons.add_rounded),
             ),
           ],
-        ),
-      ),
-    );
-  }
-}
-
-// ─────────────────────────────────────── shared ─────────────────────────────
-
-class _CenteredSpinner extends StatelessWidget {
-  const _CenteredSpinner();
-  @override
-  Widget build(BuildContext context) {
-    return const Center(
-      child: SizedBox(
-        width: 20,
-        height: 20,
-        child: CircularProgressIndicator(
-          strokeWidth: 2,
-          color: Brand.signal,
         ),
       ),
     );
@@ -714,45 +891,90 @@ class _CenteredSpinner extends StatelessWidget {
 }
 
 class _StaffRow extends StatelessWidget {
-  const _StaffRow({required this.user, required this.onTap, this.trailing});
+  const _StaffRow({
+    required this.user,
+    required this.onTap,
+    this.trailing,
+    this.avatarUrl,
+    this.selected = false,
+  });
   final ChatUser user;
   final VoidCallback? onTap;
   final Widget? trailing;
+  final String? avatarUrl;
+  final bool selected;
 
   @override
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
-    return InkWell(
-      onTap: onTap,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 14),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Container(
-              width: 8,
-              height: 8,
-              margin: const EdgeInsets.only(top: 7, right: 12),
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: user.isOnline ? Brand.signal : Brand.rule,
-              ),
-            ),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+    final b = context.brand;
+    final role = user.role.trim();
+    final sub = [
+      if (role.isNotEmpty) role[0].toUpperCase() + role.substring(1),
+      user.isOnline ? 'Online' : 'Offline',
+    ].join(' · ');
+    return Semantics(
+      selected: selected,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(Brand.radiusLg),
+          boxShadow: b.shadow,
+        ),
+        child: AppCard(
+          padding: const EdgeInsets.all(14),
+          radius: Brand.radiusLg,
+          color: selected ? b.tint(Brand.orange, 0.08) : null,
+          borderColor: selected ? Brand.orange : null,
+          onTap: onTap,
+          child: Row(
+            children: [
+              Stack(
+                clipBehavior: Clip.none,
                 children: [
-                  Text(user.displayName, style: text.titleSmall),
-                  const SizedBox(height: 3),
-                  Text(user.role.toUpperCase(), style: text.labelMedium),
+                  AppAvatar(
+                    name: user.displayName,
+                    size: 42,
+                    imageUrl: avatarUrl,
+                  ),
+                  Positioned(
+                    right: -1,
+                    bottom: -1,
+                    child: Container(
+                      width: 13,
+                      height: 13,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: user.isOnline ? Brand.success : b.paperDim,
+                        border: Border.all(color: b.surface, width: 2),
+                      ),
+                    ),
+                  ),
                 ],
               ),
-            ),
-            if (trailing != null) ...[
-              const SizedBox(width: 8),
-              trailing!,
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      user.displayName,
+                      style: text.titleSmall,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      sub,
+                      style: text.bodySmall,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ),
+              ),
+              if (trailing != null) ...[const SizedBox(width: 8), trailing!],
             ],
-          ],
+          ),
         ),
       ),
     );

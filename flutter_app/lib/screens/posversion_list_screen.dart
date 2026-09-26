@@ -5,8 +5,6 @@ import '../services/posversion_service.dart';
 import '../theme.dart';
 import '../widgets/premium.dart';
 
-/// POS Versions — native CRUD. List of released POS versions with create /
-/// edit / delete, backed by the `*posversion` actions on api.php.
 class PosVersionListScreen extends StatefulWidget {
   const PosVersionListScreen({super.key, required this.service});
   final PosVersionService service;
@@ -16,6 +14,7 @@ class PosVersionListScreen extends StatefulWidget {
 }
 
 class _PosVersionListScreenState extends State<PosVersionListScreen> {
+  final _searchController = TextEditingController();
   List<PosVersion> _rows = const [];
   bool _loading = true;
 
@@ -23,6 +22,12 @@ class _PosVersionListScreenState extends State<PosVersionListScreen> {
   void initState() {
     super.initState();
     _load();
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
   }
 
   Future<void> _load() async {
@@ -47,51 +52,77 @@ class _PosVersionListScreenState extends State<PosVersionListScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final b = context.brand;
+    final q = _searchController.text.trim().toLowerCase();
+    final rows = q.isEmpty
+        ? _rows
+        : _rows
+              .where(
+                (r) =>
+                    r.version.toLowerCase().contains(q) ||
+                    r.date.toLowerCase().contains(q),
+              )
+              .toList();
     return StationScaffold(
       stationNumber: '13',
-      stationLabel: 'POS VERSIONS',
-      title: 'Versions.',
+      stationLabel: 'POS versions',
+      title: 'Versions',
+      subtitle: _loading ? '' : '${_rows.length} releases',
       showBottomBrand: false,
       onBack: () => Navigator.of(context).pop(),
       trailing: StationAction(
-        icon: Icons.add,
+        icon: Icons.add_rounded,
         tooltip: 'New version',
         onPressed: _openForm,
       ),
-      child: RefreshIndicator(
-        color: Brand.signal,
-        backgroundColor: Brand.surface,
-        onRefresh: _load,
-        child: _loading
-            ? const Center(
-                child: SizedBox(
-                  width: 20,
-                  height: 20,
-                  child: CircularProgressIndicator(
-                      strokeWidth: 2, color: Brand.signal),
-                ),
-              )
-            : _rows.isEmpty
-                ? ListView(
-                    physics: const AlwaysScrollableScrollPhysics(),
-                    children: const [
-                      SizedBox(height: 64),
-                      EmptyState(
-                        label: 'No POS versions',
-                        hint: 'Tap + to publish the first version. '
-                            'Pull to refresh.',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          AppSearchField(
+            controller: _searchController,
+            hint: 'Search version or date',
+            onChanged: (_) => setState(() {}),
+          ),
+          const SizedBox(height: 12),
+          Expanded(
+            child: RefreshIndicator(
+              color: b.signal,
+              backgroundColor: b.surface,
+              onRefresh: _load,
+              child: _loading
+                  ? const SkeletonList(count: 7)
+                  : rows.isEmpty
+                  ? ListView(
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      children: [
+                        const SizedBox(height: 48),
+                        EmptyState(
+                          icon: Icons.new_releases_rounded,
+                          label: _rows.isEmpty
+                              ? 'No POS versions'
+                              : 'No matching versions',
+                          hint: _rows.isEmpty
+                              ? 'Tap + to publish the first version. Pull to refresh.'
+                              : 'Try a different search.',
+                        ),
+                      ],
+                    )
+                  : ListView.separated(
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      padding: const EdgeInsets.only(bottom: 16),
+                      itemCount: rows.length,
+                      separatorBuilder: (_, _) => const SizedBox(height: 10),
+                      itemBuilder: (_, i) => _Entry(
+                        index: i,
+                        child: _PosVersionRow(
+                          row: rows[i],
+                          onTap: () => _openForm(rows[i]),
+                        ),
                       ),
-                    ],
-                  )
-                : ListView.separated(
-                    physics: const AlwaysScrollableScrollPhysics(),
-                    itemCount: _rows.length,
-                    separatorBuilder: (_, _) => const Hairline(),
-                    itemBuilder: (_, i) => _PosVersionRow(
-                      row: _rows[i],
-                      onTap: () => _openForm(_rows[i]),
                     ),
-                  ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -105,48 +136,87 @@ class _PosVersionRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
-    return InkWell(
+    final b = context.brand;
+    return AppCard(
       onTap: onTap,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 16),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Container(
-              width: 8,
-              height: 8,
-              margin: const EdgeInsets.only(top: 7, right: 12),
-              decoration: const BoxDecoration(
-                shape: BoxShape.circle,
-                color: Brand.signal,
-              ),
+      radius: Brand.radiusLg,
+      borderColor: b.signal.withValues(alpha: 0.28),
+      padding: const EdgeInsets.all(14),
+      child: Row(
+        children: [
+          Container(
+            width: 42,
+            height: 42,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(13),
+              color: b.signal.withValues(alpha: b.isDark ? 0.18 : 0.12),
+              border: Border.all(color: b.signal.withValues(alpha: 0.4)),
             ),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('v${row.version}',
-                      style: text.titleSmall,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis),
-                  const SizedBox(height: 3),
-                  Text(
-                    row.date.isEmpty ? 'No release date' : 'Released ${row.date}',
-                    style: text.bodySmall,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+            child: Icon(
+              Icons.new_releases_rounded,
+              size: 20,
+              color: b.signalInk,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'v${row.version}',
+                  style: text.titleSmall?.copyWith(
+                    fontFamily: 'monospace',
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.6,
                   ),
-                ],
-              ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  row.date.isEmpty ? 'No release date' : 'Released ${row.date}',
+                  style: text.bodySmall,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
             ),
-          ],
-        ),
+          ),
+          const SizedBox(width: 8),
+          Icon(Icons.chevron_right_rounded, size: 20, color: b.paperDim),
+        ],
       ),
     );
   }
 }
 
-/// Add / edit form. Version string + a release date picker (YYYY-MM-DD).
+class _Entry extends StatelessWidget {
+  const _Entry({required this.index, required this.child});
+
+  final int index;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    if (MediaQuery.maybeOf(context)?.disableAnimations ?? false) return child;
+    final start = (index.clamp(0, 5)) * 0.12;
+    return TweenAnimationBuilder<double>(
+      tween: Tween<double>(begin: 0, end: 1),
+      duration: const Duration(milliseconds: 400),
+      curve: Interval(start, 1, curve: Curves.easeOutCubic),
+      builder: (context, t, child) => Opacity(
+        opacity: t.clamp(0, 1),
+        child: Transform.translate(
+          offset: Offset(0, 14 * (1 - t)),
+          child: child,
+        ),
+      ),
+      child: child,
+    );
+  }
+}
+
 class _PosVersionFormScreen extends StatefulWidget {
   const _PosVersionFormScreen({required this.service, this.existing});
   final PosVersionService service;
@@ -182,8 +252,8 @@ class _PosVersionFormScreenState extends State<_PosVersionFormScreen> {
   String? get _dateStr => _date == null
       ? null
       : '${_date!.year.toString().padLeft(4, '0')}-'
-          '${_date!.month.toString().padLeft(2, '0')}-'
-          '${_date!.day.toString().padLeft(2, '0')}';
+            '${_date!.month.toString().padLeft(2, '0')}-'
+            '${_date!.day.toString().padLeft(2, '0')}';
 
   Future<void> _pickDate() async {
     final now = DateTime.now();
@@ -215,10 +285,7 @@ class _PosVersionFormScreenState extends State<_PosVersionFormScreen> {
         date: _dateStr!,
       );
     } else {
-      res = await widget.service.add(
-        version: version,
-        date: _dateStr!,
-      );
+      res = await widget.service.add(version: version, date: _dateStr!);
     }
     if (!mounted) return;
     setState(() => _saving = false);
@@ -232,18 +299,27 @@ class _PosVersionFormScreenState extends State<_PosVersionFormScreen> {
   Future<void> _delete() async {
     final ok = await showDialog<bool>(
       context: context,
-      builder: (_) => AlertDialog(
-        backgroundColor: Brand.surface,
+      builder: (ctx) => AlertDialog(
+        icon: const IconTile(
+          icon: Icons.delete_outline_rounded,
+          color: Brand.danger,
+          size: 44,
+          iconSize: 22,
+        ),
         title: const Text('Delete version?'),
         content: const Text('This permanently removes the POS version.'),
         actions: [
           TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('CANCEL'),
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
           ),
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('DELETE'),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Brand.danger,
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Delete'),
           ),
         ],
       ),
@@ -261,57 +337,129 @@ class _PosVersionFormScreenState extends State<_PosVersionFormScreen> {
   }
 
   void _toast(String msg) {
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text(msg.toUpperCase())));
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
   @override
   Widget build(BuildContext context) {
+    final text = Theme.of(context).textTheme;
+    final b = context.brand;
     return StationScaffold(
       stationNumber: '13',
-      stationLabel: _isEdit ? 'EDIT VERSION' : 'NEW VERSION',
-      title: _isEdit ? 'Edit version.' : 'Publish version.',
+      stationLabel: 'POS versions',
+      title: _isEdit ? 'Edit version' : 'Publish version',
+      subtitle: _isEdit ? 'v${widget.existing!.version}' : 'New release',
       showBottomBrand: false,
       onBack: () => Navigator.of(context).pop(),
-      child: ListView(
+      bottomBar: Material(
+        color: b.surface,
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            border: Border(top: BorderSide(color: b.rule)),
+          ),
+          child: SafeArea(
+            top: false,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),
+              child: SignalButton(
+                label: _isEdit ? 'Save changes' : 'Create version',
+                icon: Icons.check_rounded,
+                busy: _saving,
+                onPressed: _saving ? null : _save,
+              ),
+            ),
+          ),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _Field(label: 'VERSION', controller: _version),
-          const SizedBox(height: 16),
-          StationDataRow(
-            label: 'RELEASE DATE',
-            value: _dateStr ?? 'Tap to pick a date',
-            onTap: _pickDate,
-            trailingIcon: Icons.calendar_today,
+          Expanded(
+            child: ListView(
+              padding: const EdgeInsets.only(top: 4, bottom: 16),
+              children: [
+                AppCard(
+                  radius: Brand.radiusLg,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Row(
+                        children: [
+                          const IconTile(
+                            icon: Icons.new_releases_rounded,
+                            size: 30,
+                            iconSize: 16,
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text('Release', style: text.titleMedium),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 16),
+                      Text('Version', style: text.labelLarge),
+                      const SizedBox(height: 6),
+                      TextField(
+                        controller: _version,
+                        decoration: const InputDecoration(
+                          hintText: 'e.g. 2.4.1',
+                        ),
+                      ),
+                      const SizedBox(height: 14),
+                      Text('Release date', style: text.labelLarge),
+                      const SizedBox(height: 6),
+                      Material(
+                        color: b.surfaceHi,
+                        borderRadius: BorderRadius.circular(Brand.radiusLg),
+                        child: InkWell(
+                          onTap: _pickDate,
+                          borderRadius: BorderRadius.circular(Brand.radiusLg),
+                          child: Padding(
+                            padding: const EdgeInsets.all(14),
+                            child: Row(
+                              children: [
+                                Icon(
+                                  Icons.calendar_today_rounded,
+                                  size: 18,
+                                  color: b.paperDim,
+                                ),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: Text(
+                                    _dateStr ?? 'Tap to pick a date',
+                                    style: text.bodyLarge?.copyWith(
+                                      color: _dateStr == null
+                                          ? b.paperDim
+                                          : b.paper,
+                                    ),
+                                  ),
+                                ),
+                                Icon(
+                                  Icons.expand_more_rounded,
+                                  size: 20,
+                                  color: b.paperDim,
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                if (_isEdit) ...[
+                  const SizedBox(height: 12),
+                  GhostButton(
+                    label: 'Delete version',
+                    icon: Icons.delete_outline_rounded,
+                    onPressed: _delete,
+                  ),
+                ],
+              ],
+            ),
           ),
-          const SizedBox(height: 32),
-          SignalButton(
-            label: _isEdit ? 'Save changes' : 'Create version',
-            busy: _saving,
-            onPressed: _saving ? null : _save,
-          ),
-          if (_isEdit) ...[
-            const SizedBox(height: 12),
-            GhostButton(label: 'Delete version', onPressed: _delete),
-          ],
-          const SizedBox(height: 40),
         ],
       ),
-    );
-  }
-}
-
-/// Standard labelled text field matching the app's input styling.
-class _Field extends StatelessWidget {
-  const _Field({required this.label, required this.controller});
-  final String label;
-  final TextEditingController controller;
-
-  @override
-  Widget build(BuildContext context) {
-    return TextField(
-      controller: controller,
-      decoration: InputDecoration(labelText: label),
-      style: Theme.of(context).textTheme.titleMedium,
     );
   }
 }

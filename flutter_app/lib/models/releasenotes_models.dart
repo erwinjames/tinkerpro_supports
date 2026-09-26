@@ -29,13 +29,13 @@ class ReleaseNote {
   final String type;
 
   factory ReleaseNote.fromJson(Map<String, dynamic> json) => ReleaseNote(
-        id: _asInt(json['NotesID'] ?? json['id']),
-        posversionId: _asInt(json['posversionID']),
-        actionId: _asInt(json['actionID']),
-        notes: (json['release_notes'] ?? json['notes'] ?? '').toString(),
-        version: (json['version'] ?? '').toString(),
-        type: (json['action_type'] ?? json['type'] ?? '').toString(),
-      );
+    id: _asInt(json['NotesID'] ?? json['id']),
+    posversionId: _asInt(json['posversionID']),
+    actionId: _asInt(json['actionID']),
+    notes: (json['release_notes'] ?? json['notes'] ?? '').toString(),
+    version: (json['version'] ?? '').toString(),
+    type: (json['action_type'] ?? json['type'] ?? '').toString(),
+  );
 }
 
 /// A row from `getActionTypes` ({id, type}), used to populate the action
@@ -46,10 +46,8 @@ class ActionType {
   final int id;
   final String type;
 
-  factory ActionType.fromJson(Map<String, dynamic> json) => ActionType(
-        id: _asInt(json['id']),
-        type: (json['type'] ?? '').toString(),
-      );
+  factory ActionType.fromJson(Map<String, dynamic> json) =>
+      ActionType(id: _asInt(json['id']), type: (json['type'] ?? '').toString());
 }
 
 /// A lightweight reference to a row from `getposversion`, used to populate
@@ -61,9 +59,9 @@ class PosVersionRef {
   final String version;
 
   factory PosVersionRef.fromJson(Map<String, dynamic> json) => PosVersionRef(
-        id: _asInt(json['id']),
-        version: (json['version'] ?? '').toString(),
-      );
+    id: _asInt(json['id']),
+    version: (json['version'] ?? '').toString(),
+  );
 }
 
 int _asInt(Object? value) {

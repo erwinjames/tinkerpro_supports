@@ -80,11 +80,14 @@ class TaskService {
     if (!const {'todo', 'doing', 'done'}.contains(section)) {
       throw ArgumentError.value(section, 'section');
     }
-    final res = await _api.postPath('task.php', body: {
-      'move_to_section': '1',
-      'task_id': taskId.toString(),
-      'section': section,
-    });
+    final res = await _api.postPath(
+      'task.php',
+      body: {
+        'move_to_section': '1',
+        'task_id': taskId.toString(),
+        'section': section,
+      },
+    );
     if (res['success'] == false) {
       throw Exception(res['message']?.toString() ?? 'Move failed');
     }
@@ -94,11 +97,14 @@ class TaskService {
   /// the round checkbox on the row and the "Mark complete" CTA in the
   /// drawer. Returns the new status as confirmed by the server.
   Future<TaskStatus> toggleStatus(int taskId, TaskStatus next) async {
-    final res = await _api.postPath('task.php', body: {
-      'toggle_status': '1',
-      'task_id': taskId.toString(),
-      'new_status': next.wire,
-    });
+    final res = await _api.postPath(
+      'task.php',
+      body: {
+        'toggle_status': '1',
+        'task_id': taskId.toString(),
+        'new_status': next.wire,
+      },
+    );
     // task.php's toggle handler responds with a redirect HTML snippet on
     // success (it's also rendered for browsers). Treat any 2xx as ok.
     if (res['success'] == false) {
@@ -133,24 +139,31 @@ class TaskService {
 
   /// Update a task's free-text description. Creator-only on the server.
   Future<void> updateDescription(int taskId, String description) async {
-    final res = await _api.postPath('task.php', body: {
-      'update_description': '1',
-      'task_id': taskId.toString(),
-      'description': description,
-    });
+    final res = await _api.postPath(
+      'task.php',
+      body: {
+        'update_description': '1',
+        'task_id': taskId.toString(),
+        'description': description,
+      },
+    );
     if (res['success'] == false) {
       throw Exception(
-          res['message']?.toString() ?? 'Description update failed');
+        res['message']?.toString() ?? 'Description update failed',
+      );
     }
   }
 
   /// Update a task's priority (low / medium / high).
   Future<void> updatePriority(int taskId, TaskPriority priority) async {
-    final res = await _api.postPath('task.php', body: {
-      'update_priority': '1',
-      'task_id': taskId.toString(),
-      'priority': priority.wire,
-    });
+    final res = await _api.postPath(
+      'task.php',
+      body: {
+        'update_priority': '1',
+        'task_id': taskId.toString(),
+        'priority': priority.wire,
+      },
+    );
     if (res['success'] == false) {
       throw Exception(res['message']?.toString() ?? 'Priority update failed');
     }
@@ -195,11 +208,14 @@ class TaskService {
   /// Add a user to the task's assignee list. Server returns the updated
   /// list so the chip stack can repaint without a separate fetch.
   Future<List<Assignee>> addAssignee(int taskId, int userId) async {
-    final res = await _api.postPath('task.php', body: {
-      'add_assignee': '1',
-      'task_id': taskId.toString(),
-      'user_id': userId.toString(),
-    });
+    final res = await _api.postPath(
+      'task.php',
+      body: {
+        'add_assignee': '1',
+        'task_id': taskId.toString(),
+        'user_id': userId.toString(),
+      },
+    );
     if (res['success'] != true) {
       throw Exception(res['message']?.toString() ?? 'Add assignee failed');
     }
@@ -210,11 +226,14 @@ class TaskService {
   }
 
   Future<List<Assignee>> removeAssignee(int taskId, int userId) async {
-    final res = await _api.postPath('task.php', body: {
-      'remove_assignee': '1',
-      'task_id': taskId.toString(),
-      'user_id': userId.toString(),
-    });
+    final res = await _api.postPath(
+      'task.php',
+      body: {
+        'remove_assignee': '1',
+        'task_id': taskId.toString(),
+        'user_id': userId.toString(),
+      },
+    );
     if (res['success'] != true) {
       throw Exception(res['message']?.toString() ?? 'Remove assignee failed');
     }
@@ -273,21 +292,24 @@ class TaskService {
   }
 
   Future<void> toggleSubtask(int subtaskId, TaskStatus next) async {
-    final res = await _api.postPath('task.php', body: {
-      'toggle_subtask': '1',
-      'subtask_id': subtaskId.toString(),
-      'new_status': next.wire,
-    });
+    final res = await _api.postPath(
+      'task.php',
+      body: {
+        'toggle_subtask': '1',
+        'subtask_id': subtaskId.toString(),
+        'new_status': next.wire,
+      },
+    );
     if (res['success'] != true) {
       throw Exception(res['message']?.toString() ?? 'Toggle subtask failed');
     }
   }
 
   Future<void> deleteSubtask(int subtaskId) async {
-    final res = await _api.postPath('task.php', body: {
-      'delete_subtask': '1',
-      'subtask_id': subtaskId.toString(),
-    });
+    final res = await _api.postPath(
+      'task.php',
+      body: {'delete_subtask': '1', 'subtask_id': subtaskId.toString()},
+    );
     if (res['success'] != true) {
       throw Exception(res['message']?.toString() ?? 'Delete subtask failed');
     }
@@ -307,11 +329,14 @@ class TaskService {
   }
 
   Future<void> toggleProjectStar(int projectId, bool starred) async {
-    final res = await _api.postPath('projects.php', body: {
-      'toggle_project_star': '1',
-      'project_id': projectId.toString(),
-      'starred': starred ? '1' : '0',
-    });
+    final res = await _api.postPath(
+      'projects.php',
+      body: {
+        'toggle_project_star': '1',
+        'project_id': projectId.toString(),
+        'starred': starred ? '1' : '0',
+      },
+    );
     if (res['success'] == false) {
       throw Exception(res['message']?.toString() ?? 'Toggle star failed');
     }
@@ -330,7 +355,7 @@ class TaskService {
   /// `task.subtask_updated` event payload. Kept here so the realtime
   /// channel layer doesn't have to know the field names.
   static ({int subtaskId, int parentTaskId, TaskStatus status})?
-      decodeSubtaskUpdate(Object? raw) {
+  decodeSubtaskUpdate(Object? raw) {
     if (raw is! Map) return null;
     final j = raw.cast<String, dynamic>();
     final id = (j['subtask_id'] as num?)?.toInt();

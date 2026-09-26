@@ -43,9 +43,9 @@ class Offer {
       image: (json['image'] ?? '').toString(),
       sections: rawSections is List
           ? rawSections
-              .whereType<Map>()
-              .map((e) => OfferSection.fromJson(Map<String, dynamic>.from(e)))
-              .toList()
+                .whereType<Map>()
+                .map((e) => OfferSection.fromJson(Map<String, dynamic>.from(e)))
+                .toList()
           : const [],
     );
   }
@@ -68,11 +68,11 @@ class OfferSection {
   final int sortOrder;
 
   factory OfferSection.fromJson(Map<String, dynamic> json) => OfferSection(
-        id: _asIntOrNull(json['id']),
-        content: (json['content'] ?? '').toString(),
-        image: (json['image'] ?? '').toString(),
-        sortOrder: _asInt(json['sort_order']),
-      );
+    id: _asIntOrNull(json['id']),
+    content: (json['content'] ?? '').toString(),
+    image: (json['image'] ?? '').toString(),
+    sortOrder: _asInt(json['sort_order']),
+  );
 }
 
 class OfferCategory {
@@ -82,9 +82,9 @@ class OfferCategory {
   final String name;
 
   factory OfferCategory.fromJson(Map<String, dynamic> json) => OfferCategory(
-        id: _asInt(json['id']),
-        name: (json['name'] ?? '').toString(),
-      );
+    id: _asInt(json['id']),
+    name: (json['name'] ?? '').toString(),
+  );
 }
 
 int _asInt(Object? value) {

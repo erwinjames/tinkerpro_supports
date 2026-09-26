@@ -104,7 +104,9 @@ class ReleaseNotesService {
       _mutate('deleteReleaseNotes', {'id': '$id'});
 
   Future<ReleaseNotesResult> _mutate(
-      String action, Map<String, String> body) async {
+    String action,
+    Map<String, String> body,
+  ) async {
     try {
       final res = await _api.post(action, body: body);
       final ok = res['success'] == true || res['status'] == 'success';

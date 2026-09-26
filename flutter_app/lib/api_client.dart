@@ -1,22 +1,24 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// Default API base URL used on a fresh install (no server stored in prefs
-/// yet). Points at the live server; override at build time with
-///   flutter run --dart-define=TPS_BASE_URL=https://support.tinkerpro.io
-/// A value the user enters on the connect screen always takes precedence.
 const String _kDefaultBaseUrl = String.fromEnvironment(
   'TPS_BASE_URL',
   defaultValue: 'https://support.tinkerpro.io',
 );
 
-/// Thin wrapper around `api.php` on the TinkerPro Support backend.
-///
-/// The backend identifies authenticated users via the PHP session cookie, so
-/// after every request we capture the Set-Cookie header and replay it on the
-/// next one. The server URL and cookie persist across app launches.
+class UploadTimeoutException implements Exception {
+  UploadTimeoutException(this.limit);
+
+  final Duration limit;
+
+  @override
+  String toString() =>
+      'Upload stalled — no reply within ${limit.inMinutes} min.';
+}
+
 class ApiClient {
   ApiClient._(
     this._prefs,
@@ -32,6 +34,9 @@ class ApiClient {
   static const _kUserIdKey = 'session_user_id';
   static const _kUsernameKey = 'session_username';
   static const _kPermissionsKey = 'session_permissions';
+  static const _kUserRoleKey = 'session_user_role';
+  static const _kHiddenFeaturesKey = 'session_hidden_features';
+  static const _kRememberedEmailKey = 'login_remembered_email';
 
   final SharedPreferences _prefs;
   String _baseUrl;
@@ -57,8 +62,7 @@ class ApiClient {
     try {
       final decoded = jsonDecode(stored);
       if (decoded is Map) {
-        return decoded
-            .map((k, v) => MapEntry(k.toString(), v == true));
+        return decoded.map((k, v) => MapEntry(k.toString(), v == true));
       }
     } catch (_) {}
     return <String, bool>{};
@@ -68,44 +72,54 @@ class ApiClient {
   bool get hasBaseUrl => _baseUrl.isNotEmpty;
   bool get hasSession => _cookie.isNotEmpty;
 
-  /// Authenticated user id captured at login time. Survives app restarts
-  /// alongside the cookie so the chat layer doesn't need an extra
-  /// roundtrip to learn who's signed in.
   int? get userId => _userId;
 
-  /// Authenticated username captured at login time — surfaced in the
-  /// chat header so the active identity is unambiguous when an admin
-  /// switches accounts on the device.
   String? get username => _username;
 
-  /// Feature permissions captured at login (and refreshed via
-  /// `getMobileAuthSession`). Mirrors the web app's
-  /// `$_SESSION['permissions']` map so the UI can hide features the user
-  /// isn't entitled to — e.g. the Task screen. Persists across launches so
-  /// a warm start doesn't have to wait on the network to gate the UI.
   Map<String, bool> get permissions => Map.unmodifiable(_permissions);
 
-  /// Whether the signed-in user is entitled to [feature] (e.g. `'task'`).
-  /// Unknown / absent features are treated as not-permitted, matching the
-  /// web sidebar's `permissions['task'] == 1` checks.
   bool hasPermission(String feature) => _permissions[feature] == true;
+
+  Set<String> get hiddenFeatures =>
+      (_prefs.getStringList(_kHiddenFeaturesKey) ?? const <String>[]).toSet();
+
+  Future<void> setHiddenFeatures(Iterable<String> keys) async {
+    final list = keys.where((k) => k.trim().isNotEmpty).toSet().toList()
+      ..sort();
+    if (list.isEmpty) {
+      await _prefs.remove(_kHiddenFeaturesKey);
+    } else {
+      await _prefs.setStringList(_kHiddenFeaturesKey, list);
+    }
+  }
+
+  bool canAccess(String feature, [String? permission]) {
+    if (hiddenFeatures.contains(feature)) return false;
+    if (permission == null) return true;
+    return hasPermission(permission);
+  }
+
+  String get rememberedEmail => _prefs.getString(_kRememberedEmailKey) ?? '';
+
+  Future<void> setRememberedEmail(String? email) async {
+    final value = (email ?? '').trim();
+    if (value.isEmpty) {
+      await _prefs.remove(_kRememberedEmailKey);
+    } else {
+      await _prefs.setString(_kRememberedEmailKey, value);
+    }
+  }
 
   Future<void> setBaseUrl(String value) async {
     _baseUrl = value.trim().replaceAll(RegExp(r'/+$'), '');
     await _prefs.setString(_kBaseUrlKey, _baseUrl);
   }
 
-  /// Forget the configured server so the app returns to the server-config
-  /// screen and the live default applies on next entry. Device-scoped, so
-  /// deliberately kept out of [clearSession]. Pair with [clearSession] when
-  /// switching servers, since a session cookie never crosses servers.
   Future<void> clearBaseUrl() async {
     _baseUrl = '';
     await _prefs.remove(_kBaseUrlKey);
   }
 
-  /// Persist the authenticated user id. Called by AuthService.login after
-  /// a successful login (and any other endpoint that reliably returns it).
   Future<void> setUserId(int? id) async {
     _userId = id;
     if (id == null) {
@@ -124,9 +138,29 @@ class ApiClient {
     }
   }
 
-  /// Persist the user's feature permissions. Called by AuthService after a
-  /// successful login and whenever `getMobileAuthSession` returns a fresh
-  /// map, so client-side gating stays in step with the server.
+  String get userRole => _prefs.getString(_kUserRoleKey) ?? '';
+
+  bool get isSuperAdmin => userRole.trim().toLowerCase() == 'super_admin';
+
+  bool get canManageEmployment {
+    if (!hasSession) return false;
+    if (hiddenFeatures.contains('employment')) return false;
+    final role = userRole.trim().toLowerCase();
+    if (role == 'super_admin') return true;
+    if (!hasPermission('user')) return false;
+    if (!_permissions.containsKey('employmentInfo')) return role == 'admin';
+    return hasPermission('employmentInfo');
+  }
+
+  Future<void> setUserRole(String? role) async {
+    final value = (role ?? '').trim();
+    if (value.isEmpty) {
+      await _prefs.remove(_kUserRoleKey);
+    } else {
+      await _prefs.setString(_kUserRoleKey, value);
+    }
+  }
+
   Future<void> setPermissions(Map<String, bool> perms) async {
     _permissions = Map<String, bool>.from(perms);
     if (_permissions.isEmpty) {
@@ -136,24 +170,17 @@ class ApiClient {
     }
   }
 
-  /// User-scoped SharedPreferences keys that must be wiped when an account
-  /// changes. Anything device-scoped (e.g. `server_base_url`) is excluded.
-  /// Centralised here so a future feature can register its keys without
-  /// bug-hunting across the app for every "logout doesn't really logout"
-  /// edge case.
   static const _kUserScopedKeys = <String>[
     _kCookieKey,
     _kUserIdKey,
     _kUsernameKey,
     _kPermissionsKey,
+    _kUserRoleKey,
+    _kHiddenFeaturesKey,
     'notif_last_lead_id',
     'notif_last_customer_id',
   ];
 
-  /// Idempotent: wipe every per-user value from local state. Called on
-  /// both logout *and* the first step of login, so a stale cookie /
-  /// notification cursor / cached user id from a previous account can
-  /// never bleed through into a new session.
   Future<void> clearSession() async {
     _cookie = '';
     _userId = null;
@@ -176,55 +203,66 @@ class ApiClient {
     };
   }
 
-  /// Cookie header for use by callers that need to fetch authed binary
-  /// content outside of [get] / [post] (e.g. CachedNetworkImage for chat
-  /// attachments). Empty map when no session is active.
   Map<String, String> authHeaders() {
     return _cookie.isEmpty ? const {} : <String, String>{'Cookie': _cookie};
   }
 
-  /// Full GET URL for an `api.php?action=...` action. Handy for image / file
-  /// loaders that need a `String` URL rather than a [Uri].
   String actionUrl(String action, [Map<String, String>? query]) {
     return _uri(action, query).toString();
+  }
+
+  static Map<String, String> _parseCookieJar(String stored) {
+    final jar = <String, String>{};
+    for (final part in stored.split(';')) {
+      final pair = part.trim();
+      final eq = pair.indexOf('=');
+      if (eq <= 0) continue;
+      jar[pair.substring(0, eq)] = pair.substring(eq + 1);
+    }
+    return jar;
   }
 
   Future<void> _absorbCookie(http.Response response) async {
     final setCookie = response.headers['set-cookie'];
     if (setCookie == null || setCookie.isEmpty) return;
 
-    // The http package combines multiple Set-Cookie headers into one
-    // comma-joined string. A successful PHP login emits MULTIPLE
-    // `PHPSESSID=...` Set-Cookie entries:
-    //   1. one from `session_start()` at the top of api.php (the
-    //      pre-login, anonymous session id),
-    //   2. one from `session_regenerate_id(true)` after auth succeeds
-    //      (the new, logged-in session id),
-    //   3. one from the explicit `setcookie(session_name(), ...)` in
-    //      bindSession() with the remember-me lifetime.
-    //
-    // Per RFC 6265 the LAST one wins. Picking the first leaves us with
-    // an anonymous cookie that the server will reject as Unauthorized.
-    final allSessIds = RegExp(r'PHPSESSID=([^;,\s]+)')
-        .allMatches(setCookie)
-        .toList();
-    if (allSessIds.isNotEmpty) {
-      _cookie = 'PHPSESSID=${allSessIds.last.group(1)}';
-      await _prefs.setString(_kCookieKey, _cookie);
-      return;
+    final jar = _parseCookieJar(_cookie);
+    for (final raw in setCookie.split(RegExp(r',(?=\s*[A-Za-z0-9_\-]+=)'))) {
+      final segments = raw.split(';');
+      final pair = segments.first.trim();
+      final eq = pair.indexOf('=');
+      if (eq <= 0) continue;
+      final name = pair.substring(0, eq);
+      final value = pair.substring(eq + 1);
+      final expired =
+          value.isEmpty ||
+          value == 'deleted' ||
+          segments.skip(1).any((a) {
+            final attr = a.trim().toLowerCase();
+            return attr == 'max-age=0' || attr.startsWith('max-age=-');
+          });
+      if (expired) {
+        jar.remove(name);
+      } else {
+        jar[name] = value;
+      }
     }
 
-    // Legacy fallback — first name=value pair before any attribute.
-    final firstPair = setCookie.split(';').first.trim();
-    if (firstPair.isEmpty) return;
-    _cookie = firstPair;
-    await _prefs.setString(_kCookieKey, _cookie);
+    final next = jar.entries.map((e) => '${e.key}=${e.value}').join('; ');
+    if (next == _cookie) return;
+    _cookie = next;
+    if (next.isEmpty) {
+      await _prefs.remove(_kCookieKey);
+    } else {
+      await _prefs.setString(_kCookieKey, next);
+    }
   }
 
-  Future<Map<String, dynamic>> get(String action,
-      [Map<String, String>? query]) async {
-    final response =
-        await http.get(_uri(action, query), headers: _headers());
+  Future<Map<String, dynamic>> get(
+    String action, [
+    Map<String, String>? query,
+  ]) async {
+    final response = await http.get(_uri(action, query), headers: _headers());
     await _absorbCookie(response);
     return _decode(response);
   }
@@ -242,11 +280,21 @@ class ApiClient {
     return _decode(response);
   }
 
-  /// POST to a non-`api.php` script (e.g. `task.php`, `projects.php`). The
-  /// admin webapp exposes most of the task-feature endpoints as AJAX POSTs
-  /// against those files (not via the api.php action dispatcher), so this
-  /// is the entry point the Flutter TaskService uses for them. Same
-  /// cookie auth + JSON decode as `post()`.
+  Future<Map<String, dynamic>> postBytes(
+    String action, {
+    required List<int> bytes,
+    Map<String, String>? query,
+    String contentType = 'application/octet-stream',
+  }) async {
+    final response = await http.post(
+      _uri(action, query),
+      headers: {..._headers(), 'Content-Type': contentType},
+      body: bytes,
+    );
+    await _absorbCookie(response);
+    return _decode(response);
+  }
+
   Future<Map<String, dynamic>> postPath(
     String path, {
     Map<String, String>? body,
@@ -261,45 +309,32 @@ class ApiClient {
     return _decode(response);
   }
 
-  /// GET a non-`api.php` script. Some admin endpoints (e.g. `task-poll.php`)
-  /// live outside the action dispatcher; this is the GET counterpart to
-  /// [postPath]. Same cookie auth + JSON decode.
   Future<Map<String, dynamic>> getPath(
     String path, [
     Map<String, String>? query,
   ]) async {
     final cleanPath = path.replaceAll(RegExp(r'^/+'), '');
-    final uri = Uri.parse('$_baseUrl/$cleanPath')
-        .replace(queryParameters: query);
+    final uri = Uri.parse(
+      '$_baseUrl/$cleanPath',
+    ).replace(queryParameters: query);
     final response = await http.get(uri, headers: _headers());
     await _absorbCookie(response);
     return _decode(response);
   }
 
-  /// POST a raw JSON body to an `api.php?action=...` endpoint, for handlers
-  /// that read `json_decode(file_get_contents('php://input'))` instead of
-  /// `$_POST` (e.g. file_delete_collection / file_delete_item). Sends
-  /// `Content-Type: application/json`. Cookie auth + JSON decode as [post].
   Future<Map<String, dynamic>> postJson(
     String action, {
     Map<String, dynamic>? body,
   }) async {
     final response = await http.post(
       _uri(action),
-      headers: {
-        ..._headers(),
-        'Content-Type': 'application/json',
-      },
+      headers: {..._headers(), 'Content-Type': 'application/json'},
       body: jsonEncode(body ?? const {}),
     );
     await _absorbCookie(response);
     return _decode(response);
   }
 
-  /// Multipart POST to an `api.php?action=...` endpoint, for handlers that
-  /// expect `multipart/form-data` (image / file uploads). [fields] are the
-  /// plain text form fields; [files] maps a form field name to a local file
-  /// path. Cookie auth + JSON decode match [post].
   Future<Map<String, dynamic>> postMultipart(
     String action, {
     Map<String, String>? fields,
@@ -308,7 +343,6 @@ class ApiClient {
     return _sendMultipart(_uri(action), fields: fields, files: files);
   }
 
-  /// Multipart POST to a non-`api.php` script (e.g. the pricing facade).
   Future<Map<String, dynamic>> postPathMultipart(
     String path, {
     Map<String, String>? query,
@@ -316,15 +350,12 @@ class ApiClient {
     Map<String, String>? files,
   }) async {
     final cleanPath = path.replaceAll(RegExp(r'^/+'), '');
-    final uri = Uri.parse('$_baseUrl/$cleanPath')
-        .replace(queryParameters: query);
+    final uri = Uri.parse(
+      '$_baseUrl/$cleanPath',
+    ).replace(queryParameters: query);
     return _sendMultipart(uri, fields: fields, files: files);
   }
 
-  /// Multipart POST that can attach several files under the SAME field name
-  /// (e.g. `files[]`), which PHP receives as an array in `$_FILES`. Used by the
-  /// BIR document-extraction endpoint (`client-multidoc-extract.php`). [files]
-  /// is a list of (field, localPath) pairs.
   Future<Map<String, dynamic>> postPathMultipartFiles(
     String path, {
     Map<String, String>? query,
@@ -332,8 +363,9 @@ class ApiClient {
     List<({String field, String path})> files = const [],
   }) async {
     final cleanPath = path.replaceAll(RegExp(r'^/+'), '');
-    final uri = Uri.parse('$_baseUrl/$cleanPath')
-        .replace(queryParameters: query);
+    final uri = Uri.parse(
+      '$_baseUrl/$cleanPath',
+    ).replace(queryParameters: query);
     final request = http.MultipartRequest('POST', uri);
     if (_cookie.isNotEmpty) request.headers['Cookie'] = _cookie;
     request.headers['Accept'] = 'application/json';
@@ -342,10 +374,47 @@ class ApiClient {
       if (f.path.isEmpty) continue;
       request.files.add(await http.MultipartFile.fromPath(f.field, f.path));
     }
-    final streamed = await request.send();
-    final response = await http.Response.fromStream(streamed);
+    final response = await _finishMultipart(request);
     await _absorbCookie(response);
     return _decode(response);
+  }
+
+  Uri pathUri(String path, [Map<String, String>? query]) {
+    final cleanPath = path.replaceAll(RegExp(r'^/+'), '');
+    return Uri.parse('$_baseUrl/$cleanPath').replace(queryParameters: query);
+  }
+
+  Future<http.Response> rawGet(Uri uri, {bool json = true}) async {
+    final response = await http.get(
+      uri,
+      headers: json ? _headers() : authHeaders(),
+    );
+    await _absorbCookie(response);
+    return response;
+  }
+
+  Future<http.Response> rawPostForm(Uri uri, Map<String, String> body) async {
+    final response = await http.post(uri, headers: _headers(), body: body);
+    await _absorbCookie(response);
+    return response;
+  }
+
+  Future<http.Response> rawPostMultipart(
+    Uri uri, {
+    Map<String, String>? fields,
+    List<({String field, String path})> files = const [],
+  }) async {
+    final request = http.MultipartRequest('POST', uri);
+    if (_cookie.isNotEmpty) request.headers['Cookie'] = _cookie;
+    request.headers['Accept'] = 'application/json';
+    if (fields != null) request.fields.addAll(fields);
+    for (final f in files) {
+      if (f.path.isEmpty) continue;
+      request.files.add(await http.MultipartFile.fromPath(f.field, f.path));
+    }
+    final response = await _finishMultipart(request);
+    await _absorbCookie(response);
+    return response;
   }
 
   Future<Map<String, dynamic>> _sendMultipart(
@@ -360,20 +429,35 @@ class ApiClient {
     if (files != null) {
       for (final entry in files.entries) {
         if (entry.value.isEmpty) continue;
-        request.files
-            .add(await http.MultipartFile.fromPath(entry.key, entry.value));
+        request.files.add(
+          await http.MultipartFile.fromPath(entry.key, entry.value),
+        );
       }
     }
-    final streamed = await request.send();
-    final response = await http.Response.fromStream(streamed);
+    final response = await _finishMultipart(request);
     await _absorbCookie(response);
     return _decode(response);
+  }
+
+  Future<http.Response> _finishMultipart(http.MultipartRequest request) async {
+    final length = request.contentLength;
+    final budget = Duration(seconds: 60 + (length / (32 * 1024)).ceil());
+    final capped = budget > const Duration(minutes: 30)
+        ? const Duration(minutes: 30)
+        : budget;
+    try {
+      final streamed = await request.send().timeout(capped);
+      return await http.Response.fromStream(streamed).timeout(capped);
+    } on TimeoutException {
+      throw UploadTimeoutException(capped);
+    }
   }
 
   Map<String, dynamic> _decode(http.Response response) {
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw HttpException(
-        'HTTP ${response.statusCode} from ${response.request?.url}',
+        _messageFromBody(response.body) ??
+            'HTTP ${response.statusCode} from ${response.request?.url}',
       );
     }
     final trimmed = response.body.trim();
@@ -393,4 +477,19 @@ class HttpException implements Exception {
   final String message;
   @override
   String toString() => message;
+}
+
+String? _messageFromBody(String body) {
+  final trimmed = body.trim();
+  if (trimmed.isEmpty) return null;
+  try {
+    final decoded = jsonDecode(trimmed);
+    if (decoded is Map) {
+      final message = decoded['message'];
+      if (message is String && message.trim().isNotEmpty) {
+        return message.trim();
+      }
+    }
+  } catch (_) {}
+  return null;
 }

@@ -53,41 +53,46 @@ class IncomingCallEvents {
     // has no handler, so subscribing throws MissingPluginException (reported
     // by the services library, not deliverable to onError). Skip it entirely.
     if (!Platform.isAndroid && !Platform.isIOS) return;
-    _sub = FlutterCallkitIncoming.onEvent.listen((event) {
-      if (event == null) return;
-      final body = event.body;
-      if (body is! Map) return;
-      final extra = body['extra'];
-      if (extra is! Map) return;
-      // Only events we tagged ourselves carry call_id in extra. CallKit's
-      // own outgoing-call events (and iOS PushKit ones in Phase 2) won't.
-      final callId = (extra['call_id'] ?? '').toString();
-      if (callId.isEmpty) return;
+    _sub = FlutterCallkitIncoming.onEvent.listen(
+      (event) {
+        if (event == null) return;
+        final body = event.body;
+        if (body is! Map) return;
+        final extra = body['extra'];
+        if (extra is! Map) return;
+        // Only events we tagged ourselves carry call_id in extra. CallKit's
+        // own outgoing-call events (and iOS PushKit ones in Phase 2) won't.
+        final callId = (extra['call_id'] ?? '').toString();
+        if (callId.isEmpty) return;
 
-      final action = switch (event.event) {
-        Event.actionCallAccept => IncomingCallAction.accept,
-        Event.actionCallDecline => IncomingCallAction.decline,
-        Event.actionCallTimeout => IncomingCallAction.timeout,
-        Event.actionCallEnded => IncomingCallAction.ended,
-        _ => null,
-      };
-      if (action == null) return;
+        final action = switch (event.event) {
+          Event.actionCallAccept => IncomingCallAction.accept,
+          Event.actionCallDecline => IncomingCallAction.decline,
+          Event.actionCallTimeout => IncomingCallAction.timeout,
+          Event.actionCallEnded => IncomingCallAction.ended,
+          _ => null,
+        };
+        if (action == null) return;
 
-      _controller.add(IncomingCallEvent(
-        action: action,
-        callId: callId,
-        callerId: int.tryParse((extra['caller_id'] ?? '').toString()) ?? 0,
-        callerName: (extra['caller_name'] ?? '').toString(),
-        media: (extra['media'] ?? 'voice').toString(),
-      ));
-    }, onError: (Object e) {
-      // The CallKit EventChannel can throw MissingPluginException while it's
-      // (re)activating — most commonly right after a hot restart, when the
-      // Dart side re-subscribes before the native channel is re-registered,
-      // or on platforms with no native CallKit implementation. It's transient
-      // and non-fatal, so swallow it instead of letting it surface uncaught.
-      debugPrint('[incoming_call] CallKit event stream error: $e');
-    });
+        _controller.add(
+          IncomingCallEvent(
+            action: action,
+            callId: callId,
+            callerId: int.tryParse((extra['caller_id'] ?? '').toString()) ?? 0,
+            callerName: (extra['caller_name'] ?? '').toString(),
+            media: (extra['media'] ?? 'voice').toString(),
+          ),
+        );
+      },
+      onError: (Object e) {
+        // The CallKit EventChannel can throw MissingPluginException while it's
+        // (re)activating — most commonly right after a hot restart, when the
+        // Dart side re-subscribes before the native channel is re-registered,
+        // or on platforms with no native CallKit implementation. It's transient
+        // and non-fatal, so swallow it instead of letting it surface uncaught.
+        debugPrint('[incoming_call] CallKit event stream error: $e');
+      },
+    );
   }
 
   Future<void> dispose() async {
@@ -126,52 +131,54 @@ Future<void> showIncomingCall(Map<String, dynamic> data) async {
   final media = (data['media'] ?? 'voice').toString();
   final isVideo = media == 'video';
 
-  await FlutterCallkitIncoming.showCallkitIncoming(CallKitParams(
-    id: callId,
-    nameCaller: callerName.isEmpty ? 'Unknown' : callerName,
-    appName: 'TinkerPro Support',
-    handle: callerName,
-    type: isVideo ? 1 : 0,
-    duration: 45000,
-    textAccept: 'Accept',
-    textDecline: 'Decline',
-    missedCallNotification: const NotificationParams(
-      showNotification: true,
-      isShowCallback: false,
-      subtitle: 'Missed call',
+  await FlutterCallkitIncoming.showCallkitIncoming(
+    CallKitParams(
+      id: callId,
+      nameCaller: callerName.isEmpty ? 'Unknown' : callerName,
+      appName: 'TinkerPro Support',
+      handle: callerName,
+      type: isVideo ? 1 : 0,
+      duration: 45000,
+      textAccept: 'Accept',
+      textDecline: 'Decline',
+      missedCallNotification: const NotificationParams(
+        showNotification: true,
+        isShowCallback: false,
+        subtitle: 'Missed call',
+      ),
+      extra: <String, dynamic>{
+        'call_id': callId,
+        'caller_id': (data['caller_id'] ?? '').toString(),
+        'caller_name': callerName,
+        'media': media,
+      },
+      android: const AndroidParams(
+        isCustomNotification: true,
+        isShowLogo: false,
+        ringtonePath: 'system_ringtone_default',
+        backgroundColor: '#0F172A',
+        actionColor: '#4CAF50',
+        incomingCallNotificationChannelName: 'Incoming Calls',
+        missedCallNotificationChannelName: 'Missed Calls',
+      ),
+      ios: const IOSParams(
+        iconName: 'CallKitLogo',
+        handleType: 'generic',
+        supportsVideo: true,
+        maximumCallGroups: 1,
+        maximumCallsPerCallGroup: 1,
+        audioSessionMode: 'default',
+        audioSessionActive: true,
+        audioSessionPreferredSampleRate: 44100.0,
+        audioSessionPreferredIOBufferDuration: 0.005,
+        supportsDTMF: false,
+        supportsHolding: false,
+        supportsGrouping: false,
+        supportsUngrouping: false,
+        ringtonePath: 'system_ringtone_default',
+      ),
     ),
-    extra: <String, dynamic>{
-      'call_id': callId,
-      'caller_id': (data['caller_id'] ?? '').toString(),
-      'caller_name': callerName,
-      'media': media,
-    },
-    android: const AndroidParams(
-      isCustomNotification: true,
-      isShowLogo: false,
-      ringtonePath: 'system_ringtone_default',
-      backgroundColor: '#0F172A',
-      actionColor: '#4CAF50',
-      incomingCallNotificationChannelName: 'Incoming Calls',
-      missedCallNotificationChannelName: 'Missed Calls',
-    ),
-    ios: const IOSParams(
-      iconName: 'CallKitLogo',
-      handleType: 'generic',
-      supportsVideo: true,
-      maximumCallGroups: 1,
-      maximumCallsPerCallGroup: 1,
-      audioSessionMode: 'default',
-      audioSessionActive: true,
-      audioSessionPreferredSampleRate: 44100.0,
-      audioSessionPreferredIOBufferDuration: 0.005,
-      supportsDTMF: false,
-      supportsHolding: false,
-      supportsGrouping: false,
-      supportsUngrouping: false,
-      ringtonePath: 'system_ringtone_default',
-    ),
-  ));
+  );
 }
 
 /// Tear down the CallKit sheet locally (e.g. caller hung up before we
@@ -180,5 +187,22 @@ Future<void> dismissIncomingCall(String callId) async {
   if (callId.isEmpty) return;
   try {
     await FlutterCallkitIncoming.endCall(callId);
-  } catch (_) {/* not currently shown — ignore */}
+  } catch (_) {
+    /* not currently shown — ignore */
+  }
+}
+
+/// Transition the native CallKit entry from *ringing* to *connected* once we've
+/// answered. Without this the native incoming sheet / heads-up notification can
+/// linger after the user taps Accept (it never learns the call was picked up),
+/// and its ring `duration` timeout can still fire against a live call.
+/// Idempotent and a no-op on platforms without a native CallKit implementation.
+Future<void> markIncomingCallConnected(String callId) async {
+  if (callId.isEmpty) return;
+  if (!Platform.isAndroid && !Platform.isIOS) return;
+  try {
+    await FlutterCallkitIncoming.setCallConnected(callId);
+  } catch (_) {
+    /* not a CallKit-originated call — ignore */
+  }
 }

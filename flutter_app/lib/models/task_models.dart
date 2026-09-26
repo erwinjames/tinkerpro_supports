@@ -239,7 +239,9 @@ class Subtask {
       return DateTime.tryParse(s);
     }
 
-    final List rawAss = (j['assignees'] is List) ? j['assignees'] as List : const [];
+    final List rawAss = (j['assignees'] is List)
+        ? j['assignees'] as List
+        : const [];
     return Subtask(
       id: (j['id'] as num?)?.toInt() ?? 0,
       parentTaskId: (j['parent_task_id'] as num?)?.toInt() ?? 0,

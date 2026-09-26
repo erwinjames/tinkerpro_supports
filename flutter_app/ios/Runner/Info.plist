@@ -2,14 +2,13 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Use Face ID or your fingerprint to sign in to your TinkerPro account.</string>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
 
-	<!-- Privacy strings — iOS requires every permission used at runtime
-	     to declare a human-readable reason in Info.plist. Missing any
-	     of these causes a hard crash the first time the API is invoked. -->
 	<key>NSCameraUsageDescription</key>
-	<string>TinkerPro Support needs camera access so you can attach photos to chat messages and capture receipts for your team.</string>
+	<string>TinkerPro Support needs camera access so you can scan barcodes and serial numbers, attach photos to chat messages and capture receipts for your team.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>TinkerPro Support needs photo-library access so you can attach existing images to chat messages.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
@@ -17,18 +16,12 @@
 	<key>NSMicrophoneUsageDescription</key>
 	<string>TinkerPro Support uses the microphone for voice attachments in chat (planned).</string>
 
-	<!-- Background modes for FCM push notifications. The remote-notification
-	     entitlement lets data-only chat pushes wake the app to display a
-	     local notification + chat-head equivalent (iOS does not have the
-	     Android Bubbles API; chat pushes will render as standard banners). -->
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>fetch</string>
 		<string>remote-notification</string>
 	</array>
 
-	<!-- Allow the OS to open downloaded chat attachments via the app's
-	     "share to" / "open in" handlers when needed. -->
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
 	<key>CFBundleDevelopmentRegion</key>
@@ -92,6 +85,21 @@
 		<string>UIInterfaceOrientationPortraitUpsideDown</string>
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.tinkerpro.support</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>tinkerprosupport</string>
+			</array>
+		</dict>
+	</array>
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>tinkerprochat</string>
 	</array>
 </dict>
 </plist>

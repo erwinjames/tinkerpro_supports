@@ -1,9 +1,5 @@
 import 'dart:convert';
 
-/// Tiny data-class layer. Backend returns flat JSON; these structs only need
-/// enough shape for list/detail rendering. When the wire format changes,
-/// update just the factories.
-
 class UserSession {
   UserSession({
     required this.userId,
@@ -16,25 +12,18 @@ class UserSession {
   final String username;
   final String role;
 
-  /// Feature flags mirrored from the web app's `$_SESSION['permissions']`
-  /// map (e.g. `{'task': true, 'chat': true}`). Drives client-side gating
-  /// of UI like the Task screen so mobile matches the sidebar on web.
   final Map<String, bool> permissions;
 
   bool can(String feature) => permissions[feature] == true;
 
   factory UserSession.fromJson(Map<String, dynamic> json) => UserSession(
-        userId: _asInt(json['userID'] ?? json['user_id']),
-        username: (json['username'] ?? json['user_name'] ?? '—').toString(),
-        role: (json['userRole'] ?? json['user_role'] ?? 'user').toString(),
-        permissions: _asPermissions(json['permissions']),
-      );
+    userId: _asInt(json['userID'] ?? json['user_id']),
+    username: (json['username'] ?? json['user_name'] ?? '—').toString(),
+    role: (json['userRole'] ?? json['user_role'] ?? 'user').toString(),
+    permissions: _asPermissions(json['permissions']),
+  );
 }
 
-/// Coerce the backend `permissions` payload into a `Map<String,bool>`.
-/// The value may arrive as an already-decoded map, or (defensively) as a
-/// JSON string. Truthy values from PHP can be `1`, `"1"`, `true` or
-/// `"true"`, so normalise all of them.
 Map<String, bool> _asPermissions(dynamic raw) {
   if (raw is String && raw.isNotEmpty) {
     try {
@@ -61,14 +50,8 @@ bool _asBool(dynamic v) {
   return false;
 }
 
-/// Maps 1:1 to `getMobileDashboardSummary` response.
-/// Backend returns:
-///   { success, stats: [{label, value, icon}, ...], charts: {...} }
 class DashboardSummary {
-  DashboardSummary({
-    required this.stats,
-    required this.recentActivity,
-  });
+  DashboardSummary({required this.stats, required this.recentActivity});
 
   final List<MetricStat> stats;
   final List<ActivityItem> recentActivity;
@@ -84,10 +67,12 @@ class DashboardSummary {
     Map<String, dynamic> summary,
     Map<String, dynamic> notifications,
   ) {
-    final rawStats =
-        (summary['stats'] is List) ? summary['stats'] as List : const [];
-    final rawItems =
-        (notifications['items'] is List) ? notifications['items'] as List : const [];
+    final rawStats = (summary['stats'] is List)
+        ? summary['stats'] as List
+        : const [];
+    final rawItems = (notifications['items'] is List)
+        ? notifications['items'] as List
+        : const [];
     return DashboardSummary(
       stats: rawStats
           .whereType<Map>()
@@ -111,14 +96,12 @@ class MetricStat {
   final String icon;
 
   factory MetricStat.fromJson(Map<String, dynamic> json) => MetricStat(
-        label: (json['label'] ?? '—').toString(),
-        value: _asInt(json['value']),
-        icon: (json['icon'] ?? '').toString(),
-      );
+    label: (json['label'] ?? '—').toString(),
+    value: _asInt(json['value']),
+    icon: (json['icon'] ?? '').toString(),
+  );
 }
 
-/// Matches `getMobileNotificationSummary` item shape:
-///   {id, type: 'customer'|'lead', title, subtitle}
 class ActivityItem {
   ActivityItem({
     required this.id,
@@ -132,15 +115,32 @@ class ActivityItem {
   final String type;
 
   factory ActivityItem.fromJson(Map<String, dynamic> json) => ActivityItem(
-        id: _asInt(json['id']),
-        title: (json['title'] ?? '—').toString(),
-        subtitle: (json['subtitle'] ?? '').toString(),
-        type: (json['type'] ?? 'activity').toString(),
-      );
+    id: _asInt(json['id']),
+    title: (json['title'] ?? '—').toString(),
+    subtitle: (json['subtitle'] ?? '').toString(),
+    type: (json['type'] ?? 'activity').toString(),
+  );
 }
 
-/// Row shape from `getcustomer` → `data[i]`. Backend returns every `customer`
-/// column; we snapshot the ones that appear in lists.
+const String kCustomerStatusCompleted = 'Completed';
+const String kCustomerStatusUploadPtu = 'Upload PTU';
+const String kCustomerStatusContinue = 'Continue Registration';
+const String kCustomerStatusPending = 'Pending Registration';
+
+const List<String> kCustomerStatuses = [
+  kCustomerStatusCompleted,
+  kCustomerStatusUploadPtu,
+  kCustomerStatusContinue,
+  kCustomerStatusPending,
+];
+
+String customerStatusLabel(int cStatus, int step2, int finalStep) {
+  if (finalStep == 1) return kCustomerStatusCompleted;
+  if (cStatus == 1 && step2 == 1) return kCustomerStatusUploadPtu;
+  if (cStatus == 0 && step2 == 0) return kCustomerStatusContinue;
+  return kCustomerStatusPending;
+}
+
 class CustomerBrief {
   CustomerBrief({
     required this.id,
@@ -149,7 +149,10 @@ class CustomerBrief {
     required this.branchCode,
     required this.ownerName,
     required this.address,
-    required this.status,
+    required this.cStatus,
+    required this.step2,
+    required this.finalStep,
+    required this.registrationSource,
   });
 
   final int id;
@@ -158,7 +161,15 @@ class CustomerBrief {
   final String branchCode;
   final String ownerName;
   final String address;
-  final String status; // 'Processed' | 'Submitted'
+  final int cStatus;
+  final int step2;
+  final int finalStep;
+  final String registrationSource;
+
+  String get status => customerStatusLabel(cStatus, step2, finalStep);
+
+  bool get fromClientPortal =>
+      registrationSource.trim().toLowerCase() == 'client';
 
   factory CustomerBrief.fromJson(Map<String, dynamic> json) {
     final owner = [
@@ -173,12 +184,14 @@ class CustomerBrief {
       branchCode: (json['branch_code'] ?? '').toString(),
       ownerName: owner,
       address: (json['address'] ?? '').toString(),
-      status: _asInt(json['c_status']) == 1 ? 'Processed' : 'Submitted',
+      cStatus: _asInt(json['c_status']),
+      step2: _asInt(json['step2']),
+      finalStep: _asInt(json['final_step']),
+      registrationSource: (json['registration_source'] ?? '').toString(),
     );
   }
 }
 
-/// Row shape from the bare `getleads` array. Columns match `leads` table.
 class LeadBrief {
   LeadBrief({
     required this.id,
@@ -203,21 +216,19 @@ class LeadBrief {
   final String createdAt;
 
   factory LeadBrief.fromJson(Map<String, dynamic> json) => LeadBrief(
-        id: _asInt(json['id']),
-        name: (json['name'] ?? '—').toString(),
-        email: (json['email'] ?? '').toString(),
-        phone: (json['phone'] ?? '').toString(),
-        location: (json['location'] ?? '').toString(),
-        businessType: (json['businessType'] ?? json['customBusinessType'] ?? '')
-            .toString(),
-        selectedPackage: (json['selectedPackage'] ?? '').toString(),
-        // Backend column is `notes` (plural). Tolerate both.
-        note: (json['notes'] ?? json['note'] ?? '').toString(),
-        createdAt: (json['created_at'] ?? '').toString(),
-      );
+    id: _asInt(json['id']),
+    name: (json['name'] ?? '—').toString(),
+    email: (json['email'] ?? '').toString(),
+    phone: (json['phone'] ?? '').toString(),
+    location: (json['location'] ?? '').toString(),
+    businessType: (json['businessType'] ?? json['customBusinessType'] ?? '')
+        .toString(),
+    selectedPackage: (json['selectedPackage'] ?? '').toString(),
+    note: (json['notes'] ?? json['note'] ?? '').toString(),
+    createdAt: (json['created_at'] ?? '').toString(),
+  );
 }
 
-/// Row shape from `get_tickets`. Matches `tickets` table + joined `agent_name`.
 class TicketBrief {
   TicketBrief({
     required this.id,
@@ -237,32 +248,28 @@ class TicketBrief {
   final String description;
   final String customerName;
   final String customerEmail;
-  final String status; // new | assigned | in_progress | resolved | closed
-  final String priority; // low | medium | high
+  final String status;
+  final String priority;
   final String agentName;
   final String createdAt;
   final String updatedAt;
 
-  bool get isUnresolved =>
-      status != 'resolved' && status != 'closed';
+  bool get isUnresolved => status != 'resolved' && status != 'closed';
 
   factory TicketBrief.fromJson(Map<String, dynamic> json) => TicketBrief(
-        id: _asInt(json['id']),
-        subject: (json['subject'] ?? '—').toString(),
-        description: (json['description'] ?? '').toString(),
-        customerName: (json['customer_name'] ?? '').toString(),
-        customerEmail: (json['customer_email'] ?? '').toString(),
-        status: (json['status'] ?? 'new').toString(),
-        priority: (json['priority'] ?? 'medium').toString(),
-        agentName: (json['agent_name'] ?? '').toString(),
-        createdAt: (json['created_at'] ?? '').toString(),
-        updatedAt: (json['updated_at'] ?? '').toString(),
-      );
+    id: _asInt(json['id']),
+    subject: (json['subject'] ?? '—').toString(),
+    description: (json['description'] ?? '').toString(),
+    customerName: (json['customer_name'] ?? '').toString(),
+    customerEmail: (json['customer_email'] ?? '').toString(),
+    status: (json['status'] ?? 'new').toString(),
+    priority: (json['priority'] ?? 'medium').toString(),
+    agentName: (json['agent_name'] ?? '').toString(),
+    createdAt: (json['created_at'] ?? '').toString(),
+    updatedAt: (json['updated_at'] ?? '').toString(),
+  );
 }
 
-/// One serial-number entry attached to a customer. Mirrors a
-/// `customer_serial_entries` row and the JSON element the web form posts in
-/// the `serial_entries` field.
 class SerialEntry {
   SerialEntry({
     required this.serialNumberType,
@@ -272,31 +279,29 @@ class SerialEntry {
     required this.model,
   });
 
-  final String serialNumberType; // Server | Terminal | Standalone
-  final String serverType; // Consolidator | Global (only when type == Server)
+  final String serialNumberType;
+  final String serverType;
   final String serialNumber;
   final String brand;
   final String model;
 
   factory SerialEntry.fromJson(Map<String, dynamic> json) => SerialEntry(
-        serialNumberType: (json['serial_number_type'] ?? '').toString(),
-        serverType: (json['server_type'] ?? '').toString(),
-        serialNumber: (json['serial_number'] ?? '').toString(),
-        brand: (json['brand'] ?? '').toString(),
-        model: (json['model'] ?? '').toString(),
-      );
+    serialNumberType: (json['serial_number_type'] ?? '').toString(),
+    serverType: (json['server_type'] ?? '').toString(),
+    serialNumber: (json['serial_number'] ?? '').toString(),
+    brand: (json['brand'] ?? '').toString(),
+    model: (json['model'] ?? '').toString(),
+  );
 
   Map<String, dynamic> toJson() => {
-        'serial_number_type': serialNumberType,
-        'server_type': serverType,
-        'serial_number': serialNumber,
-        'brand': brand,
-        'model': model,
-      };
+    'serial_number_type': serialNumberType,
+    'server_type': serverType,
+    'serial_number': serialNumber,
+    'brand': brand,
+    'model': model,
+  };
 }
 
-/// A document attached to a customer (`customer_documents` row). Read-only in
-/// the app — surfaced on the detail/edit screens.
 class CustomerDocument {
   CustomerDocument({
     required this.id,
@@ -308,7 +313,7 @@ class CustomerDocument {
   });
 
   final int id;
-  final String docType; // extraction_doc | valid_id | requirement
+  final String docType;
   final String originalFilename;
   final String storedFilename;
   final String mimeType;
@@ -325,9 +330,6 @@ class CustomerDocument {
       );
 }
 
-/// Metadata returned by the raw upload endpoint (`client-upload-attachment.php`
-/// → `stored_file`). Passed back to `addcustomer` inside the
-/// `document_files` / `valid_id_files` / `requirement_files` JSON arrays.
 class UploadedDoc {
   UploadedDoc({
     required this.original,
@@ -342,30 +344,24 @@ class UploadedDoc {
   final String mime;
   final int size;
 
-  /// Optional extracted data (e.g. valid-ID fields id_type/id_name/id_number/
-  /// id_birthdate) stored as `extracted_data` by the backend.
   final Map<String, dynamic>? extracted;
 
   factory UploadedDoc.fromStoredFile(Map<String, dynamic> json) => UploadedDoc(
-        original: (json['original'] ?? '').toString(),
-        stored: (json['stored'] ?? '').toString(),
-        mime: (json['mime'] ?? '').toString(),
-        size: _asInt(json['size']),
-      );
+    original: (json['original'] ?? '').toString(),
+    stored: (json['stored'] ?? '').toString(),
+    mime: (json['mime'] ?? '').toString(),
+    size: _asInt(json['size']),
+  );
 
   Map<String, dynamic> toJson() => {
-        'original': original,
-        'stored': stored,
-        'mime': mime,
-        'size': size,
-        if (extracted != null) 'extracted': extracted,
-      };
+    'original': original,
+    'stored': stored,
+    'mime': mime,
+    'size': size,
+    if (extracted != null) 'extracted': extracted,
+  };
 }
 
-/// Result of running the AI/OCR extraction endpoint
-/// (`client-multidoc-extract.php`) over uploaded BIR documents. Carries the
-/// parsed, form-ready field values plus the stored-document metadata to hand
-/// to `addcustomer`. Mirrors the prefill the web form does in customer.js.
 class ExtractionResult {
   ExtractionResult({
     this.error,
@@ -392,7 +388,7 @@ class ExtractionResult {
 
   final String? error;
   final String companyName;
-  final String tin; // formatted xxx-xxx-xxx
+  final String tin;
   final String branchCode;
   final String tinIssuanceDate;
   final String address;
@@ -401,10 +397,9 @@ class ExtractionResult {
   final String firstName;
   final String middleName;
   final String lastName;
-  final bool? isVat; // null when undetermined
-  final List<UploadedDoc> storedFiles; // extraction docs only
+  final bool? isVat;
+  final List<UploadedDoc> storedFiles;
 
-  // Valid ID (present when a valid ID was scanned alongside the BIR docs).
   final String idType;
   final String idNumber;
   final String idBirthdate;
@@ -413,8 +408,6 @@ class ExtractionResult {
   bool get ok => error == null;
 }
 
-/// Full customer row from `getCustomerbyID` — every column the intake/edit
-/// form needs, plus the joined `documents` and `serial_entries`.
 class CustomerDetail {
   CustomerDetail({
     required this.id,
@@ -444,8 +437,14 @@ class CustomerDetail {
     required this.cityCode,
     required this.cityName,
     required this.cStatus,
+    this.step2 = 0,
+    this.finalStep = 0,
+    this.registrationSource = '',
+    this.pdfFile = '',
+    this.ptuFile = '',
     required this.serialEntries,
     required this.documents,
+    this.createdAt = '',
   });
 
   final int id;
@@ -470,20 +469,30 @@ class CustomerDetail {
   final String username;
   final String password;
   final bool isVat;
-  final String provinceCode; // numeric province_code
-  final String provinceName; // province (text name)
-  final String cityCode; // numeric city_code
-  final String cityName; // city (text name)
+  final String provinceCode;
+  final String provinceName;
+  final String cityCode;
+  final String cityName;
   final int cStatus;
+  final int step2;
+  final int finalStep;
+  final String registrationSource;
+  final String pdfFile;
+  final String ptuFile;
+  final String createdAt;
   final List<SerialEntry> serialEntries;
   final List<CustomerDocument> documents;
 
-  String get ownerName => [firstName, middleName, lastName]
-      .map((e) => e.trim())
-      .where((e) => e.isNotEmpty)
-      .join(' ');
+  String get ownerName => [
+    firstName,
+    middleName,
+    lastName,
+  ].map((e) => e.trim()).where((e) => e.isNotEmpty).join(' ');
 
-  String get status => cStatus == 1 ? 'Processed' : 'Submitted';
+  String get status => customerStatusLabel(cStatus, step2, finalStep);
+
+  bool get fromClientPortal =>
+      registrationSource.trim().toLowerCase() == 'client';
 
   factory CustomerDetail.fromJson(Map<String, dynamic> json) {
     List<T> parseList<T>(dynamic raw, T Function(Map<String, dynamic>) f) {
@@ -507,8 +516,8 @@ class CustomerDetail {
       ptu: (json['ptu'] ?? '').toString(),
       posDateIssued: _cleanDate(json['pos_date_issued']),
       invoiceNumber: (json['invoice_number'] ?? '').toString(),
-      softwareName:
-          (json['softwarename'] ?? json['software_name'] ?? '').toString(),
+      softwareName: (json['softwarename'] ?? json['software_name'] ?? '')
+          .toString(),
       accNumber: (json['acc_num'] ?? json['acc_number'] ?? '').toString(),
       serialNumber: (json['serial_number'] ?? '').toString(),
       firstName: (json['first_name'] ?? '').toString(),
@@ -523,55 +532,57 @@ class CustomerDetail {
       cityCode: _cleanCode(json['city_code']),
       cityName: (json['city'] ?? '').toString(),
       cStatus: _asInt(json['c_status']),
+      step2: _asInt(json['step2']),
+      finalStep: _asInt(json['final_step']),
+      registrationSource: (json['registration_source'] ?? '').toString(),
+      pdfFile: (json['pdf_file'] ?? '').toString(),
+      ptuFile: (json['ptu_file'] ?? '').toString(),
+      createdAt: (json['created_at'] ?? '').toString(),
       serialEntries: parseList(json['serial_entries'], SerialEntry.fromJson),
       documents: parseList(json['documents'], CustomerDocument.fromJson),
     );
   }
 }
 
-/// PSGC province from `ph-json/province.json`.
 class Province {
   Province({required this.code, required this.name});
   final String code;
   final String name;
   factory Province.fromJson(Map<String, dynamic> json) => Province(
-        code: (json['province_code'] ?? '').toString(),
-        name: (json['province_name'] ?? '').toString(),
-      );
+    code: (json['province_code'] ?? '').toString(),
+    name: (json['province_name'] ?? '').toString(),
+  );
 }
 
-/// PSGC city/municipality from `ph-json/city.json`.
 class City {
   City({required this.code, required this.name, required this.provinceCode});
   final String code;
   final String name;
   final String provinceCode;
   factory City.fromJson(Map<String, dynamic> json) => City(
-        code: (json['city_code'] ?? '').toString(),
-        name: (json['city_name'] ?? '').toString(),
-        provinceCode: (json['province_code'] ?? '').toString(),
-      );
+    code: (json['city_code'] ?? '').toString(),
+    name: (json['city_name'] ?? '').toString(),
+    provinceCode: (json['province_code'] ?? '').toString(),
+  );
 }
 
-/// Outcome of a create/update call to the customer endpoints.
 class CustomerSaveResult {
-  CustomerSaveResult({required this.ok, required this.message, this.customerId});
+  CustomerSaveResult({
+    required this.ok,
+    required this.message,
+    this.customerId,
+  });
   final bool ok;
   final String message;
   final int? customerId;
 }
 
-/// Normalise a date column that may arrive as null, empty, or a zero-date
-/// (`0000-00-00`) into '' — otherwise keep the `YYYY-MM-DD` prefix.
 String _cleanDate(Object? value) {
   final s = (value ?? '').toString().trim();
   if (s.isEmpty || s.startsWith('0000')) return '';
-  // Drop any time component so it round-trips cleanly through the date picker.
   return s.split(' ').first.split('T').first;
 }
 
-/// Coerce a numeric PSGC code column that may arrive as int/num/string into a
-/// plain string, mapping null/0 to ''.
 String _cleanCode(Object? value) {
   if (value == null) return '';
   final s = value.toString().trim();

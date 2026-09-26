@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/rem_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/reminders_widget_bg"
+    android:orientation="vertical"
+    android:padding="14dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <ImageView
+            android:layout_width="22dp"
+            android:layout_height="22dp"
+            android:contentDescription="@null"
+            android:src="@drawable/reminders_widget_icon" />
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:layout_weight="1"
+            android:maxLines="1"
+            android:text="Reminders"
+            android:textColor="#FF0C233E"
+            android:textSize="16sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/rem_badge"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:background="@drawable/reminders_widget_badge"
+            android:minWidth="24dp"
+            android:gravity="center"
+            android:paddingStart="8dp"
+            android:paddingTop="2dp"
+            android:paddingEnd="8dp"
+            android:paddingBottom="2dp"
+            android:textColor="#FFFFFFFF"
+            android:textSize="12sp"
+            android:textStyle="bold"
+            android:visibility="gone" />
+
+        <ImageView
+            android:id="@+id/rem_refresh"
+            android:layout_width="32dp"
+            android:layout_height="32dp"
+            android:layout_marginStart="6dp"
+            android:contentDescription="Refresh reminders"
+            android:padding="5dp"
+            android:src="@drawable/reminders_widget_refresh" />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/rem_summary"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="2dp"
+        android:maxLines="2"
+        android:ellipsize="end"
+        android:text="Open TinkerPro Support to load your reminders"
+        android:textColor="#FFB0530A"
+        android:textSize="12sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:id="@+id/rem_line_0"
+        style="@style/RemindersWidgetLine"
+        android:layout_marginTop="8dp" />
+
+    <TextView
+        android:id="@+id/rem_line_1"
+        style="@style/RemindersWidgetLine" />
+
+    <TextView
+        android:id="@+id/rem_line_2"
+        style="@style/RemindersWidgetLine" />
+
+    <TextView
+        android:id="@+id/rem_line_3"
+        style="@style/RemindersWidgetLine" />
+
+    <TextView
+        android:id="@+id/rem_updated"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:maxLines="1"
+        android:textColor="#FF8A97A8"
+        android:textSize="11sp"
+        android:visibility="gone" />
+</LinearLayout>

@@ -1,10 +1,3 @@
-/// Projects view — mirror of the admin web's Projects board, condensed
-/// into a vertical list of cards grouped by category. Phase 4 of the
-/// task port.
-///
-/// Tapping a project navigates back to the Tasks view filtered by that
-/// project's id via the [onOpenProject] callback (TaskListScreen plumbs
-/// it into its own listTasks call).
 library;
 
 import 'dart:async';
@@ -14,6 +7,7 @@ import 'package:flutter/material.dart';
 import '../models/task_models.dart';
 import '../services/task_service.dart';
 import '../theme.dart';
+import '../widgets/premium.dart';
 
 class ProjectListScreen extends StatefulWidget {
   const ProjectListScreen({
@@ -81,33 +75,36 @@ class _ProjectListScreenState extends State<ProjectListScreen> {
       if (sig == _lastSig) return;
       _lastSig = sig;
       setState(() => _future = Future.value(fresh));
-    } catch (_) {/* swallow; refresh button still works */}
+    } catch (_) {}
   }
 
   Future<void> _toggleStar(Project p) async {
-    // Optimistic: flip the star locally so the tap feels immediate.
-    final fresh = (await _future).map((q) => q.id == p.id
-        ? Project(
-            id: q.id,
-            name: q.name,
-            category: q.category,
-            color: q.color,
-            starred: !q.starred,
-            archived: q.archived,
-            taskCount: q.taskCount,
-            ownerId: q.ownerId,
-            ownerName: q.ownerName,
-            updatedAt: q.updatedAt,
-          )
-        : q).toList();
+    final fresh = (await _future)
+        .map(
+          (q) => q.id == p.id
+              ? Project(
+                  id: q.id,
+                  name: q.name,
+                  category: q.category,
+                  color: q.color,
+                  starred: !q.starred,
+                  archived: q.archived,
+                  taskCount: q.taskCount,
+                  ownerId: q.ownerId,
+                  ownerName: q.ownerName,
+                  updatedAt: q.updatedAt,
+                )
+              : q,
+        )
+        .toList();
     setState(() => _future = Future.value(fresh));
     try {
       await widget.service.toggleProjectStar(p.id, !p.starred);
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Star failed: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Star failed: $e')));
       _reload();
     }
   }
@@ -115,20 +112,14 @@ class _ProjectListScreenState extends State<ProjectListScreen> {
   @override
   Widget build(BuildContext context) {
     return RefreshIndicator(
-      color: context.brand.signal,
-      backgroundColor: context.brand.surface,
       onRefresh: _reload,
       child: FutureBuilder<List<Project>>(
         future: _future,
         builder: (context, snap) {
           if (snap.connectionState == ConnectionState.waiting) {
-            return Center(
-              child: SizedBox(
-                width: 20,
-                height: 20,
-                child: CircularProgressIndicator(
-                    strokeWidth: 2, color: context.brand.signal),
-              ),
+            return const SkeletonList(
+              count: 6,
+              padding: EdgeInsets.fromLTRB(20, 4, 20, 20),
             );
           }
           if (snap.hasError) {
@@ -136,25 +127,14 @@ class _ProjectListScreenState extends State<ProjectListScreen> {
               physics: const AlwaysScrollableScrollPhysics(),
               padding: const EdgeInsets.fromLTRB(20, 40, 20, 20),
               children: [
-                Center(
-                  child: Column(
-                    children: [
-                      Icon(Icons.error_outline,
-                          size: 36, color: context.brand.paperDim),
-                      const SizedBox(height: 12),
-                      Text(
-                        'Could not load projects',
-                        style: Theme.of(context).textTheme.titleMedium
-                            ?.copyWith(color: context.brand.paper),
-                      ),
-                      const SizedBox(height: 6),
-                      Text(
-                        snap.error.toString(),
-                        textAlign: TextAlign.center,
-                        style: Theme.of(context).textTheme.bodySmall
-                            ?.copyWith(color: context.brand.paperDim),
-                      ),
-                    ],
+                EmptyState(
+                  label: 'Could not load projects',
+                  hint: snap.error.toString(),
+                  icon: Icons.error_outline_rounded,
+                  action: OutlinedButton.icon(
+                    onPressed: _reload,
+                    icon: const Icon(Icons.refresh_rounded, size: 18),
+                    label: const Text('Retry'),
                   ),
                 ),
               ],
@@ -165,59 +145,64 @@ class _ProjectListScreenState extends State<ProjectListScreen> {
             return ListView(
               physics: const AlwaysScrollableScrollPhysics(),
               padding: const EdgeInsets.fromLTRB(20, 40, 20, 20),
-              children: [
-                Center(
-                  child: Column(
-                    children: [
-                      Icon(Icons.folder_open_outlined,
-                          size: 36, color: context.brand.paperDim),
-                      const SizedBox(height: 12),
-                      Text(
-                        'No projects yet',
-                        style: Theme.of(context).textTheme.titleMedium
-                            ?.copyWith(color: context.brand.paper),
-                      ),
-                    ],
-                  ),
+              children: const [
+                EmptyState(
+                  label: 'No projects yet',
+                  hint: 'Projects you own or belong to will appear here.',
+                  icon: Icons.folder_open_rounded,
                 ),
               ],
             );
           }
 
-          // Star section pinned to the top (matches the web's "Starred"
-          // pin) followed by category groupings in first-seen order.
           final starred = projects.where((p) => p.starred).toList();
           final byCategory = <String, List<Project>>{};
           for (final p in projects) {
             byCategory.putIfAbsent(p.category, () => []).add(p);
           }
+          var seq = 0;
+          Widget card(Project p) => _Rise(
+            index: seq++,
+            child: _ProjectCard(
+              project: p,
+              onTap: () => widget.onOpenProject(p),
+              onStar: () => _toggleStar(p),
+            ),
+          );
+          Widget header(String label, int count, IconData icon, Color? tone) =>
+              _Rise(
+                index: seq++,
+                child: _CategoryHeader(
+                  label: label,
+                  count: count,
+                  icon: icon,
+                  iconColor: tone,
+                ),
+              );
           return ListView(
             key: const PageStorageKey<String>('tk-project-list'),
-            padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
+            padding: const EdgeInsets.fromLTRB(20, 4, 20, 32),
             physics: const AlwaysScrollableScrollPhysics(),
             children: [
               if (starred.isNotEmpty) ...[
-                _CategoryHeader(
-                  label: 'STARRED',
-                  count: starred.length,
-                  icon: Icons.star,
-                  iconColor: const Color(0xFFE0B14C),
+                header(
+                  'Starred',
+                  starred.length,
+                  Icons.star_rounded,
+                  Brand.warning,
                 ),
-                ...starred.map((p) => _ProjectCard(
-                      project: p,
-                      onTap: () => widget.onOpenProject(p),
-                      onStar: () => _toggleStar(p),
-                    )),
-                const SizedBox(height: 24),
+                ...starred.map(card),
+                const SizedBox(height: 20),
               ],
               for (final entry in byCategory.entries) ...[
-                _CategoryHeader(label: entry.key.toUpperCase(), count: entry.value.length),
-                ...entry.value.map((p) => _ProjectCard(
-                      project: p,
-                      onTap: () => widget.onOpenProject(p),
-                      onStar: () => _toggleStar(p),
-                    )),
-                const SizedBox(height: 24),
+                header(
+                  entry.key,
+                  entry.value.length,
+                  Icons.folder_rounded,
+                  null,
+                ),
+                ...entry.value.map(card),
+                const SizedBox(height: 20),
               ],
             ],
           );
@@ -243,34 +228,25 @@ class _CategoryHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
+    final b = context.brand;
     return Padding(
       padding: const EdgeInsets.only(bottom: 10),
       child: Row(
         children: [
           if (icon != null) ...[
-            Icon(icon, size: 14, color: iconColor ?? context.brand.paperDim),
-            const SizedBox(width: 6),
+            Icon(icon, size: 16, color: iconColor ?? b.signal),
+            const SizedBox(width: 8),
           ],
-          Text(
-            label,
-            style: text.labelLarge?.copyWith(
-              letterSpacing: 2.0,
-              color: context.brand.paperDim,
+          Flexible(
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: text.titleMedium,
             ),
           ),
           const SizedBox(width: 8),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-            decoration: BoxDecoration(
-              color: context.brand.surfaceHi,
-              borderRadius: BorderRadius.circular(999),
-              border: Border.all(color: context.brand.rule),
-            ),
-            child: Text(
-              count.toString(),
-              style: text.labelSmall?.copyWith(color: context.brand.paperDim),
-            ),
-          ),
+          GlowBadge(label: count.toString(), color: iconColor ?? b.signal),
         ],
       ),
     );
@@ -291,95 +267,68 @@ class _ProjectCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
-    final railColor = _railColor(project.color);
-    return Container(
-      margin: const EdgeInsets.only(bottom: 8),
-      decoration: BoxDecoration(
-        color: context.brand.surface,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: context.brand.rule),
-      ),
-      child: Material(
-        color: Colors.transparent,
-        borderRadius: BorderRadius.circular(10),
-        child: InkWell(
-          onTap: onTap,
-          borderRadius: BorderRadius.circular(10),
-          child: Row(
-            children: [
-              // Left color rail — same accent system as the web cards.
-              Container(
-                width: 4,
-                height: 64,
-                decoration: BoxDecoration(
-                  color: railColor,
-                  borderRadius: const BorderRadius.only(
-                    topLeft: Radius.circular(10),
-                    bottomLeft: Radius.circular(10),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 12),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+    final b = context.brand;
+    final accent = _railColor(project.color);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: AppCard(
+        onTap: onTap,
+        radius: Brand.radiusLg,
+        borderColor: project.starred
+            ? Brand.warning.withValues(alpha: 0.42)
+            : null,
+        padding: const EdgeInsets.fromLTRB(14, 14, 6, 14),
+        child: Row(
+          children: [
+            IconTile(icon: Icons.folder_rounded, color: accent, size: 42),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
                     children: [
-                      Text(
-                        project.name,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: text.titleSmall?.copyWith(
-                          color: context.brand.paper,
-                          fontWeight: FontWeight.w600,
+                      Flexible(
+                        child: Text(
+                          project.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: text.titleSmall?.copyWith(color: b.paper),
                         ),
                       ),
-                      const SizedBox(height: 4),
-                      Row(
-                        children: [
-                          Icon(Icons.check_circle_outline,
-                              size: 12, color: context.brand.paperDim),
-                          const SizedBox(width: 4),
-                          Text(
+                      if (project.archived) ...[
+                        const SizedBox(width: 8),
+                        StatusPill(label: 'Archived', color: b.paperDim),
+                      ],
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      GlowBadge(
+                        label:
                             '${project.taskCount} ${project.taskCount == 1 ? "task" : "tasks"}',
-                            style: text.labelSmall
-                                ?.copyWith(color: context.brand.paperDim),
-                          ),
-                          const SizedBox(width: 12),
-                          Icon(Icons.person_outline,
-                              size: 12, color: context.brand.paperDim),
-                          const SizedBox(width: 4),
-                          Flexible(
-                            child: Text(
-                              project.ownerName,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: text.labelSmall
-                                  ?.copyWith(color: context.brand.paperDim),
-                            ),
-                          ),
-                        ],
+                        color: accent,
+                        icon: Icons.check_circle_outline_rounded,
+                      ),
+                      const SizedBox(width: 10),
+                      AppAvatar(name: project.ownerName, size: 20),
+                      const SizedBox(width: 6),
+                      Flexible(
+                        child: Text(
+                          project.ownerName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: text.bodySmall,
+                        ),
                       ),
                     ],
                   ),
-                ),
+                ],
               ),
-              IconButton(
-                onPressed: onStar,
-                tooltip:
-                    project.starred ? 'Unstar project' : 'Star project',
-                icon: Icon(
-                  project.starred ? Icons.star : Icons.star_border,
-                  size: 20,
-                  color: project.starred
-                      ? const Color(0xFFE0B14C)
-                      : context.brand.paperDim,
-                ),
-              ),
-              const SizedBox(width: 4),
-            ],
-          ),
+            ),
+            _StarButton(starred: project.starred, onTap: onStar),
+          ],
         ),
       ),
     );
@@ -388,17 +337,107 @@ class _ProjectCard extends StatelessWidget {
   static Color _railColor(ProjectColor c) {
     switch (c) {
       case ProjectColor.slate:
-        return const Color(0xFF94A3B8);
+        return const Color(0xFF64748B);
       case ProjectColor.emerald:
-        return const Color(0xFF35A776);
+        return const Color(0xFF10B981);
       case ProjectColor.amber:
-        return const Color(0xFFE0B14C);
+        return const Color(0xFFF59E0B);
       case ProjectColor.rose:
-        return const Color(0xFFE05A82);
+        return const Color(0xFFF43F5E);
       case ProjectColor.blue:
-        return const Color(0xFF7AA3E0);
+        return const Color(0xFF3B82F6);
       case ProjectColor.violet:
-        return const Color(0xFFA88AE0);
+        return const Color(0xFF8B5CF6);
     }
   }
+}
+
+class _StarButton extends StatelessWidget {
+  const _StarButton({required this.starred, required this.onTap});
+
+  final bool starred;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final b = context.brand;
+    final reduce = MediaQuery.maybeOf(context)?.disableAnimations ?? false;
+    return IconButton(
+      onPressed: onTap,
+      tooltip: starred ? 'Unstar project' : 'Star project',
+      icon: TweenAnimationBuilder<double>(
+        tween: Tween<double>(begin: starred ? 1 : 0, end: starred ? 1 : 0),
+        duration: reduce ? Duration.zero : const Duration(milliseconds: 260),
+        curve: Curves.easeOutBack,
+        builder: (_, v, _) => Transform.scale(
+          scale: 1 + v * 0.18,
+          child: Transform.rotate(
+            angle: v * 0.6,
+            child: Icon(
+              starred ? Icons.star_rounded : Icons.star_border_rounded,
+              size: 22,
+              color: Color.lerp(b.paperDim, Brand.warning, v),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _Rise extends StatefulWidget {
+  const _Rise({required this.index, required this.child});
+
+  final int index;
+  final Widget child;
+
+  @override
+  State<_Rise> createState() => _RiseState();
+}
+
+class _RiseState extends State<_Rise> with SingleTickerProviderStateMixin {
+  late final AnimationController _c = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 320),
+  );
+  late final Animation<double> _fade = CurvedAnimation(
+    parent: _c,
+    curve: Curves.easeOut,
+  );
+  late final Animation<Offset> _slide = Tween<Offset>(
+    begin: const Offset(0, 0.07),
+    end: Offset.zero,
+  ).animate(CurvedAnimation(parent: _c, curve: Curves.easeOutCubic));
+  bool _started = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_started) return;
+    _started = true;
+    if (MediaQuery.maybeOf(context)?.disableAnimations ?? false) {
+      _c.value = 1;
+      return;
+    }
+    final steps = widget.index < 0 ? 0 : (widget.index > 7 ? 7 : widget.index);
+    if (steps == 0) {
+      _c.forward();
+      return;
+    }
+    Future<void>.delayed(Duration(milliseconds: 45 * steps), () {
+      if (mounted) _c.forward();
+    });
+  }
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => FadeTransition(
+    opacity: _fade,
+    child: SlideTransition(position: _slide, child: widget.child),
+  );
 }

@@ -1,6 +1,3 @@
-// Domain model for the License Key feature. Mirrors the `getLicenseKey`
-// row shape returned by `api.php` (data: [...], total: N).
-
 class LicenseKey {
   LicenseKey({
     required this.id,
@@ -12,36 +9,43 @@ class LicenseKey {
     required this.storeAddress,
     required this.storeEmail,
     required this.createdAt,
+    this.machineType = '',
   });
 
   final int id;
   final String licenseKey;
 
-  /// 1 = trial (has an expiry), 0 = permanent.
   final int trial;
   final String? dateExpired;
 
-  /// Whether a customer has already activated this key. Used keys can't be
-  /// deleted (the backend rejects it).
   final bool isUsed;
   final String storeName;
   final String storeAddress;
   final String storeEmail;
   final String createdAt;
+  final String machineType;
 
   bool get isTrial => trial == 1;
 
   factory LicenseKey.fromJson(Map<String, dynamic> json) => LicenseKey(
-        id: _asInt(json['id']),
-        licenseKey: (json['license_key'] ?? '').toString(),
-        trial: _asInt(json['trial']),
-        dateExpired: json['date_expired']?.toString(),
-        isUsed: _asInt(json['is_used']) == 1,
-        storeName: (json['store_name'] ?? '').toString(),
-        storeAddress: (json['store_address'] ?? '').toString(),
-        storeEmail: (json['store_email'] ?? '').toString(),
-        createdAt: (json['created_at'] ?? '').toString(),
-      );
+    id: _asInt(json['id']),
+    licenseKey: (json['license_key'] ?? '').toString(),
+    trial: _asInt(json['trial']),
+    dateExpired: json['date_expired']?.toString(),
+    isUsed: _asInt(json['is_used']) == 1,
+    storeName: (json['store_name'] ?? '').toString(),
+    storeAddress: (json['store_address'] ?? '').toString(),
+    storeEmail: (json['store_email'] ?? '').toString(),
+    createdAt: (json['created_at'] ?? '').toString(),
+    machineType: _machineType(json['machine_type']),
+  );
+}
+
+String _machineType(Object? value) {
+  final v = (value ?? '').toString().trim().toLowerCase();
+  if (v == 'server') return 'Server';
+  if (v == 'terminal') return 'Terminal';
+  return '';
 }
 
 int _asInt(Object? value) {

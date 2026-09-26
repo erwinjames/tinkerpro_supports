@@ -17,12 +17,12 @@ class Credential {
   final String updatedAt;
 
   factory Credential.fromJson(Map<String, dynamic> json) => Credential(
-        id: _asInt(json['id']),
-        clientName: (json['client_name'] ?? '').toString(),
-        credentialsText: (json['credentials_text'] ?? '').toString(),
-        createdAt: (json['created_at'] ?? '').toString(),
-        updatedAt: (json['updated_at'] ?? '').toString(),
-      );
+    id: _asInt(json['id']),
+    clientName: (json['client_name'] ?? '').toString(),
+    credentialsText: (json['credentials_text'] ?? '').toString(),
+    createdAt: (json['created_at'] ?? '').toString(),
+    updatedAt: (json['updated_at'] ?? '').toString(),
+  );
 }
 
 int _asInt(Object? value) {

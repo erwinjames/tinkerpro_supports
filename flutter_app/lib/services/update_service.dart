@@ -40,10 +40,9 @@ class UpdateService {
       final currentBuild = int.tryParse(info.buildNumber) ?? 0;
 
       // Cache-bust so a freshly-published manifest isn't masked by a proxy.
-      final res = await _api.getPath(
-        'downloads/app-version.json',
-        {'t': currentBuild.toString()},
-      );
+      final res = await _api.getPath('downloads/app-version.json', {
+        't': currentBuild.toString(),
+      });
       final build = _asInt(res['build']);
       if (build <= currentBuild) return null;
 

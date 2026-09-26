@@ -1,9 +1,3 @@
-// Domain models for the "Client & Data Sheet" feature (web `client.php` /
-// `ClientFacade`, `client` table). Distinct from the BIR/`customer` feature.
-
-/// One line item in a client's invoice bundle (`client_invoice_items`). The
-/// read side (getClientbyID) returns `component_name`; the write side expects
-/// `component`.
 class ClientInvoiceItem {
   ClientInvoiceItem({
     this.itemName = '',
@@ -22,49 +16,123 @@ class ClientInvoiceItem {
   factory ClientInvoiceItem.fromJson(Map<String, dynamic> json) =>
       ClientInvoiceItem(
         itemName: (json['item_name'] ?? '').toString(),
-        component:
-            (json['component_name'] ?? json['component'] ?? '').toString(),
+        component: (json['component_name'] ?? json['component'] ?? '')
+            .toString(),
         optionValue: (json['option_value'] ?? '').toString(),
         brandName: (json['brand_name'] ?? '').toString(),
         serialNumber: (json['serial_number'] ?? '').toString(),
       );
 
   Map<String, dynamic> toJson() => {
-        'item_name': itemName,
-        'component': component,
-        'option_value': optionValue,
-        'brand_name': brandName,
-        'serial_number': serialNumber,
-      };
+    'item_name': itemName,
+    'component': component,
+    'option_value': optionValue,
+    'brand_name': brandName,
+    'serial_number': serialNumber,
+  };
 
   bool get isEmpty =>
-      component.trim().isEmpty &&
       optionValue.trim().isEmpty &&
       brandName.trim().isEmpty &&
       serialNumber.trim().isEmpty;
 }
 
-/// Row shape from `getClient` → `data[i]` (list view).
+class ClientSpecReplacement {
+  ClientSpecReplacement({
+    required this.id,
+    required this.rowKey,
+    required this.oldComponent,
+    required this.oldSerial,
+    required this.newComponent,
+    required this.newSerial,
+    required this.remarks,
+    required this.replacedByName,
+    required this.replacedAt,
+  });
+
+  final int id;
+  final String rowKey;
+  final String oldComponent;
+  final String oldSerial;
+  final String newComponent;
+  final String newSerial;
+  final String remarks;
+  final String replacedByName;
+  final String replacedAt;
+
+  factory ClientSpecReplacement.fromJson(Map<String, dynamic> json) {
+    String s(String key) => (json[key] ?? '').toString();
+    final when = s('replaced_at').trim().isNotEmpty
+        ? s('replaced_at')
+        : s('created_at');
+    return ClientSpecReplacement(
+      id: _asInt(json['id']),
+      rowKey: s('row_key'),
+      oldComponent: s('old_component'),
+      oldSerial: s('old_serial'),
+      newComponent: s('new_component'),
+      newSerial: s('new_serial'),
+      remarks: s('remarks'),
+      replacedByName: s('replaced_by_name'),
+      replacedAt: when,
+    );
+  }
+}
+
+class ClientInvoiceCheck {
+  const ClientInvoiceCheck({
+    required this.exists,
+    required this.branch,
+    required this.branchMatched,
+    required this.clientName,
+  });
+
+  final bool exists;
+  final String branch;
+  final bool branchMatched;
+  final String clientName;
+
+  static const ClientInvoiceCheck free = ClientInvoiceCheck(
+    exists: false,
+    branch: '',
+    branchMatched: true,
+    clientName: '',
+  );
+}
+
 class ClientBrief {
-  ClientBrief({required this.id, required this.name, required this.invoiceNumber});
+  ClientBrief({
+    required this.id,
+    required this.name,
+    required this.invoiceNumber,
+    this.branch = '',
+    this.birImported = false,
+  });
 
   final int id;
   final String name;
   final String invoiceNumber;
+  final String branch;
+  final bool birImported;
 
   factory ClientBrief.fromJson(Map<String, dynamic> json) => ClientBrief(
-        id: _asInt(json['id']),
-        name: (json['name'] ?? '').toString(),
-        invoiceNumber: (json['invoice_number'] ?? '').toString(),
-      );
+    id: _asInt(json['id']),
+    name: (json['name'] ?? '').toString(),
+    invoiceNumber: (json['invoice_number'] ?? '').toString(),
+    branch: (json['branch'] ?? '').toString(),
+    birImported:
+        json['bir_imported'] == true ||
+        json['bir_imported'] == 1 ||
+        json['bir_imported'] == '1',
+  );
 }
 
-/// Full `client` row from `getClientbyID` + its `invoice_items`.
 class ClientDetail {
   ClientDetail({
     required this.id,
     required this.name,
     required this.invoiceNumber,
+    required this.branch,
     required this.datePrepared,
     required this.systemUnit,
     required this.systemUnitSerial,
@@ -92,11 +160,13 @@ class ClientDetail {
     required this.registeredAddress,
     required this.isVat,
     required this.invoiceItems,
+    required this.specReplacements,
   });
 
   final int id;
   final String name;
   final String invoiceNumber;
+  final String branch;
   final String datePrepared;
   final String systemUnit;
   final String systemUnitSerial;
@@ -124,20 +194,35 @@ class ClientDetail {
   final String registeredAddress;
   final bool isVat;
   final List<ClientInvoiceItem> invoiceItems;
+  final List<ClientSpecReplacement> specReplacements;
 
   factory ClientDetail.fromJson(Map<String, dynamic> json) {
     final rawItems = json['invoice_items'];
     final items = (rawItems is List)
         ? rawItems
-            .whereType<Map>()
-            .map((e) => ClientInvoiceItem.fromJson(Map<String, dynamic>.from(e)))
-            .toList()
+              .whereType<Map>()
+              .map(
+                (e) => ClientInvoiceItem.fromJson(Map<String, dynamic>.from(e)),
+              )
+              .toList()
         : <ClientInvoiceItem>[];
+    final rawRepl = json['spec_replacements'];
+    final replacements = (rawRepl is List)
+        ? rawRepl
+              .whereType<Map>()
+              .map(
+                (e) => ClientSpecReplacement.fromJson(
+                  Map<String, dynamic>.from(e),
+                ),
+              )
+              .toList()
+        : <ClientSpecReplacement>[];
     String s(String key) => (json[key] ?? '').toString();
     return ClientDetail(
       id: _asInt(json['id']),
       name: s('name'),
       invoiceNumber: s('invoice_number'),
+      branch: s('branch'),
       datePrepared: _cleanDate(json['date_prepared']),
       systemUnit: s('system_unit'),
       systemUnitSerial: s('system_unit_serialnum'),
@@ -165,6 +250,7 @@ class ClientDetail {
       registeredAddress: s('registered_address'),
       isVat: _asInt(json['is_vat']) == 1,
       invoiceItems: items,
+      specReplacements: replacements,
     );
   }
 }

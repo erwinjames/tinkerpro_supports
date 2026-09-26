@@ -1,5 +1,54 @@
-// Domain model for the Blog Posts feature. Mirrors the `getBlogPosts`
-// row shape returned by `api.php` (data: [...], totalRecords: N).
+class BlogCategory {
+  const BlogCategory({
+    required this.id,
+    required this.name,
+    required this.slug,
+    this.description = '',
+  });
+
+  final int id;
+  final String name;
+  final String slug;
+  final String description;
+
+  factory BlogCategory.fromJson(Map<String, dynamic> json) => BlogCategory(
+    id: _asInt(json['id']),
+    name: (json['name'] ?? '').toString(),
+    slug: (json['slug'] ?? '').toString(),
+    description: (json['description'] ?? '').toString(),
+  );
+}
+
+class BlogMedia {
+  const BlogMedia({
+    required this.id,
+    required this.mediaType,
+    required this.filePath,
+    required this.url,
+  });
+
+  final int id;
+  final String mediaType;
+  final String filePath;
+  final String url;
+
+  bool get isVideo => mediaType.toLowerCase() == 'video';
+
+  factory BlogMedia.fromJson(Map<String, dynamic> json, String baseUrl) {
+    final path = (json['file_path'] ?? '').toString();
+    var url = (json['url'] ?? '').toString();
+    if (url.isEmpty || !url.startsWith('http')) {
+      final name = path.split('/').last;
+      url = name.isEmpty ? '' : '$baseUrl/uploads/$name';
+    }
+    return BlogMedia(
+      id: _asInt(json['id']),
+      mediaType: (json['media_type'] ?? '').toString(),
+      filePath: path,
+      url: url,
+    );
+  }
+}
 
 class BlogPost {
   BlogPost({
@@ -11,38 +60,127 @@ class BlogPost {
     required this.scheduledAt,
     required this.createdAt,
     required this.updatedAt,
+    this.categories = const [],
+    this.media = const [],
   });
 
   final int id;
   final String title;
   final String content;
-
-  /// 1 = draft (not yet published), 0 = published.
   final int isDraft;
-
-  /// Backend status string: 'draft' or 'published'.
   final String status;
   final String? scheduledAt;
   final String createdAt;
   final String updatedAt;
+  final List<BlogCategory> categories;
+  final List<BlogMedia> media;
 
-  bool get isDraftPost => isDraft == 1;
+  bool get isDraftPost => isDraft == 1 || status == 'draft';
 
-  /// [content] is stored as HTML. The app has no HTML renderer, so this strips
-  /// tags and decodes common entities for clean plain-text display in the
-  /// list and detail views.
-  String get plainContent => _stripHtml(content);
+  bool get isScheduled => status == 'scheduled';
 
-  factory BlogPost.fromJson(Map<String, dynamic> json) => BlogPost(
-        id: _asInt(json['id']),
-        title: (json['title'] ?? '').toString(),
-        content: (json['content'] ?? '').toString(),
-        isDraft: _asInt(json['is_draft']),
-        status: (json['status'] ?? '').toString(),
-        scheduledAt: json['scheduled_at']?.toString(),
-        createdAt: (json['created_at'] ?? '').toString(),
-        updatedAt: (json['updated_at'] ?? '').toString(),
-      );
+  String get statusLabel => isScheduled
+      ? 'Pending'
+      : isDraftPost
+      ? 'Draft'
+      : 'Published';
+
+  String get stamp =>
+      (isScheduled ? (scheduledAt ?? createdAt) : createdAt).trim();
+
+  String get stampLabel => isScheduled ? 'Scheduled' : 'Published';
+
+  String get plainContent => blogStripHtml(content);
+
+  factory BlogPost.fromJson(Map<String, dynamic> json, {String baseUrl = ''}) {
+    final rawCategories = json['categories'];
+    final rawMedia = json['media'];
+    return BlogPost(
+      id: _asInt(json['id']),
+      title: (json['title'] ?? '').toString(),
+      content: (json['content'] ?? '').toString(),
+      isDraft: _asInt(json['is_draft']),
+      status: (json['status'] ?? '').toString(),
+      scheduledAt: json['scheduled_at']?.toString(),
+      createdAt: (json['created_at'] ?? '').toString(),
+      updatedAt: (json['updated_at'] ?? '').toString(),
+      categories: rawCategories is List
+          ? rawCategories
+                .whereType<Map>()
+                .map((e) => BlogCategory.fromJson(Map<String, dynamic>.from(e)))
+                .toList()
+          : const [],
+      media: rawMedia is List
+          ? rawMedia
+                .whereType<Map>()
+                .map(
+                  (e) =>
+                      BlogMedia.fromJson(Map<String, dynamic>.from(e), baseUrl),
+                )
+                .toList()
+          : const [],
+    );
+  }
+}
+
+class BlogFeedback {
+  const BlogFeedback({
+    required this.id,
+    required this.postId,
+    required this.userName,
+    required this.userEmail,
+    required this.message,
+    required this.approved,
+    required this.createdAt,
+    required this.postTitle,
+  });
+
+  final int id;
+  final int postId;
+  final String userName;
+  final String userEmail;
+  final String message;
+  final int approved;
+  final String createdAt;
+  final String postTitle;
+
+  bool get isApproved => approved == 1;
+
+  String get reference => 'FT-${id.toString().padLeft(5, '0')}';
+
+  factory BlogFeedback.fromJson(Map<String, dynamic> json) => BlogFeedback(
+    id: _asInt(json['id']),
+    postId: _asInt(json['post_id']),
+    userName: (json['user_name'] ?? '').toString(),
+    userEmail: (json['user_email'] ?? '').toString(),
+    message: (json['message'] ?? '').toString(),
+    approved: _asInt(json['approved']),
+    createdAt: (json['created_at'] ?? '').toString(),
+    postTitle: (json['post_title'] ?? '').toString(),
+  );
+}
+
+class BlogPage {
+  const BlogPage({
+    required this.posts,
+    required this.total,
+    required this.page,
+    required this.pageSize,
+  });
+
+  final List<BlogPost> posts;
+  final int total;
+  final int page;
+  final int pageSize;
+
+  static const BlogPage empty = BlogPage(
+    posts: [],
+    total: 0,
+    page: 1,
+    pageSize: 10,
+  );
+
+  bool get hasMore => page * pageSize < total;
 }
 
 int _asInt(Object? value) {
@@ -52,16 +190,12 @@ int _asInt(Object? value) {
   return 0;
 }
 
-/// Strip HTML tags and decode the common entities so post content reads as
-/// plain text (no `<p style=…>` etc. leaking into the UI).
-String _stripHtml(String html) {
+String blogStripHtml(String html) {
   if (html.isEmpty) return '';
-  // Turn block boundaries into spaces, then drop all tags.
   var s = html
       .replaceAll(RegExp(r'<br\s*/?>', caseSensitive: false), ' ')
       .replaceAll(RegExp(r'</(p|div|h[1-6]|li|tr)>', caseSensitive: false), ' ')
       .replaceAll(RegExp(r'<[^>]+>'), ' ');
-  // Common named entities.
   const named = {
     '&nbsp;': ' ',
     '&amp;': '&',
@@ -79,11 +213,9 @@ String _stripHtml(String html) {
     '&hellip;': '…',
   };
   named.forEach((k, v) => s = s.replaceAll(k, v));
-  // Numeric entities (&#123;).
   s = s.replaceAllMapped(RegExp(r'&#(\d+);'), (m) {
     final code = int.tryParse(m.group(1)!);
     return code != null ? String.fromCharCode(code) : m.group(0)!;
   });
-  // Collapse whitespace.
   return s.replaceAll(RegExp(r'\s+'), ' ').trim();
 }

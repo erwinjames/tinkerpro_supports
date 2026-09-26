@@ -10,12 +10,12 @@ import '../services/pricing_service.dart';
 import '../theme.dart';
 import '../widgets/premium.dart';
 
-/// Pricing — native CRUD over the STANDALONE `pricing-facade.php` dispatcher.
-/// A list of plans (title + price + business type + thumbnail) with create /
-/// edit / delete. Each plan carries an image and a list of features, every
-/// feature optionally tagged with a category.
 class PricingListScreen extends StatefulWidget {
-  const PricingListScreen({super.key, required this.service, required this.api});
+  const PricingListScreen({
+    super.key,
+    required this.service,
+    required this.api,
+  });
   final PricingService service;
   final ApiClient api;
 
@@ -24,13 +24,47 @@ class PricingListScreen extends StatefulWidget {
 }
 
 class _PricingListScreenState extends State<PricingListScreen> {
+  final _searchController = TextEditingController();
   List<Pricing> _rows = const [];
   bool _loading = true;
+  String _type = '';
 
   @override
   void initState() {
     super.initState();
     _load();
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  List<String> get _typeOptions {
+    final seen = <String>{};
+    for (final r in _rows) {
+      final n = r.businessTypeName.trim();
+      if (n.isNotEmpty) seen.add(n);
+    }
+    return ['', ...seen];
+  }
+
+  int _typeCount(String t) => t.isEmpty
+      ? _rows.length
+      : _rows.where((r) => r.businessTypeName.trim() == t).length;
+
+  List<Pricing> get _visible {
+    final q = _searchController.text.trim().toLowerCase();
+    return _rows.where((r) {
+      if (_type.isNotEmpty && r.businessTypeName.trim() != _type) {
+        return false;
+      }
+      if (q.isEmpty) return true;
+      return r.title.toLowerCase().contains(q) ||
+          r.price.toLowerCase().contains(q) ||
+          r.businessTypeName.toLowerCase().contains(q);
+    }).toList();
   }
 
   Future<void> _load() async {
@@ -58,58 +92,91 @@ class _PricingListScreenState extends State<PricingListScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final b = context.brand;
+    final rows = _visible;
+    final types = _typeOptions;
     return StationScaffold(
       stationNumber: '13',
-      stationLabel: 'PRICING',
-      title: 'Pricing.',
+      stationLabel: 'Pricing',
+      title: 'Pricing',
       showBottomBrand: false,
       onBack: () => Navigator.of(context).pop(),
       trailing: StationAction(
-        icon: Icons.add,
+        icon: Icons.add_rounded,
         tooltip: 'New plan',
         onPressed: _openForm,
       ),
-      child: RefreshIndicator(
-        color: Brand.signal,
-        backgroundColor: Brand.surface,
-        onRefresh: _load,
-        child: _loading
-            ? const Center(
-                child: SizedBox(
-                  width: 20,
-                  height: 20,
-                  child: CircularProgressIndicator(
-                      strokeWidth: 2, color: Brand.signal),
-                ),
-              )
-            : _rows.isEmpty
-                ? ListView(
-                    physics: const AlwaysScrollableScrollPhysics(),
-                    children: const [
-                      SizedBox(height: 64),
-                      EmptyState(
-                        label: 'No pricing plans',
-                        hint: 'Tap + to add the first plan. Pull to refresh.',
+      subtitle: _loading ? '' : '${_rows.length} plans',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          AppSearchField(
+            controller: _searchController,
+            hint: 'Search plan, price or business type',
+            onChanged: (_) => setState(() {}),
+          ),
+          if (!_loading && types.length > 2) ...[
+            const SizedBox(height: 12),
+            ChoicePills<String>(
+              options: types,
+              value: types.contains(_type) ? _type : '',
+              onChanged: (v) => setState(() => _type = v),
+              labelOf: (t) => t.isEmpty ? 'All' : t,
+              countOf: _typeCount,
+            ),
+          ],
+          const SizedBox(height: 12),
+          Expanded(
+            child: RefreshIndicator(
+              color: b.signal,
+              backgroundColor: b.surface,
+              onRefresh: _load,
+              child: _loading
+                  ? const SkeletonList(count: 5)
+                  : rows.isEmpty
+                  ? ListView(
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      children: [
+                        const SizedBox(height: 48),
+                        EmptyState(
+                          icon: Icons.sell_rounded,
+                          label: _rows.isEmpty
+                              ? 'No pricing plans'
+                              : 'No matching plans',
+                          hint: _rows.isEmpty
+                              ? 'Tap + to add the first plan. Pull to refresh.'
+                              : 'Try a different search or filter.',
+                        ),
+                      ],
+                    )
+                  : ListView.separated(
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      padding: const EdgeInsets.only(bottom: 16),
+                      itemCount: rows.length,
+                      separatorBuilder: (_, _) => const SizedBox(height: 10),
+                      itemBuilder: (_, i) => _Entry(
+                        index: i,
+                        child: _PricingRow(
+                          row: rows[i],
+                          api: widget.api,
+                          onTap: () => _openForm(rows[i]),
+                        ),
                       ),
-                    ],
-                  )
-                : ListView.separated(
-                    physics: const AlwaysScrollableScrollPhysics(),
-                    itemCount: _rows.length,
-                    separatorBuilder: (_, _) => const Hairline(),
-                    itemBuilder: (_, i) => _PricingRow(
-                      row: _rows[i],
-                      api: widget.api,
-                      onTap: () => _openForm(_rows[i]),
                     ),
-                  ),
+            ),
+          ),
+        ],
       ),
     );
   }
 }
 
 class _PricingRow extends StatelessWidget {
-  const _PricingRow({required this.row, required this.api, required this.onTap});
+  const _PricingRow({
+    required this.row,
+    required this.api,
+    required this.onTap,
+  });
   final Pricing row;
   final ApiClient api;
   final VoidCallback onTap;
@@ -117,84 +184,178 @@ class _PricingRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
-    return InkWell(
+    final b = context.brand;
+    final featureCount = row.features.length;
+    return AppCard(
       onTap: onTap,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 16),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _Thumb(image: row.image, api: api),
-            const SizedBox(width: 14),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(row.title,
-                      style: text.titleSmall,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis),
-                  const SizedBox(height: 3),
-                  Text(
-                    row.businessTypeName.isEmpty
-                        ? 'No business type'
-                        : row.businessTypeName,
-                    style: text.bodySmall,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ],
-              ),
+      radius: Brand.radiusLg,
+      borderColor: b.signal.withValues(alpha: 0.25),
+      padding: const EdgeInsets.all(14),
+      child: Row(
+        children: [
+          ExcludeSemantics(
+            child: _ThumbFrame(
+              child: _Thumb(image: row.image, api: api),
             ),
-            const SizedBox(width: 12),
-            Text(
-              row.price.isEmpty ? '—' : row.price,
-              style: text.labelLarge?.copyWith(color: Brand.signal),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  row.title,
+                  style: text.titleSmall,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                const SizedBox(height: 6),
+                _PriceTag(value: row.price),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  children: [
+                    StatusPill(
+                      label: row.businessTypeName.isEmpty
+                          ? 'No business type'
+                          : row.businessTypeName,
+                      color: row.businessTypeName.isEmpty
+                          ? b.paperDim
+                          : Brand.info,
+                      icon: Icons.storefront_rounded,
+                    ),
+                    if (featureCount > 0)
+                      StatusPill(
+                        label: featureCount == 1
+                            ? '1 feature'
+                            : '$featureCount features',
+                        color: Brand.success,
+                        icon: Icons.check_rounded,
+                      ),
+                  ],
+                ),
+              ],
             ),
-          ],
+          ),
+          const SizedBox(width: 8),
+          Icon(Icons.chevron_right_rounded, color: b.paperDim, size: 20),
+        ],
+      ),
+    );
+  }
+}
+
+class _PriceTag extends StatelessWidget {
+  const _PriceTag({required this.value});
+
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    final b = context.brand;
+    final text = Theme.of(context).textTheme;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(Brand.radius),
+        color: b.signal.withValues(alpha: b.isDark ? 0.18 : 0.12),
+        border: Border.all(color: b.signal.withValues(alpha: 0.4)),
+      ),
+      child: Text(
+        value.isEmpty ? '—' : value,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: text.titleLarge?.copyWith(
+          color: b.signalInk,
+          fontWeight: FontWeight.w800,
+          height: 1.2,
         ),
       ),
     );
   }
 }
 
-/// 48x48 thumbnail. Falls back to a neutral placeholder when the plan has no
-/// image or the fetch fails.
+class _ThumbFrame extends StatelessWidget {
+  const _ThumbFrame({required this.child, this.radius = Brand.radiusLg});
+
+  final Widget child;
+  final double radius;
+
+  @override
+  Widget build(BuildContext context) {
+    final b = context.brand;
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(radius),
+        color: b.surfaceHi,
+        border: Border.all(color: b.rule),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: child,
+    );
+  }
+}
+
+class _Entry extends StatelessWidget {
+  const _Entry({required this.index, required this.child});
+
+  final int index;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    if (MediaQuery.maybeOf(context)?.disableAnimations ?? false) return child;
+    final start = (index.clamp(0, 5)) * 0.12;
+    return TweenAnimationBuilder<double>(
+      tween: Tween<double>(begin: 0, end: 1),
+      duration: const Duration(milliseconds: 400),
+      curve: Interval(start, 1, curve: Curves.easeOutCubic),
+      builder: (context, t, child) => Opacity(
+        opacity: t.clamp(0, 1),
+        child: Transform.translate(
+          offset: Offset(0, 14 * (1 - t)),
+          child: child,
+        ),
+      ),
+      child: child,
+    );
+  }
+}
+
 class _Thumb extends StatelessWidget {
   const _Thumb({required this.image, required this.api});
   final String image;
   final ApiClient api;
 
+  static const double _size = 72;
+
   @override
   Widget build(BuildContext context) {
+    final b = context.brand;
     final placeholder = Container(
-      width: 48,
-      height: 48,
-      decoration: BoxDecoration(
-        color: Brand.surfaceHi,
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: const Icon(Icons.local_offer, size: 20, color: Brand.paperDim),
+      width: _size,
+      height: _size,
+      color: b.tint(b.signal, 0.10),
+      child: Icon(Icons.sell_rounded, size: 26, color: b.signal),
     );
     if (image.isEmpty) return placeholder;
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(8),
-      child: CachedNetworkImage(
-        imageUrl: '${api.baseUrl}/uploads/$image',
-        httpHeaders: api.authHeaders(),
-        width: 48,
-        height: 48,
-        fit: BoxFit.cover,
-        placeholder: (_, _) => placeholder,
-        errorWidget: (_, _, _) => placeholder,
-      ),
+    return CachedNetworkImage(
+      imageUrl: '${api.baseUrl}/uploads/$image',
+      httpHeaders: api.authHeaders(),
+      width: _size,
+      height: _size,
+      fit: BoxFit.cover,
+      fadeInDuration: MediaQuery.of(context).disableAnimations
+          ? Duration.zero
+          : const Duration(milliseconds: 200),
+      placeholder: (_, _) =>
+          const Skeleton(width: _size, height: _size, radius: 0),
+      errorWidget: (_, _, _) => placeholder,
     );
   }
 }
 
-/// Add / edit form: business type dropdown, title, price (numeric), image
-/// picker, and a features editor (add/remove rows; each feature has a name +
-/// optional category dropdown). Delete is available on edit.
 class _PricingFormScreen extends StatefulWidget {
   const _PricingFormScreen({
     required this.service,
@@ -211,7 +372,7 @@ class _PricingFormScreen extends StatefulWidget {
 
 class _FeatureDraft {
   _FeatureDraft({String name = '', this.categoryId})
-      : controller = TextEditingController(text: name);
+    : controller = TextEditingController(text: name);
   final TextEditingController controller;
   int? categoryId;
 }
@@ -228,7 +389,6 @@ class _PricingFormScreenState extends State<_PricingFormScreen> {
   List<PricingCategory> _categories = const [];
   bool _loadingMeta = true;
 
-  /// Newly picked local image (null until the user picks one).
   XFile? _pickedImage;
 
   bool _saving = false;
@@ -257,7 +417,6 @@ class _PricingFormScreenState extends State<_PricingFormScreen> {
     setState(() {
       _businessTypes = types;
       _categories = cats;
-      // Drop a stale selection that isn't in the fetched list.
       if (_businessTypeId != null &&
           !types.any((t) => t.id == _businessTypeId)) {
         _businessTypeId = null;
@@ -277,7 +436,10 @@ class _PricingFormScreenState extends State<_PricingFormScreen> {
   }
 
   Future<void> _pickImage() async {
-    final x = await _picker.pickImage(source: ImageSource.gallery, imageQuality: 92);
+    final x = await _picker.pickImage(
+      source: ImageSource.gallery,
+      imageQuality: 92,
+    );
     if (x == null || !mounted) return;
     setState(() => _pickedImage = x);
   }
@@ -347,17 +509,17 @@ class _PricingFormScreenState extends State<_PricingFormScreen> {
     final ok = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
-        backgroundColor: Brand.surface,
         title: const Text('Delete plan?'),
         content: const Text('This permanently removes the pricing plan.'),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('CANCEL'),
+            child: const Text('Cancel'),
           ),
-          TextButton(
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Brand.danger),
             onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('DELETE'),
+            child: const Text('Delete'),
           ),
         ],
       ),
@@ -375,73 +537,115 @@ class _PricingFormScreenState extends State<_PricingFormScreen> {
   }
 
   void _toast(String msg) {
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text(msg.toUpperCase())));
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
   @override
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
+    final b = context.brand;
     return StationScaffold(
       stationNumber: '13',
-      stationLabel: _isEdit ? 'EDIT PLAN' : 'NEW PLAN',
-      title: _isEdit ? 'Edit plan.' : 'Add plan.',
+      stationLabel: 'Pricing',
+      title: _isEdit ? 'Edit plan' : 'Add plan',
+      subtitle: _isEdit ? widget.existing!.title : 'New pricing plan',
       showBottomBrand: false,
       onBack: () => Navigator.of(context).pop(),
-      child: _loadingMeta
-          ? const Center(
-              child: SizedBox(
-                width: 20,
-                height: 20,
-                child: CircularProgressIndicator(
-                    strokeWidth: 2, color: Brand.signal),
+      bottomBar: Material(
+        color: b.surface,
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            border: Border(top: BorderSide(color: b.rule)),
+          ),
+          child: SafeArea(
+            top: false,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),
+              child: SignalButton(
+                label: _isEdit ? 'Save changes' : 'Create plan',
+                icon: Icons.check_rounded,
+                busy: _saving,
+                onPressed: _saving || _loadingMeta ? null : _save,
               ),
-            )
+            ),
+          ),
+        ),
+      ),
+      child: _loadingMeta
+          ? const _FormSkeleton()
           : ListView(
+              padding: const EdgeInsets.only(top: 4, bottom: 16),
               children: [
-                _BusinessTypeDropdown(
-                  types: _businessTypes,
-                  value: _businessTypeId,
-                  onChanged: (v) => setState(() => _businessTypeId = v),
+                AppCard(
+                  radius: Brand.radiusLg,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      _cardTitle(text, 'Plan', Icons.sell_rounded),
+                      const SizedBox(height: 16),
+                      _BusinessTypeDropdown(
+                        types: _businessTypes,
+                        value: _businessTypeId,
+                        onChanged: (v) => setState(() => _businessTypeId = v),
+                      ),
+                      const SizedBox(height: 16),
+                      _Field(label: 'Title', controller: _title),
+                      const SizedBox(height: 16),
+                      _Field(
+                        label: 'Price',
+                        controller: _price,
+                        icon: Icons.payments_rounded,
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 12),
+                AppCard(
+                  radius: Brand.radiusLg,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      _cardTitle(text, 'Image', Icons.image_rounded),
+                      const SizedBox(height: 12),
+                      _ImagePickerTile(
+                        picked: _pickedImage,
+                        existingImage: widget.existing?.image ?? '',
+                        api: widget.api,
+                        onPick: _pickImage,
+                      ),
+                    ],
+                  ),
                 ),
                 const SizedBox(height: 20),
-                _Field(label: 'TITLE', controller: _title),
-                const SizedBox(height: 16),
-                _Field(
-                  label: 'PRICE',
-                  controller: _price,
-                  keyboardType: const TextInputType.numberWithOptions(
-                      decimal: true),
+                SectionHeader(
+                  title: 'Features',
+                  trailing: StationAction(
+                    icon: Icons.add_rounded,
+                    tooltip: 'Add feature',
+                    onPressed: _addFeature,
+                  ),
                 ),
-                const SizedBox(height: 28),
-                Text('IMAGE', style: text.labelLarge),
-                const SizedBox(height: 12),
-                _ImagePickerTile(
-                  picked: _pickedImage,
-                  existingImage: widget.existing?.image ?? '',
-                  api: widget.api,
-                  onPick: _pickImage,
-                ),
-                const SizedBox(height: 28),
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text('FEATURES', style: text.labelLarge),
-                    ),
-                    StationAction(
-                      icon: Icons.add,
-                      tooltip: 'Add feature',
-                      onPressed: _addFeature,
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 8),
                 if (_features.isEmpty)
-                  Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 8),
-                    child: Text(
-                      'No features yet. Tap + to add one.',
-                      style: text.bodySmall,
+                  AppCard(
+                    radius: Brand.radiusLg,
+                    child: Row(
+                      children: [
+                        const IconTile(
+                          icon: Icons.checklist_rounded,
+                          size: 36,
+                          iconSize: 18,
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Text(
+                            'No features yet. Tap + to add one.',
+                            style: text.bodySmall,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 for (int i = 0; i < _features.length; i++) ...[
@@ -452,21 +656,67 @@ class _PricingFormScreenState extends State<_PricingFormScreen> {
                     onCategoryChanged: (v) =>
                         setState(() => _features[i].categoryId = v),
                   ),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 10),
                 ],
-                const SizedBox(height: 24),
-                SignalButton(
-                  label: _isEdit ? 'Save changes' : 'Create plan',
-                  busy: _saving,
-                  onPressed: _saving ? null : _save,
-                ),
                 if (_isEdit) ...[
                   const SizedBox(height: 12),
-                  GhostButton(label: 'Delete plan', onPressed: _delete),
+                  GhostButton(
+                    label: 'Delete plan',
+                    icon: Icons.delete_outline_rounded,
+                    onPressed: _delete,
+                  ),
                 ],
-                const SizedBox(height: 40),
               ],
             ),
+    );
+  }
+
+  Widget _cardTitle(TextTheme text, String title, IconData icon) {
+    return Row(
+      children: [
+        IconTile(icon: icon, size: 30, iconSize: 16),
+        const SizedBox(width: 10),
+        Expanded(child: Text(title, style: text.titleMedium)),
+      ],
+    );
+  }
+}
+
+class _FormSkeleton extends StatelessWidget {
+  const _FormSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      label: 'Loading',
+      child: ListView(
+        physics: const NeverScrollableScrollPhysics(),
+        children: [
+          AppCard(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                for (var i = 0; i < 3; i++) ...[
+                  if (i > 0) const SizedBox(height: 18),
+                  const Skeleton(width: 100, height: 12),
+                  const SizedBox(height: 8),
+                  const Skeleton(height: 48, radius: Brand.radius),
+                ],
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+          const AppCard(
+            child: Row(
+              children: [
+                Skeleton(width: 72, height: 72, radius: Brand.radius),
+                SizedBox(width: 12),
+                Expanded(child: Skeleton(height: 12)),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -483,19 +733,37 @@ class _BusinessTypeDropdown extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return DropdownButtonFormField<int>(
-      initialValue: value,
-      isExpanded: true,
-      decoration: const InputDecoration(labelText: 'BUSINESS TYPE'),
-      dropdownColor: Brand.surface,
-      style: Theme.of(context).textTheme.titleMedium,
-      items: types
-          .map((t) => DropdownMenuItem<int>(
-                value: t.id,
-                child: Text(t.name, overflow: TextOverflow.ellipsis),
-              ))
-          .toList(),
-      onChanged: onChanged,
+    final text = Theme.of(context).textTheme;
+    final b = context.brand;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(bottom: 6),
+          child: Text('Business type', style: text.labelLarge),
+        ),
+        DropdownButtonFormField<int>(
+          initialValue: value,
+          isExpanded: true,
+          decoration: const InputDecoration(
+            hintText: 'Select business type',
+            prefixIcon: Icon(Icons.storefront_rounded),
+          ),
+          dropdownColor: b.surface,
+          borderRadius: BorderRadius.circular(Brand.radius),
+          icon: Icon(Icons.expand_more_rounded, color: b.paperDim),
+          style: text.bodyLarge?.copyWith(color: b.paper),
+          items: types
+              .map(
+                (t) => DropdownMenuItem<int>(
+                  value: t.id,
+                  child: Text(t.name, overflow: TextOverflow.ellipsis),
+                ),
+              )
+              .toList(),
+          onChanged: onChanged,
+        ),
+      ],
     );
   }
 }
@@ -514,16 +782,21 @@ class _ImagePickerTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final b = context.brand;
     Widget preview;
     if (picked != null) {
-      preview = Image.file(File(picked!.path),
-          width: 56, height: 56, fit: BoxFit.cover);
+      preview = Image.file(
+        File(picked!.path),
+        width: 72,
+        height: 72,
+        fit: BoxFit.cover,
+      );
     } else if (existingImage.isNotEmpty) {
       preview = CachedNetworkImage(
         imageUrl: '${api.baseUrl}/uploads/$existingImage',
         httpHeaders: api.authHeaders(),
-        width: 56,
-        height: 56,
+        width: 72,
+        height: 72,
         fit: BoxFit.cover,
         errorWidget: (_, _, _) => const _ImageFallback(),
       );
@@ -533,25 +806,33 @@ class _ImagePickerTile extends StatelessWidget {
 
     return InkWell(
       onTap: onPick,
-      child: Row(
-        children: [
-          ClipRRect(
-            borderRadius: BorderRadius.circular(8),
-            child: SizedBox(width: 56, height: 56, child: preview),
-          ),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Text(
-              picked != null
-                  ? 'New image selected. Tap to change.'
-                  : (existingImage.isNotEmpty
-                      ? 'Tap to replace image.'
-                      : 'Tap to choose an image.'),
-              style: Theme.of(context).textTheme.bodySmall,
+      borderRadius: BorderRadius.circular(Brand.radiusLg),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Row(
+          children: [
+            _ThumbFrame(
+              radius: Brand.radius,
+              child: SizedBox(
+                width: 72,
+                height: 72,
+                child: ExcludeSemantics(child: preview),
+              ),
             ),
-          ),
-          const Icon(Icons.photo_library, color: Brand.paperDim, size: 20),
-        ],
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                picked != null
+                    ? 'New image selected. Tap to change.'
+                    : (existingImage.isNotEmpty
+                          ? 'Tap to replace image.'
+                          : 'Tap to choose an image.'),
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ),
+            Icon(Icons.photo_library_rounded, color: b.signal, size: 20),
+          ],
+        ),
       ),
     );
   }
@@ -562,11 +843,16 @@ class _ImageFallback extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final b = context.brand;
     return Container(
-      width: 56,
-      height: 56,
-      color: Brand.surfaceHi,
-      child: const Icon(Icons.image, color: Brand.paperDim, size: 22),
+      width: 72,
+      height: 72,
+      color: b.surfaceHi,
+      child: Icon(
+        Icons.add_photo_alternate_rounded,
+        color: b.paperDim,
+        size: 24,
+      ),
     );
   }
 }
@@ -586,49 +872,71 @@ class _FeatureEditor extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
+    final b = context.brand;
     final hasCategory =
-        draft.categoryId != null && categories.any((c) => c.id == draft.categoryId);
-    return Container(
-      padding: const EdgeInsets.fromLTRB(12, 4, 4, 12),
-      decoration: BoxDecoration(
-        border: Border.all(color: Brand.rule),
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Column(
+        draft.categoryId != null &&
+        categories.any((c) => c.id == draft.categoryId);
+    return AppCard(
+      radius: Brand.radiusLg,
+      padding: const EdgeInsets.fromLTRB(12, 12, 4, 12),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: draft.controller,
-                  decoration: const InputDecoration(labelText: 'FEATURE'),
-                  style: text.titleMedium,
-                ),
-              ),
-              IconButton(
-                icon: const Icon(Icons.close, color: Brand.paperDim, size: 20),
-                tooltip: 'Remove feature',
-                onPressed: onRemove,
-              ),
-            ],
+          const Padding(
+            padding: EdgeInsets.only(top: 6),
+            child: IconTile(
+              icon: Icons.check_rounded,
+              color: Brand.success,
+              size: 32,
+              iconSize: 16,
+            ),
           ),
-          DropdownButtonFormField<int?>(
-            initialValue: hasCategory ? draft.categoryId : null,
-            isExpanded: true,
-            decoration: const InputDecoration(labelText: 'CATEGORY (OPTIONAL)'),
-            dropdownColor: Brand.surface,
-            style: text.bodySmall,
-            items: [
-              const DropdownMenuItem<int?>(
-                value: null,
-                child: Text('None'),
-              ),
-              ...categories.map((c) => DropdownMenuItem<int?>(
-                    value: c.id,
-                    child: Text(c.name, overflow: TextOverflow.ellipsis),
-                  )),
-            ],
-            onChanged: onCategoryChanged,
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                TextField(
+                  controller: draft.controller,
+                  decoration: const InputDecoration(hintText: 'Feature'),
+                ),
+                const SizedBox(height: 8),
+                DropdownButtonFormField<int?>(
+                  initialValue: hasCategory ? draft.categoryId : null,
+                  isExpanded: true,
+                  decoration: const InputDecoration(
+                    hintText: 'Category (optional)',
+                    isDense: true,
+                  ),
+                  dropdownColor: b.surface,
+                  borderRadius: BorderRadius.circular(Brand.radius),
+                  icon: Icon(Icons.expand_more_rounded, color: b.paperDim),
+                  style: text.bodyMedium?.copyWith(color: b.paper),
+                  items: [
+                    const DropdownMenuItem<int?>(
+                      value: null,
+                      child: Text('None'),
+                    ),
+                    ...categories.map(
+                      (c) => DropdownMenuItem<int?>(
+                        value: c.id,
+                        child: Text(c.name, overflow: TextOverflow.ellipsis),
+                      ),
+                    ),
+                  ],
+                  onChanged: onCategoryChanged,
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            icon: const Icon(
+              Icons.delete_outline_rounded,
+              color: Brand.danger,
+              size: 20,
+            ),
+            tooltip: 'Remove feature',
+            onPressed: onRemove,
           ),
         ],
       ),
@@ -636,24 +944,36 @@ class _FeatureEditor extends StatelessWidget {
   }
 }
 
-/// Standard labelled text field matching the app's input styling.
 class _Field extends StatelessWidget {
   const _Field({
     required this.label,
     required this.controller,
     this.keyboardType,
+    this.icon,
   });
   final String label;
   final TextEditingController controller;
   final TextInputType? keyboardType;
+  final IconData? icon;
 
   @override
   Widget build(BuildContext context) {
-    return TextField(
-      controller: controller,
-      keyboardType: keyboardType,
-      decoration: InputDecoration(labelText: label),
-      style: Theme.of(context).textTheme.titleMedium,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(bottom: 6),
+          child: Text(label, style: Theme.of(context).textTheme.labelLarge),
+        ),
+        TextField(
+          controller: controller,
+          keyboardType: keyboardType,
+          decoration: InputDecoration(
+            hintText: label,
+            prefixIcon: icon == null ? null : Icon(icon),
+          ),
+        ),
+      ],
     );
   }
 }

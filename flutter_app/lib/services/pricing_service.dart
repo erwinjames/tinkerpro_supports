@@ -127,10 +127,10 @@ class PricingService {
 
   Future<PricingResult> delete(int id) async {
     try {
-      final res = await _api.postPath(_kPricingPath, body: {
-        'action': 'delete_pricing',
-        'id': '$id',
-      });
+      final res = await _api.postPath(
+        _kPricingPath,
+        body: {'action': 'delete_pricing', 'id': '$id'},
+      );
       return _result(res);
     } catch (_) {
       return PricingResult(ok: false, message: 'Network error');

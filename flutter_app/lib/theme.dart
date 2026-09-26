@@ -1,82 +1,74 @@
+import 'package:flutter/cupertino.dart' show CupertinoPageTransitionsBuilder;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 
-/// TinkerPro brand tokens — now theme-aware.
-///
-/// Originally a class of `static const Color` fields. To support a
-/// light/dark toggle without context-aware lookups, the palette has
-/// moved into a [BrandColors] `ThemeExtension`. Access in widgets via:
-///
-///   context.brand.canvas
-///
-/// Old callsites that still reference `Brand.canvas` get the **dark**
-/// palette's value as a fallback so legacy code doesn't break during
-/// the migration — but anything that needs to flip on theme change
-/// must use `context.brand.<token>`.
 class Brand {
   Brand._();
 
-  // Dark palette (canonical / matches the original constants).
-  static const Color _darkCanvas      = Color(0xFF0A0908);
-  static const Color _darkSurface     = Color(0xFF141311);
-  static const Color _darkSurfaceHi   = Color(0xFF1C1B18);
-  static const Color _darkPaper       = Color(0xFFF5F2EB);
-  static const Color _darkPaperDim    = Color(0xFFA8A59D);
-  static const Color _darkRule        = Color(0xFF2A2824);
-  static const Color _signal          = Color(0xFFFF7D00);
+  static const Color _darkCanvas = navy;
+  static const Color _darkSurface = Color(0xFF12304F);
+  static const Color _darkSurfaceHi = Color(0xFF1B3D62);
+  static const Color _darkPaper = Color(0xFFEAF0F7);
+  static const Color _darkPaperDim = Color(0xFF9DB0C6);
+  static const Color _darkRule = Color(0xFF23456B);
+  static const Color orange = Color(0xFFFF7D00);
+  static const Color navy = Color(0xFF0C233E);
+  static const Color white = Color(0xFFFFFFFF);
+  static const Color _signal = orange;
 
-  // Light palette — warm paper edition. Canvas is a hair cream so it
-  // doesn't read as a clinical Material default; rules + paperDim are
-  // boosted toward slate so contrast on the bright canvas stays high.
-  static const Color _lightCanvas     = Color(0xFFFAF7F1);
-  static const Color _lightSurface    = Color(0xFFFFFFFF);
-  static const Color _lightSurfaceHi  = Color(0xFFF3EFE7);
-  static const Color _lightPaper      = Color(0xFF1A1815);
-  static const Color _lightPaperDim   = Color(0xFF5F5C55);
-  static const Color _lightRule       = Color(0xFFE3DED4);
+  static const Color _lightCanvas = Color(0xFFF4F7FB);
+  static const Color _lightSurface = white;
+  static const Color _lightSurfaceHi = Color(0xFFE8EEF6);
+  static const Color _lightPaper = navy;
+  static const Color _lightPaperDim = Color(0xFF54677F);
+  static const Color _lightRule = Color(0xFFD3DDEA);
 
-  // Legacy const accessors — point at the dark palette so existing
-  // code paths compile unchanged. Migrate to context.brand.* over time.
-  static const Color canvas      = _darkCanvas;
-  static const Color surface     = _darkSurface;
-  static const Color surfaceHi   = _darkSurfaceHi;
-  static const Color paper       = _darkPaper;
-  static const Color paperDim    = _darkPaperDim;
-  static const Color rule        = _darkRule;
-  static const Color signal      = _signal;
+  static const Color canvas = _darkCanvas;
+  static const Color surface = _darkSurface;
+  static const Color surfaceHi = _darkSurfaceHi;
+  static const Color paper = _darkPaper;
+  static const Color paperDim = _darkPaperDim;
+  static const Color rule = _darkRule;
+  static const Color signal = _signal;
+  static const Color onSignal = white;
+
+  static const Color success = Color(0xFF16A34A);
+  static const Color warning = Color(0xFFF59E0B);
+  static const Color danger = Color(0xFFE5484D);
+  static const Color info = Color(0xFF3B82F6);
+  static const Color pageVoice = Color(0xFF12A55F);
+
+  static const double radiusSm = 8;
+  static const double radius = 12;
+  static const double radiusLg = 16;
 
   static Color signalGlow([double alpha = 0.12]) =>
       _signal.withValues(alpha: alpha);
 
-  /// Build the [BrandColors] extension for a given brightness — used by
-  /// [lightTheme]/[darkTheme] to register the right palette on the
-  /// ThemeData so widgets can resolve `context.brand.*` against it.
   static BrandColors forBrightness(Brightness b) {
     return b == Brightness.dark
         ? const BrandColors(
-            canvas:    _darkCanvas,
-            surface:   _darkSurface,
+            canvas: _darkCanvas,
+            surface: _darkSurface,
             surfaceHi: _darkSurfaceHi,
-            paper:     _darkPaper,
-            paperDim:  _darkPaperDim,
-            rule:      _darkRule,
-            signal:    _signal,
+            paper: _darkPaper,
+            paperDim: _darkPaperDim,
+            rule: _darkRule,
+            signal: _signal,
           )
         : const BrandColors(
-            canvas:    _lightCanvas,
-            surface:   _lightSurface,
+            canvas: _lightCanvas,
+            surface: _lightSurface,
             surfaceHi: _lightSurfaceHi,
-            paper:     _lightPaper,
-            paperDim:  _lightPaperDim,
-            rule:      _lightRule,
-            signal:    _signal,
+            paper: _lightPaper,
+            paperDim: _lightPaperDim,
+            rule: _lightRule,
+            signal: _signal,
           );
   }
 }
 
-/// Active brand colors for the current theme. Registered as a
-/// [ThemeExtension] so it flows through Theme.of(context) and rebuilds
-/// dependents on theme change.
 @immutable
 class BrandColors extends ThemeExtension<BrandColors> {
   const BrandColors({
@@ -97,7 +89,31 @@ class BrandColors extends ThemeExtension<BrandColors> {
   final Color rule;
   final Color signal;
 
+  Color get onSignal => Brand.onSignal;
+  Color get success => Brand.success;
+  Color get warning => Brand.warning;
+  Color get danger => Brand.danger;
+  Color get info => Brand.info;
+
+  bool get isDark => canvas.computeLuminance() < 0.2;
+
+  Color get signalInk =>
+      isDark ? const Color(0xFFFF9A3D) : const Color(0xFFC25E00);
+
   Color signalGlow([double alpha = 0.12]) => signal.withValues(alpha: alpha);
+
+  Color tint(Color color, [double alpha = 0.12]) =>
+      color.withValues(alpha: isDark ? alpha + 0.06 : alpha);
+
+  List<BoxShadow> get shadow => isDark
+      ? const []
+      : [
+          BoxShadow(
+            color: Brand.navy.withValues(alpha: 0.06),
+            blurRadius: 12,
+            offset: const Offset(0, 2),
+          ),
+        ];
 
   @override
   BrandColors copyWith({
@@ -124,98 +140,122 @@ class BrandColors extends ThemeExtension<BrandColors> {
   BrandColors lerp(ThemeExtension<BrandColors>? other, double t) {
     if (other is! BrandColors) return this;
     return BrandColors(
-      canvas:    Color.lerp(canvas,    other.canvas,    t) ?? canvas,
-      surface:   Color.lerp(surface,   other.surface,   t) ?? surface,
+      canvas: Color.lerp(canvas, other.canvas, t) ?? canvas,
+      surface: Color.lerp(surface, other.surface, t) ?? surface,
       surfaceHi: Color.lerp(surfaceHi, other.surfaceHi, t) ?? surfaceHi,
-      paper:     Color.lerp(paper,     other.paper,     t) ?? paper,
-      paperDim:  Color.lerp(paperDim,  other.paperDim,  t) ?? paperDim,
-      rule:      Color.lerp(rule,      other.rule,      t) ?? rule,
-      signal:    Color.lerp(signal,    other.signal,    t) ?? signal,
+      paper: Color.lerp(paper, other.paper, t) ?? paper,
+      paperDim: Color.lerp(paperDim, other.paperDim, t) ?? paperDim,
+      rule: Color.lerp(rule, other.rule, t) ?? rule,
+      signal: Color.lerp(signal, other.signal, t) ?? signal,
     );
   }
 }
 
-/// Ergonomic accessor — `context.brand.canvas` instead of the verbose
-/// `Theme.of(context).extension<BrandColors>()!`. The `!` is safe here
-/// because every theme this app builds registers the extension.
 extension BrandContext on BuildContext {
   BrandColors get brand => Theme.of(this).extension<BrandColors>()!;
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// Text theme — three roles, three typefaces. Built once per brightness
-// so colors flip with the active palette.
-
 TextTheme _buildTextTheme(BrandColors c) {
-  final display = GoogleFonts.frauncesTextTheme();
-  final body = GoogleFonts.spaceGroteskTextTheme();
-  final mono = GoogleFonts.jetBrainsMonoTextTheme();
+  final head = GoogleFonts.montserratTextTheme();
+  final base = GoogleFonts.interTextTheme();
+  TextStyle? s(
+    TextStyle? t,
+    double size,
+    FontWeight w,
+    Color color, {
+    double? height,
+    double spacing = 0,
+  }) => t?.copyWith(
+    fontSize: size,
+    fontWeight: w,
+    color: color,
+    height: height,
+    letterSpacing: spacing,
+  );
 
   return TextTheme(
-    displayLarge: mono.displayLarge?.copyWith(
-      fontSize: 220,
-      fontWeight: FontWeight.w600,
-      height: 0.9,
-      letterSpacing: -6,
-      color: c.signalGlow(0.08),
-    ),
-    displayMedium: display.displayMedium?.copyWith(
-      fontSize: 44,
-      fontWeight: FontWeight.w400,
-      letterSpacing: -1.2,
-      height: 1.05,
-      color: c.paper,
-    ),
-    headlineLarge: display.headlineLarge?.copyWith(
-      fontSize: 32,
-      fontWeight: FontWeight.w400,
-      letterSpacing: -0.6,
+    displayLarge: s(
+      head.displayLarge,
+      40,
+      FontWeight.w800,
+      c.paper,
       height: 1.1,
-      color: c.paper,
+      spacing: -1,
     ),
-    headlineMedium: display.headlineMedium?.copyWith(
-      fontSize: 22,
-      fontWeight: FontWeight.w400,
-      letterSpacing: -0.3,
-      color: c.paper,
+    displayMedium: s(
+      head.displayMedium,
+      32,
+      FontWeight.w800,
+      c.paper,
+      height: 1.15,
+      spacing: -0.8,
     ),
-    labelLarge: mono.labelLarge?.copyWith(
-      fontSize: 11,
-      fontWeight: FontWeight.w500,
-      letterSpacing: 2.8,
-      color: c.paper,
+    displaySmall: s(
+      head.displaySmall,
+      28,
+      FontWeight.w700,
+      c.paper,
+      height: 1.2,
+      spacing: -0.5,
     ),
-    labelMedium: mono.labelMedium?.copyWith(
-      fontSize: 10,
-      fontWeight: FontWeight.w500,
-      letterSpacing: 2.2,
-      color: c.paperDim,
+    headlineLarge: s(
+      head.headlineLarge,
+      24,
+      FontWeight.w700,
+      c.paper,
+      height: 1.25,
+      spacing: -0.4,
     ),
-    bodyLarge: body.bodyLarge?.copyWith(
-      fontSize: 16,
-      height: 1.5,
-      color: c.paper,
-    ),
-    bodyMedium: body.bodyMedium?.copyWith(
-      fontSize: 14,
-      height: 1.55,
-      color: c.paper,
-    ),
-    bodySmall: body.bodySmall?.copyWith(
-      fontSize: 12.5,
-      height: 1.5,
-      color: c.paperDim,
-    ),
-    titleMedium: body.titleMedium?.copyWith(
-      fontSize: 16,
+    headlineMedium: s(
+      head.headlineMedium,
+      20,
+      FontWeight.w700,
+      c.paper,
       height: 1.3,
-      color: c.paper,
-      fontWeight: FontWeight.w500,
+      spacing: -0.2,
     ),
-    titleSmall: body.titleSmall?.copyWith(
-      fontSize: 15,
-      color: c.paper,
-      fontWeight: FontWeight.w600,
+    headlineSmall: s(
+      head.headlineSmall,
+      18,
+      FontWeight.w700,
+      c.paper,
+      height: 1.3,
+    ),
+    titleLarge: s(head.titleLarge, 17, FontWeight.w700, c.paper, height: 1.3),
+    titleMedium: s(
+      head.titleMedium,
+      15.5,
+      FontWeight.w600,
+      c.paper,
+      height: 1.35,
+    ),
+    titleSmall: s(base.titleSmall, 15, FontWeight.w600, c.paper, height: 1.35),
+    bodyLarge: s(base.bodyLarge, 16, FontWeight.w400, c.paper, height: 1.55),
+    bodyMedium: s(base.bodyMedium, 15, FontWeight.w400, c.paper, height: 1.5),
+    bodySmall: s(base.bodySmall, 13, FontWeight.w400, c.paperDim, height: 1.45),
+    labelLarge: s(
+      base.labelLarge,
+      14,
+      FontWeight.w600,
+      c.paper,
+      height: 1.3,
+      spacing: 0.1,
+    ),
+    labelMedium: s(
+      base.labelMedium,
+      12,
+      FontWeight.w500,
+      c.paperDim,
+      height: 1.3,
+      spacing: 0.2,
+    ),
+    labelSmall: s(
+      base.labelSmall,
+      11,
+      FontWeight.w600,
+      c.paperDim,
+      height: 1.3,
+      spacing: 0.3,
     ),
   );
 }
@@ -223,70 +263,339 @@ TextTheme _buildTextTheme(BrandColors c) {
 ThemeData _build(Brightness brightness) {
   final c = Brand.forBrightness(brightness);
   final text = _buildTextTheme(c);
+  final dark = brightness == Brightness.dark;
+  final radius = BorderRadius.circular(Brand.radius);
+  final smallRadius = BorderRadius.circular(Brand.radiusSm + 2);
+  OutlineInputBorder inputBorder(Color color, [double width = 1]) =>
+      OutlineInputBorder(
+        borderRadius: smallRadius,
+        borderSide: BorderSide(color: color, width: width),
+      );
+
+  final scheme = (dark ? const ColorScheme.dark() : const ColorScheme.light())
+      .copyWith(
+        primary: c.signal,
+        onPrimary: Brand.onSignal,
+        primaryContainer: c.signalGlow(dark ? 0.22 : 0.12),
+        onPrimaryContainer: c.signal,
+        secondary: c.paper,
+        onSecondary: c.surface,
+        surface: c.surface,
+        onSurface: c.paper,
+        onSurfaceVariant: c.paperDim,
+        surfaceContainerLowest: c.canvas,
+        surfaceContainerLow: c.surface,
+        surfaceContainer: c.surface,
+        surfaceContainerHigh: c.surfaceHi,
+        surfaceContainerHighest: c.surfaceHi,
+        outline: c.rule,
+        outlineVariant: c.rule,
+        error: Brand.danger,
+        onError: Colors.white,
+      );
+
   return ThemeData(
     useMaterial3: true,
     brightness: brightness,
+    colorScheme: scheme,
     scaffoldBackgroundColor: c.canvas,
     canvasColor: c.canvas,
-    colorScheme: brightness == Brightness.dark
-        ? ColorScheme.dark(
-            primary: c.signal,
-            onPrimary: c.canvas,
-            secondary: c.paper,
-            onSecondary: c.canvas,
-            surface: c.surface,
-            onSurface: c.paper,
-            error: c.signal,
-            onError: c.canvas,
-          )
-        : ColorScheme.light(
-            primary: c.signal,
-            onPrimary: Colors.white,
-            secondary: c.paper,
-            onSecondary: c.canvas,
-            surface: c.surface,
-            onSurface: c.paper,
-            error: c.signal,
-            onError: Colors.white,
-          ),
     extensions: [c],
     textTheme: text,
+    fontFamily: GoogleFonts.inter().fontFamily,
+    visualDensity: VisualDensity.standard,
+    materialTapTargetSize: MaterialTapTargetSize.padded,
+    focusColor: c.signalGlow(0.22),
     iconTheme: IconThemeData(color: c.paper, size: 20),
-    dividerTheme: DividerThemeData(
-      color: c.rule,
-      thickness: 1,
-      space: 1,
+    primaryIconTheme: const IconThemeData(color: Brand.onSignal, size: 20),
+    dividerTheme: DividerThemeData(color: c.rule, thickness: 1, space: 1),
+    appBarTheme: AppBarTheme(
+      backgroundColor: c.canvas,
+      foregroundColor: c.paper,
+      surfaceTintColor: Colors.transparent,
+      elevation: 0,
+      scrolledUnderElevation: 0,
+      centerTitle: false,
+      titleTextStyle: text.titleLarge,
+      iconTheme: IconThemeData(color: c.paper, size: 22),
+      systemOverlayStyle: dark
+          ? SystemUiOverlayStyle.light
+          : SystemUiOverlayStyle.dark,
+    ),
+    cardTheme: CardThemeData(
+      color: c.surface,
+      surfaceTintColor: Colors.transparent,
+      elevation: 0,
+      margin: EdgeInsets.zero,
+      shape: RoundedRectangleBorder(
+        borderRadius: radius,
+        side: BorderSide(color: c.rule),
+      ),
+    ),
+    listTileTheme: ListTileThemeData(
+      iconColor: c.paperDim,
+      textColor: c.paper,
+      titleTextStyle: text.titleSmall,
+      subtitleTextStyle: text.bodySmall,
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+      shape: RoundedRectangleBorder(borderRadius: smallRadius),
     ),
     inputDecorationTheme: InputDecorationTheme(
-      filled: false,
-      contentPadding: const EdgeInsets.only(top: 10, bottom: 14),
-      border: UnderlineInputBorder(borderSide: BorderSide(color: c.rule, width: 1)),
-      enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: c.rule, width: 1)),
-      focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: c.signal, width: 2)),
-      errorBorder: UnderlineInputBorder(borderSide: BorderSide(color: c.signal, width: 2)),
-      labelStyle: text.labelMedium,
-      floatingLabelStyle: text.labelMedium?.copyWith(color: c.signal),
-      floatingLabelBehavior: FloatingLabelBehavior.always,
+      filled: true,
+      fillColor: c.surfaceHi,
+      isDense: true,
+      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+      border: inputBorder(c.rule),
+      enabledBorder: inputBorder(c.rule),
+      disabledBorder: inputBorder(c.rule.withValues(alpha: 0.6)),
+      focusedBorder: inputBorder(c.signal, 1.6),
+      errorBorder: inputBorder(Brand.danger),
+      focusedErrorBorder: inputBorder(Brand.danger, 1.6),
+      labelStyle: text.bodyMedium?.copyWith(color: c.paperDim),
+      floatingLabelStyle: text.labelLarge?.copyWith(color: c.signal),
       hintStyle: text.bodyMedium?.copyWith(color: c.paperDim),
+      helperStyle: text.bodySmall,
+      errorStyle: text.bodySmall?.copyWith(color: Brand.danger),
+      prefixIconColor: c.paperDim,
+      suffixIconColor: c.paperDim,
+    ),
+    filledButtonTheme: FilledButtonThemeData(
+      style: FilledButton.styleFrom(
+        backgroundColor: c.signal,
+        foregroundColor: Brand.onSignal,
+        disabledBackgroundColor: c.surfaceHi,
+        disabledForegroundColor: c.paperDim,
+        minimumSize: const Size(64, 48),
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        textStyle: text.labelLarge?.copyWith(fontSize: 14),
+        shape: RoundedRectangleBorder(borderRadius: smallRadius),
+        elevation: 0,
+      ),
+    ),
+    elevatedButtonTheme: ElevatedButtonThemeData(
+      style: ElevatedButton.styleFrom(
+        backgroundColor: c.signal,
+        foregroundColor: Brand.onSignal,
+        disabledBackgroundColor: c.surfaceHi,
+        disabledForegroundColor: c.paperDim,
+        minimumSize: const Size(64, 48),
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        textStyle: text.labelLarge?.copyWith(fontSize: 14),
+        shape: RoundedRectangleBorder(borderRadius: smallRadius),
+        elevation: 0,
+      ),
+    ),
+    outlinedButtonTheme: OutlinedButtonThemeData(
+      style: OutlinedButton.styleFrom(
+        foregroundColor: c.paper,
+        backgroundColor: c.surface,
+        minimumSize: const Size(64, 48),
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        side: BorderSide(color: c.rule),
+        textStyle: text.labelLarge?.copyWith(fontSize: 14),
+        shape: RoundedRectangleBorder(borderRadius: smallRadius),
+      ),
+    ),
+    textButtonTheme: TextButtonThemeData(
+      style: TextButton.styleFrom(
+        foregroundColor: c.signal,
+        textStyle: text.labelLarge,
+        shape: RoundedRectangleBorder(borderRadius: smallRadius),
+      ),
+    ),
+    iconButtonTheme: IconButtonThemeData(
+      style: IconButton.styleFrom(
+        foregroundColor: c.paper,
+        minimumSize: const Size(44, 44),
+      ),
+    ),
+    floatingActionButtonTheme: FloatingActionButtonThemeData(
+      backgroundColor: c.signal,
+      foregroundColor: Brand.onSignal,
+      elevation: 2,
+      focusElevation: 2,
+      hoverElevation: 3,
+      highlightElevation: 3,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      extendedTextStyle: text.labelLarge?.copyWith(fontSize: 14),
+    ),
+    chipTheme: ChipThemeData(
+      backgroundColor: c.surface,
+      selectedColor: c.signalGlow(dark ? 0.22 : 0.12),
+      disabledColor: c.surfaceHi,
+      side: BorderSide(color: c.rule),
+      labelStyle: text.labelLarge?.copyWith(fontWeight: FontWeight.w500),
+      secondaryLabelStyle: text.labelLarge?.copyWith(color: c.signal),
+      checkmarkColor: c.signal,
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
+    ),
+    checkboxTheme: CheckboxThemeData(
+      fillColor: WidgetStateProperty.resolveWith(
+        (s) => s.contains(WidgetState.selected) ? c.signal : Colors.transparent,
+      ),
+      checkColor: const WidgetStatePropertyAll(Brand.onSignal),
+      side: BorderSide(color: c.paperDim, width: 1.4),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(5)),
+    ),
+    radioTheme: RadioThemeData(
+      fillColor: WidgetStateProperty.resolveWith(
+        (s) => s.contains(WidgetState.selected) ? c.signal : c.paperDim,
+      ),
+    ),
+    switchTheme: SwitchThemeData(
+      thumbColor: WidgetStateProperty.resolveWith(
+        (s) => s.contains(WidgetState.selected) ? Colors.white : c.paperDim,
+      ),
+      trackColor: WidgetStateProperty.resolveWith(
+        (s) => s.contains(WidgetState.selected) ? c.signal : c.surfaceHi,
+      ),
+      trackOutlineColor: WidgetStateProperty.resolveWith(
+        (s) => s.contains(WidgetState.selected) ? c.signal : c.rule,
+      ),
+    ),
+    progressIndicatorTheme: ProgressIndicatorThemeData(
+      color: c.signal,
+      linearTrackColor: c.surfaceHi,
+      circularTrackColor: Colors.transparent,
+    ),
+    tabBarTheme: TabBarThemeData(
+      labelColor: c.signal,
+      unselectedLabelColor: c.paperDim,
+      labelStyle: text.labelLarge,
+      unselectedLabelStyle: text.labelLarge?.copyWith(
+        fontWeight: FontWeight.w500,
+      ),
+      indicatorColor: c.signal,
+      indicatorSize: TabBarIndicatorSize.label,
+      dividerColor: c.rule,
+    ),
+    navigationBarTheme: NavigationBarThemeData(
+      backgroundColor: c.surface,
+      surfaceTintColor: Colors.transparent,
+      indicatorColor: c.signalGlow(dark ? 0.22 : 0.12),
+      elevation: 0,
+      height: 68,
+      labelTextStyle: WidgetStateProperty.resolveWith(
+        (s) => text.labelMedium?.copyWith(
+          color: s.contains(WidgetState.selected) ? c.signal : c.paperDim,
+          fontWeight: s.contains(WidgetState.selected)
+              ? FontWeight.w600
+              : FontWeight.w500,
+        ),
+      ),
+      iconTheme: WidgetStateProperty.resolveWith(
+        (s) => IconThemeData(
+          size: 22,
+          color: s.contains(WidgetState.selected) ? c.signal : c.paperDim,
+        ),
+      ),
+    ),
+    bottomNavigationBarTheme: BottomNavigationBarThemeData(
+      backgroundColor: c.surface,
+      selectedItemColor: c.signal,
+      unselectedItemColor: c.paperDim,
+      selectedLabelStyle: text.labelMedium?.copyWith(
+        fontWeight: FontWeight.w600,
+      ),
+      unselectedLabelStyle: text.labelMedium,
+      type: BottomNavigationBarType.fixed,
+      elevation: 0,
+    ),
+    dialogTheme: DialogThemeData(
+      backgroundColor: c.surface,
+      surfaceTintColor: Colors.transparent,
+      elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(Brand.radiusLg),
+      ),
+      titleTextStyle: text.titleLarge,
+      contentTextStyle: text.bodyMedium,
+    ),
+    bottomSheetTheme: BottomSheetThemeData(
+      backgroundColor: c.surface,
+      modalBackgroundColor: c.surface,
+      surfaceTintColor: Colors.transparent,
+      showDragHandle: true,
+      dragHandleColor: c.rule,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+    ),
+    popupMenuTheme: PopupMenuThemeData(
+      color: c.surface,
+      surfaceTintColor: Colors.transparent,
+      elevation: 6,
+      textStyle: text.bodyMedium,
+      shape: RoundedRectangleBorder(
+        borderRadius: smallRadius,
+        side: BorderSide(color: c.rule),
+      ),
+    ),
+    menuTheme: MenuThemeData(
+      style: MenuStyle(
+        backgroundColor: WidgetStatePropertyAll(c.surface),
+        surfaceTintColor: const WidgetStatePropertyAll(Colors.transparent),
+        shape: WidgetStatePropertyAll(
+          RoundedRectangleBorder(
+            borderRadius: smallRadius,
+            side: BorderSide(color: c.rule),
+          ),
+        ),
+      ),
+    ),
+    dropdownMenuTheme: DropdownMenuThemeData(
+      textStyle: text.bodyMedium,
+      menuStyle: MenuStyle(
+        backgroundColor: WidgetStatePropertyAll(c.surface),
+        surfaceTintColor: const WidgetStatePropertyAll(Colors.transparent),
+      ),
     ),
     snackBarTheme: SnackBarThemeData(
-      backgroundColor: c.surfaceHi,
-      contentTextStyle: GoogleFonts.jetBrainsMono(
-        color: c.paper,
-        fontSize: 12,
-        letterSpacing: 1.4,
-      ),
+      backgroundColor: dark ? c.surfaceHi : Brand.navy,
+      contentTextStyle: text.bodyMedium?.copyWith(color: Colors.white),
+      actionTextColor: c.signal,
       behavior: SnackBarBehavior.floating,
-      shape: const RoundedRectangleBorder(),
+      elevation: 0,
+      shape: RoundedRectangleBorder(borderRadius: smallRadius),
     ),
-    splashFactory: NoSplash.splashFactory,
+    tooltipTheme: TooltipThemeData(
+      decoration: BoxDecoration(
+        color: dark ? c.surfaceHi : Brand.navy,
+        borderRadius: BorderRadius.circular(6),
+      ),
+      textStyle: text.labelMedium?.copyWith(color: Colors.white),
+    ),
+    badgeTheme: const BadgeThemeData(
+      backgroundColor: Brand.danger,
+      textColor: Colors.white,
+    ),
+    splashFactory: InkSparkle.splashFactory,
     highlightColor: Colors.transparent,
+    splashColor: c.signalGlow(0.08),
+    hoverColor: c.signalGlow(0.04),
+    pageTransitionsTheme: const PageTransitionsTheme(
+      builders: {
+        TargetPlatform.android: FadeForwardsPageTransitionsBuilder(),
+        TargetPlatform.iOS: CupertinoPageTransitionsBuilder(),
+      },
+    ),
   );
 }
 
 ThemeData darkTheme() => _build(Brightness.dark);
 ThemeData lightTheme() => _build(Brightness.light);
-
-/// Back-compat — older code paths still call `buildTheme()`. Points to
-/// the dark theme since that was the only variant before this change.
 ThemeData buildTheme() => darkTheme();
+
+Color customerStatusColor(String status) {
+  switch (status) {
+    case 'Completed':
+      return Brand.success;
+    case 'Upload PTU':
+      return Brand.warning;
+    case 'Continue Registration':
+      return Brand.danger;
+    default:
+      return Brand.info;
+  }
+}

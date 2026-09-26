@@ -1,138 +1,177 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io' as io;
+
+import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
 
 import '../api_client.dart';
+import '../models/dashboard_models.dart';
 import '../models/models.dart';
-
-/// Service layer. Each method calls `api.php?action=<x>` and returns typed
-/// results. The wire shapes here are verified against the live backend:
-///   * getMobileDashboardSummary  → {success, stats: [...], charts: {...}}
-///   * getMobileNotificationSummary → {success, items: [{id,type,title,subtitle}]}
-///   * getcustomer                → {data: [...], totalRecords, limit, page}
-///   * getCustomerbyID            → single customer row (shape varies)
-///   * getleads                   → bare array of leads
-///   * get_tickets                → bare array of tickets (+ agent_name join)
-///
-/// On any failure the method returns an empty-but-valid result so the UI
-/// still renders. Raw errors are rethrown only from login.
+import 'bir_register_logic.dart';
+import 'reminder_service.dart';
 
 class AuthService {
   AuthService(this.api);
   final ApiClient api;
 
-  Future<UserSession> login(String email, String password) async {
-    // Defensive: wipe ANY user-scoped state from a previous session
-    // before we even touch the server. Handles the case where logout
-    // was incomplete (network failure, app killed mid-flight, upgraded
-    // from an older build with broken logout, etc.) so no notification
-    // cursor / cached user id / leftover cookie from account A leaks
-    // into account B's session.
+  Future<UserSession> login(
+    String email,
+    String password, {
+    bool remember = true,
+  }) async {
     await api.clearSession();
 
-    final res = await api.post('login', body: {
-      'email': email.trim(),
-      'password': password,
-      'remember': '1',
-    });
+    final res = await api.post(
+      'login',
+      body: {
+        'email': email.trim(),
+        'password': password,
+        'remember': remember ? '1' : '0',
+      },
+    );
     if (res['success'] != true) {
       throw Exception(res['message']?.toString() ?? 'Login failed');
     }
     final session = UserSession.fromJson(res);
     if (session.userId <= 0) {
-      // Server said success=true but didn't include a usable userID.
-      // Refusing rather than handing the caller a HomeShell with no
-      // identity — that's exactly the state that produced "CHAT
-      // UNAVAILABLE" loops in the wild.
       throw Exception(
-          'Login succeeded but server did not return a user id. '
-          'Please contact support.');
+        'Login succeeded but server did not return a user id. '
+        'Please contact support.',
+      );
     }
     await api.setUserId(session.userId);
     if (session.username.isNotEmpty && session.username != '—') {
       await api.setUsername(session.username);
     }
+    await api.setUserRole(session.role);
     await api.setPermissions(session.permissions);
+    await syncSession();
     return session;
   }
 
-  /// Fetch the server's native social-sign-in config. Returns the Google web
-  /// OAuth client id to use as the SDK's `serverClientId`, or '' when Google
-  /// sign-in isn't configured on this server (button should be hidden).
-  /// Best-effort: returns '' on any failure.
+  Future<UserSession> adoptSession(Map<String, dynamic> res) async {
+    final session = UserSession.fromJson(res);
+    if (session.userId <= 0) {
+      throw Exception(
+        'Sign-in succeeded but server did not return a user id. '
+        'Please contact support.',
+      );
+    }
+    await api.setUserId(session.userId);
+    if (session.username.isNotEmpty && session.username != '—') {
+      await api.setUsername(session.username);
+    }
+    await api.setUserRole(session.role);
+    await api.setPermissions(session.permissions);
+    await syncSession();
+    return session;
+  }
+
   Future<String> googleClientId() async {
     try {
-      final res =
-          await api.get('mobileAuthConfig').timeout(const Duration(seconds: 8));
+      final res = await api
+          .get('mobileAuthConfig')
+          .timeout(const Duration(seconds: 8));
       return (res['google_client_id'] ?? '').toString();
     } catch (_) {
       return '';
     }
   }
 
-  /// Sign in with a Google OpenID Connect ID token obtained from the native
-  /// SDK. The server verifies it and signs in via the same link-to-existing
-  /// path as the web OAuth callback. Mirrors [login]'s session persistence.
-  /// Throws on failure with the server's message (e.g. "No account is linked").
-  Future<UserSession> loginWithGoogle(String idToken) async {
+  Future<UserSession> loginWithGoogle(
+    String idToken, {
+    bool remember = true,
+  }) async {
     await api.clearSession();
-    final res = await api.post('mobileOAuthLogin', body: {
-      'provider': 'google',
-      'id_token': idToken,
-    });
+    final res = await api.post(
+      'mobileOAuthLogin',
+      body: {
+        'provider': 'google',
+        'id_token': idToken,
+        'remember': remember ? '1' : '0',
+      },
+    );
     if (res['success'] != true) {
       throw Exception(res['message']?.toString() ?? 'Google sign-in failed');
     }
     final session = UserSession.fromJson(res);
     if (session.userId <= 0) {
       throw Exception(
-          'Sign-in succeeded but server did not return a user id. '
-          'Please contact support.');
+        'Sign-in succeeded but server did not return a user id. '
+        'Please contact support.',
+      );
     }
     await api.setUserId(session.userId);
     if (session.username.isNotEmpty && session.username != '—') {
       await api.setUsername(session.username);
     }
+    await api.setUserRole(session.role);
     await api.setPermissions(session.permissions);
+    await syncSession();
     return session;
   }
 
-  /// Re-read the user's feature permissions from the server and persist
-  /// them locally. The backend refreshes them from the DB on this call, so
-  /// role changes made on the web side take effect on next app open without
-  /// a re-login. Best-effort: a network failure leaves the cached map
-  /// (from login) untouched. Returns true when the map actually changed.
-  Future<bool> refreshPermissions() async {
+  Future<({bool changed, bool signedOut, String? message})>
+  syncSession() async {
     try {
       final res = await api
           .get('getMobileAuthSession')
           .timeout(const Duration(seconds: 8));
-      if (res['success'] == true && res['permissions'] != null) {
-        final fresh =
-            UserSession.fromJson(Map<String, dynamic>.from(res)).permissions;
-        final before = api.permissions;
-        final changed = before.length != fresh.length ||
-            fresh.entries.any((e) => before[e.key] != e.value);
-        if (changed) await api.setPermissions(fresh);
-        return changed;
+      if (res['success'] != true) {
+        final message = res['message']?.toString().trim();
+        return (
+          changed: false,
+          signedOut: true,
+          message: message == null || message.isEmpty ? null : message,
+        );
       }
-    } catch (_) {}
-    return false;
+      if (res['permissions'] == null) {
+        return (changed: false, signedOut: false, message: null);
+      }
+      final session = UserSession.fromJson(Map<String, dynamic>.from(res));
+      var changed = false;
+      if (session.role.isNotEmpty && session.role != api.userRole) {
+        await api.setUserRole(session.role);
+        changed = true;
+      }
+      final fresh = session.permissions;
+      final before = api.permissions;
+      if (before.length != fresh.length ||
+          fresh.entries.any((e) => before[e.key] != e.value)) {
+        await api.setPermissions(fresh);
+        changed = true;
+      }
+      final rawHidden = res['hidden_features'];
+      final hidden = rawHidden is List
+          ? rawHidden.map((e) => e.toString()).toSet()
+          : <String>{};
+      final hiddenBefore = api.hiddenFeatures;
+      if (hidden.length != hiddenBefore.length ||
+          !hidden.containsAll(hiddenBefore)) {
+        await api.setHiddenFeatures(hidden);
+        changed = true;
+      }
+      return (changed: changed, signedOut: false, message: null);
+    } catch (_) {
+      return (changed: false, signedOut: false, message: null);
+    }
   }
+
+  Future<bool> refreshPermissions() async => (await syncSession()).changed;
 
   Future<UserSession?> currentSession() async {
     try {
       final res = await api.get('getMobileAuthSession');
       if (res['success'] == true && res['user'] is Map) {
         return UserSession.fromJson(
-            Map<String, dynamic>.from(res['user'] as Map));
+          Map<String, dynamic>.from(res['user'] as Map),
+        );
       }
     } catch (_) {}
     return null;
   }
 
-  /// Returns the authenticated user's id. Reads the value persisted at
-  /// login time (cheap, no network) first, then falls back to a one-shot
-  /// `getMobileAuthSession` call with an 8-second timeout for users
-  /// upgrading from older builds that didn't persist the id.
   Future<int?> currentUserId() async {
     final cached = api.userId;
     if (cached != null && cached > 0) return cached;
@@ -151,7 +190,6 @@ class AuthService {
           parsed = int.tryParse(raw);
         }
         if (parsed != null && parsed > 0) {
-          // Cache for next launch so the next bootstrap is offline-friendly.
           await api.setUserId(parsed);
           return parsed;
         }
@@ -160,10 +198,6 @@ class AuthService {
     return null;
   }
 
-  /// Variant that returns both the user id (or null) AND the server's
-  /// last-message reason on failure — used by the chat bootstrap so the
-  /// "CHAT UNAVAILABLE" screen can show *why* (No active session / HTTP
-  /// error / network) instead of a generic "check your connection".
   Future<({int? userId, String? error})> currentUserIdWithReason() async {
     final cached = api.userId;
     if (cached != null && cached > 0) return (userId: cached, error: null);
@@ -185,10 +219,7 @@ class AuthService {
           await api.setUserId(parsed);
           return (userId: parsed, error: null);
         }
-        return (
-          userId: null,
-          error: 'Server did not return a user id.',
-        );
+        return (userId: null, error: 'Server did not return a user id.');
       }
       final msg = (res['message'] ?? 'No active session').toString();
       return (userId: null, error: msg);
@@ -202,6 +233,9 @@ class AuthService {
       await api.post('logout');
     } catch (_) {}
     await api.clearSession();
+    ReminderService.badge.value = 0;
+    ReminderService.latest.value = null;
+    await ReminderWidget.publishSignedOut();
   }
 }
 
@@ -222,6 +256,43 @@ class DashboardService {
       return DashboardSummary.empty();
     }
     return DashboardSummary.fromJson(summary, notifications);
+  }
+
+  Future<DashboardLive> live() async {
+    final res = await api.get('dashboardLive', {
+      '_': DateTime.now().millisecondsSinceEpoch.toString(),
+    });
+    final data = res['data'];
+    if (res['status'] != 'success' || data is! Map) {
+      throw Exception(res['message']?.toString() ?? 'Dashboard unavailable');
+    }
+    return DashboardLive.fromJson(Map<String, dynamic>.from(data));
+  }
+
+  Future<LicenseRevenue?> licenseRevenue({DateTime? serverNow}) async {
+    try {
+      final res = await api.get('dashboardRevenue');
+      if (res['status'] != 'success' || res['data'] is! Map) return null;
+      final d = Map<String, dynamic>.from(res['data'] as Map);
+      double num0(dynamic v) =>
+          v is num ? v.toDouble() : double.tryParse('$v') ?? 0;
+      int int0(dynamic v) => v is num ? v.toInt() : int.tryParse('$v') ?? 0;
+      final price = d['default_price'];
+      return LicenseRevenue(
+        available: d['available'] == true,
+        total: num0(d['total']),
+        month: num0(d['month']),
+        today: num0(d['today']),
+        paidCount: int0(d['paid_count']),
+        monthCount: int0(d['month_count']),
+        pendingCount: int0(d['pending_count']),
+        pendingValue: num0(d['pending_value']),
+        defaultPrice: price == null ? null : num0(price),
+        complete: true,
+      );
+    } catch (_) {
+      return null;
+    }
   }
 }
 
@@ -247,8 +318,6 @@ class CustomerService {
     return const [];
   }
 
-  /// `getCustomerbyID` returns the full customer row. Response shape has
-  /// varied across installs, so we sniff for the usual wrappers.
   Future<Map<String, dynamic>?> detail(int id) async {
     try {
       final res = await api.get('getCustomerbyID', {'id': id.toString()});
@@ -258,8 +327,6 @@ class CustomerService {
     return null;
   }
 
-  /// Typed variant of [detail] — the full row plus its joined `documents` and
-  /// `serial_entries`. Returns null on any failure.
   Future<CustomerDetail?> detailFull(int id) async {
     try {
       final res = await api.get('getCustomerbyID', {'id': id.toString()});
@@ -274,15 +341,10 @@ class CustomerService {
       final v = res[key];
       if (v is Map) return Map<String, dynamic>.from(v);
     }
-    // Some endpoints return the row directly with `id` as a top-level key.
     if (res['id'] != null) return res;
     return null;
   }
 
-  /// Create (when [id] is null) or update a BIR/customer record. The web
-  /// server does all the processing — we just POST the form body to
-  /// `addcustomer` / `updateCustomer`. [fields] must already carry the exact
-  /// backend field names (see CustomerFormScreen).
   Future<CustomerSaveResult> save({
     int? id,
     required Map<String, String> fields,
@@ -298,9 +360,10 @@ class CustomerService {
       }
       final res = await api.post(action, body: body);
       final ok = res['success'] == true || res['status'] == 'success';
-      final msg = (res['message'] ??
-              (ok ? 'Saved' : 'Could not save. Please try again.'))
-          .toString();
+      final msg =
+          (res['message'] ??
+                  (ok ? 'Saved' : 'Could not save. Please try again.'))
+              .toString();
       return CustomerSaveResult(
         ok: ok,
         message: msg,
@@ -323,43 +386,62 @@ class CustomerService {
     }
   }
 
-  /// Inline TIN duplicate check. Returns whether a record already exists and,
-  /// if so, the existing company name (for a helpful warning).
-  Future<({bool duplicate, String company})> checkTinDuplicate(
-      String tin, String branchCode) async {
+  Future<({bool duplicate, String company, String tin})> checkTinDuplicate(
+    String tin,
+    String branchCode,
+  ) async {
     try {
       final res = await api.get('checkTinDuplicate', {
         'tin': tin,
-        'branch_code': branchCode,
+        if (branchCode.isNotEmpty) 'branch_code': branchCode,
       });
       final existing = res['existing'];
-      final company =
-          (existing is Map ? (existing['company_name'] ?? '') : '').toString();
-      return (duplicate: res['duplicate'] == true, company: company);
+      final company = (existing is Map ? (existing['company_name'] ?? '') : '')
+          .toString();
+      final existingTin = (existing is Map ? (existing['tin'] ?? '') : '')
+          .toString();
+      return (
+        duplicate: res['duplicate'] == true,
+        company: company,
+        tin: existingTin,
+      );
     } catch (_) {
-      return (duplicate: false, company: '');
+      return (duplicate: false, company: '', tin: '');
     }
   }
 
-  Future<({bool duplicate, String company})> checkSnDuplicate(
-      String sn) async {
+  Future<({bool duplicate, String company})> checkSnDuplicate(String sn) async {
     try {
       final res = await api.get('checkSnDuplicate', {'sn': sn});
       final existing = res['existing'];
-      final company =
-          (existing is Map ? (existing['company_name'] ?? '') : '').toString();
+      final company = (existing is Map ? (existing['company_name'] ?? '') : '')
+          .toString();
       return (duplicate: res['duplicate'] == true, company: company);
     } catch (_) {
       return (duplicate: false, company: '');
     }
   }
 
-  /// Verify an invoice number against TinkerPro Invoice (the same
-  /// `searchInvoiceCustomer` external lookup the web uses). Returns the matched
-  /// invoice number on an exact match, or an error code ('not_found' /
-  /// 'unreachable' / a server message).
+  Future<List<LicenseSerialSuggestion>> searchLicenseSerials(String query) async {
+    final q = query.trim();
+    if (q.length < 2) return const [];
+    try {
+      final res = await api.get('searchLicenseSerials', {'q': q, 'limit': '10'});
+      final results = res['results'];
+      if (results is! List) return const [];
+      return [
+        for (final row in results)
+          if (row is Map)
+            LicenseSerialSuggestion.fromJson(Map<String, dynamic>.from(row)),
+      ]..removeWhere((s) => s.serial.isEmpty);
+    } catch (_) {
+      return const [];
+    }
+  }
+
   Future<({bool ok, String? invoice, String? error})> searchInvoice(
-      String term) async {
+    String term,
+  ) async {
     final q = term.trim();
     if (q.isEmpty) return (ok: false, invoice: null, error: 'not_found');
     try {
@@ -367,16 +449,15 @@ class CustomerService {
       if (res['error'] != null) {
         return (ok: false, invoice: null, error: res['error'].toString());
       }
-      String invNo(Map m) => (m['invoice_number'] ??
-              m['invoiceNumber'] ??
-              m['invoice_no'] ??
-              m['invoiceNo'] ??
-              m['number'] ??
-              m['invoice'] ??
-              '')
-          .toString();
-      // The list may arrive under data/results/invoices, as a bare array
-      // (wrapped by ApiClient as {'data': [...]}), or as a single object.
+      String invNo(Map m) =>
+          (m['invoice_number'] ??
+                  m['invoiceNumber'] ??
+                  m['invoice_no'] ??
+                  m['invoiceNo'] ??
+                  m['number'] ??
+                  m['invoice'] ??
+                  '')
+              .toString();
       List list;
       if (res['invoice_number'] != null) {
         list = [res];
@@ -396,9 +477,6 @@ class CustomerService {
     }
   }
 
-  /// Upload one document file to the web server's raw-store endpoint and get
-  /// back the metadata to hand to `addcustomer`. Pure storage (no OCR) — the
-  /// `doc_type` is decided by which array the metadata lands in at save time.
   Future<UploadedDoc?> uploadDocument(String filePath) async {
     try {
       final res = await api.postPathMultipart(
@@ -413,52 +491,345 @@ class CustomerService {
     return null;
   }
 
-  /// Run the AI/OCR extraction over uploaded BIR documents and return
-  /// form-ready field values plus the stored-document metadata (extraction
-  /// docs). Mirrors the web's `client-multidoc-extract.php` → customer.js
-  /// prefill flow. The endpoint keeps the connection alive during OCR, which
-  /// can take a while — hence the generous timeout.
-  /// Run the AI/OCR extraction over BIR documents, optionally including a valid
-  /// ID (sent as `valid_id_file` + `valid_id_type`). We use THIS endpoint for
-  /// the valid ID rather than the dedicated `valid-id-extract.php` because only
-  /// this one streams keep-alive bytes during the long OCR — the dedicated
-  /// endpoint blocks and times out behind the production proxy.
-  Future<ExtractionResult> extractDocuments(
-    List<String> paths, {
-    String mode = 'fast',
+  ExtractionResult toExtractionResult(Map<String, dynamic> res) =>
+      _buildExtraction(res);
+
+  static Map<String, dynamic>? _jsonMap(http.Response r) {
+    try {
+      final d = jsonDecode(r.body.trim());
+      if (d is Map) return Map<String, dynamic>.from(d);
+    } catch (_) {}
+    return null;
+  }
+
+  Future<MultiDocExtractOutcome> extractDocuments({
+    required List<String> paths,
     String? validIdPath,
-    String? validIdType,
+    String? manualName,
+    String? manualBirthdate,
+    String mode = 'accurate',
+    void Function()? onUploaded,
+    void Function(Map<String, dynamic> progress)? onProgress,
+    bool Function()? isCancelled,
   }) async {
-    if (paths.isEmpty) return ExtractionResult.error('No files selected.');
+    final manual = manualName != null;
+    Map<String, dynamic>? first;
     try {
       final res = await api
-          .postPathMultipartFiles(
-            'client-multidoc-extract.php',
+          .rawPostMultipart(
+            api.pathUri('client-multidoc-extract.php'),
             fields: {
               'extract_mode': mode,
-              if (validIdType != null && validIdType.isNotEmpty)
-                'valid_id_type': validIdType,
+              if (!manual && validIdPath != null) 'valid_id_type': '',
+              if (manual) 'valid_id_manual': '1',
+              if (manual) 'valid_id_manual_name': manualName,
+              if (manual) 'valid_id_manual_birthdate': manualBirthdate ?? '',
             },
             files: [
               for (final p in paths) (field: 'files[]', path: p),
-              if (validIdPath != null && validIdPath.isNotEmpty)
+              if (!manual && validIdPath != null)
                 (field: 'valid_id_file', path: validIdPath),
             ],
           )
-          .timeout(const Duration(minutes: 4));
-      if (res['error'] != null) {
-        return ExtractionResult.error(res['error'].toString());
+          .timeout(const Duration(seconds: 600));
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        return const MultiDocExtractOutcome.failed(
+          'Server failed to process the uploaded documents.',
+        );
       }
-      return _buildExtraction(res);
+      first = _jsonMap(res);
     } on TimeoutException {
-      return ExtractionResult.error('Extraction timed out. Please try again.');
+      return const MultiDocExtractOutcome.failed(
+        'Extraction timed out. Try fewer documents or use Fast mode.',
+      );
+    } on UploadTimeoutException {
+      return const MultiDocExtractOutcome.failed(
+        'Extraction timed out. Try fewer documents or use Fast mode.',
+      );
     } catch (_) {
-      return ExtractionResult.error('Extraction failed. Please try again.');
+      return const MultiDocExtractOutcome.failed(
+        'Server failed to process the uploaded documents.',
+      );
+    }
+    if (first == null) {
+      return const MultiDocExtractOutcome.failed(
+        'Server failed to process the uploaded documents.',
+      );
+    }
+    onUploaded?.call();
+    final jobId = (first['job_id'] ?? '').toString();
+    if (first['async'] != true || jobId.isEmpty) {
+      return MultiDocExtractOutcome.done(first);
+    }
+
+    const maxWait = Duration(milliseconds: 900000);
+    const maxErrors = 5;
+    final startedAt = DateTime.now();
+    var consecutiveErrors = 0;
+
+    Duration nextInterval() {
+      final age = DateTime.now().difference(startedAt).inMilliseconds;
+      if (age < 20000) return const Duration(milliseconds: 900);
+      if (age < 90000) return const Duration(milliseconds: 1800);
+      return const Duration(milliseconds: 3000);
+    }
+
+    while (true) {
+      if (isCancelled?.call() == true) {
+        return const MultiDocExtractOutcome.failed('Extraction cancelled.');
+      }
+      try {
+        final r = await api
+            .rawGet(
+              api.pathUri('client-multidoc-extract-status.php', {
+                'job': jobId,
+                '_': DateTime.now().millisecondsSinceEpoch.toString(),
+              }),
+            )
+            .timeout(const Duration(seconds: 30));
+        if (r.statusCode == 403) {
+          return const MultiDocExtractOutcome.failed(
+            'Lost contact with the server while extracting.',
+          );
+        }
+        final res = (r.statusCode >= 200 && r.statusCode < 300)
+            ? _jsonMap(r)
+            : null;
+        if (res == null) throw const FormatException('bad status response');
+        consecutiveErrors = 0;
+        final status = (res['status'] ?? '').toString();
+        if (status == 'running') {
+          onProgress?.call(res);
+          if (DateTime.now().difference(startedAt) > maxWait) {
+            return const MultiDocExtractOutcome.failed(
+              'Extraction is taking too long. Try fewer documents or use Fast mode.',
+            );
+          }
+          await Future<void>.delayed(nextInterval());
+          continue;
+        }
+        if (status == 'error') {
+          final err = (res['error'] ?? '').toString();
+          return MultiDocExtractOutcome.failed(
+            err.isEmpty ? 'Extraction failed on the server.' : err,
+          );
+        }
+        return MultiDocExtractOutcome.done(res);
+      } catch (_) {
+        consecutiveErrors++;
+        if (consecutiveErrors >= maxErrors) {
+          return const MultiDocExtractOutcome.failed(
+            'Lost contact with the server while extracting.',
+          );
+        }
+        await Future<void>.delayed(nextInterval());
+      }
     }
   }
 
-  // PSGC address data lives as static JSON at the site root; fetched once and
-  // cached on this service instance (which lives for the whole session).
+  Map<String, List<SoftwareVersionInfo>>? _catalogCache;
+
+  Future<Map<String, List<SoftwareVersionInfo>>> softwareCatalog({
+    bool refresh = false,
+  }) async {
+    if (!refresh && _catalogCache != null) return _catalogCache!;
+    try {
+      final res = await api.get('software.catalog');
+      if (res['status'] == 'success') {
+        _catalogCache = BirLogic.parseCatalog(res['data']);
+        return _catalogCache!;
+      }
+    } catch (_) {}
+    return _catalogCache ?? const {};
+  }
+
+  List<PsicItem>? _psicCache;
+
+  Future<List<PsicItem>> psicList() async {
+    if (_psicCache != null && _psicCache!.isNotEmpty) return _psicCache!;
+    try {
+      final r = await api.rawGet(api.pathUri('json-reason.js'), json: false);
+      if (r.statusCode >= 200 && r.statusCode < 300) {
+        final list = BirLogic.parsePsic(utf8.decode(r.bodyBytes));
+        if (list.isNotEmpty) _psicCache = list;
+        return list;
+      }
+    } catch (_) {}
+    return const [];
+  }
+
+  Future<({Map<String, dynamic>? stored, String? error})> uploadAttachment(
+    String filePath,
+  ) async {
+    try {
+      final r = await api
+          .rawPostMultipart(
+            api.pathUri('client-upload-attachment.php'),
+            files: [(field: 'file', path: filePath)],
+          )
+          .timeout(const Duration(seconds: 60));
+      final res = _jsonMap(r);
+      if (res == null || r.statusCode >= 400) {
+        return (stored: null, error: null);
+      }
+      if (res['error'] != null) {
+        return (stored: null, error: res['error'].toString());
+      }
+      final stored = res['stored_file'];
+      if (stored is Map) {
+        return (stored: Map<String, dynamic>.from(stored), error: null);
+      }
+    } catch (_) {}
+    return (stored: null, error: null);
+  }
+
+  Future<({Map<String, dynamic>? res, bool failed})> addDocument(
+    String filePath,
+  ) async {
+    try {
+      final r = await api
+          .rawPostMultipart(
+            api.pathUri('client-add-document.php'),
+            files: [(field: 'file', path: filePath)],
+          )
+          .timeout(const Duration(seconds: 120));
+      final res = _jsonMap(r);
+      if (res == null || r.statusCode >= 400) return (res: null, failed: true);
+      return (res: res, failed: false);
+    } catch (_) {
+      return (res: null, failed: true);
+    }
+  }
+
+  Future<({bool ok, String message, int customerId, String? networkError})>
+  addCustomer(Map<String, String> fields) async {
+    try {
+      final r = await api.rawPostForm(
+        api.pathUri('api.php', {'action': 'addcustomer'}),
+        fields,
+      );
+      final res = _jsonMap(r);
+      if (res == null) {
+        return (
+          ok: false,
+          message: '',
+          customerId: 0,
+          networkError: r.statusCode >= 400
+              ? 'HTTP ${r.statusCode}'
+              : 'Invalid server response',
+        );
+      }
+      return (
+        ok: res['status'] == 'success',
+        message: (res['message'] ?? '').toString(),
+        customerId: _asIntOrNull(res['customer_id']) ?? 0,
+        networkError: null,
+      );
+    } catch (e) {
+      return (ok: false, message: '', customerId: 0, networkError: '$e');
+    }
+  }
+
+  Future<({String? path, String filename, String? error})> exportClientCsv(
+    Map<String, String> fields,
+  ) async {
+    const fallbackName = 'ACCREG_POS_STANDALONE.csv';
+    try {
+      final r = await api.rawPostForm(api.pathUri('client-export-csv.php'), {
+        ...fields,
+        'response_mode': 'json',
+      });
+      if (r.statusCode < 200 || r.statusCode >= 300) {
+        return (
+          path: null,
+          filename: fallbackName,
+          error: 'Failed to prepare CSV file.',
+        );
+      }
+      final res = _jsonMap(r);
+      if (res == null) {
+        return (
+          path: null,
+          filename: fallbackName,
+          error: 'Unexpected export response format.',
+        );
+      }
+      final url = (res['url'] ?? '').toString();
+      if (res['success'] != true || url.isEmpty) {
+        return (
+          path: null,
+          filename: fallbackName,
+          error: (res['message'] ?? 'Failed to prepare CSV file.').toString(),
+        );
+      }
+      final filename = (res['filename'] ?? '').toString().isEmpty
+          ? fallbackName
+          : res['filename'].toString();
+      final base = api.pathUri(url.split('?').first);
+      final query = Map<String, String>.from(Uri.parse(url).queryParameters)
+        ..['v'] = DateTime.now().millisecondsSinceEpoch.toString();
+      final dl = await api.rawGet(
+        base.replace(queryParameters: query),
+        json: false,
+      );
+      if (dl.statusCode < 200 || dl.statusCode >= 300 || dl.bodyBytes.isEmpty) {
+        return (
+          path: null,
+          filename: filename,
+          error: 'Failed to download CSV file.',
+        );
+      }
+      io.Directory? dir;
+      try {
+        dir = await getDownloadsDirectory();
+      } catch (_) {}
+      dir ??= await getApplicationDocumentsDirectory();
+      final safeName = filename.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
+      final file = io.File('${dir.path}${io.Platform.pathSeparator}$safeName');
+      await file.writeAsBytes(dl.bodyBytes, flush: true);
+      return (path: file.path, filename: filename, error: null);
+    } catch (e) {
+      return (path: null, filename: fallbackName, error: '$e');
+    }
+  }
+
+  Future<({Map<String, dynamic>? data, String? error})> extractBirPdf(
+    String filePath,
+  ) async {
+    try {
+      final r = await api.rawPostMultipart(
+        api.pathUri('pdf-extract-py.php'),
+        files: [(field: 'pdf', path: filePath)],
+      );
+      final res = _jsonMap(r);
+      if (res == null || r.statusCode >= 400) {
+        return (
+          data: null,
+          error:
+              res?['error']?.toString() ??
+              'Failed to process PDF file. Please try again.',
+        );
+      }
+      if (res['error'] != null) {
+        return (data: null, error: res['error'].toString());
+      }
+      return (data: res, error: null);
+    } catch (_) {
+      return (
+        data: null,
+        error: 'Failed to process PDF file. Please try again.',
+      );
+    }
+  }
+
+  Future<Map<String, dynamic>?> serialMeta(String sn) async {
+    try {
+      final res = await api.get('getSerialMeta', {'sn': sn});
+      if (res.isNotEmpty) return res;
+    } catch (_) {}
+    return null;
+  }
+
   List<Province>? _provincesCache;
   List<City>? _allCitiesCache;
   final Map<String, List<City>> _cityByProvince = {};
@@ -469,12 +840,14 @@ class CustomerService {
       final res = await api.getPath('ph-json/province.json');
       final raw = res['data'];
       if (raw is List) {
-        final list = raw
-            .whereType<Map>()
-            .map((e) => Province.fromJson(Map<String, dynamic>.from(e)))
-            .toList()
-          ..sort(
-              (a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+        final list =
+            raw
+                .whereType<Map>()
+                .map((e) => Province.fromJson(Map<String, dynamic>.from(e)))
+                .toList()
+              ..sort(
+                (a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()),
+              );
         _provincesCache = list;
         return list;
       }
@@ -488,10 +861,11 @@ class CustomerService {
     if (cached != null) return cached;
     try {
       _allCitiesCache ??= await _loadAllCities();
-      final list = _allCitiesCache!
-          .where((c) => c.provinceCode == provinceCode)
-          .toList()
-        ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+      final list =
+          _allCitiesCache!.where((c) => c.provinceCode == provinceCode).toList()
+            ..sort(
+              (a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()),
+            );
       _cityByProvince[provinceCode] = list;
       return list;
     } catch (_) {}
@@ -510,6 +884,212 @@ class CustomerService {
     return const [];
   }
 
+  static List<String> splitSerials(String raw) {
+    final out = <String>[];
+    for (final part in raw.split(RegExp(r'[/,]'))) {
+      final t = part.replaceAll(RegExp(r'\s+'), '');
+      if (t.isNotEmpty && !out.contains(t)) out.add(t);
+    }
+    return out;
+  }
+
+  Future<({bool ok, String message})> saveExtractedRegistration({
+    required CustomerDetail existing,
+    required String companyName,
+    required String tin,
+    required String rdo,
+    required String address,
+    required String accNumber,
+    required String softwareName,
+    required String serialNumber,
+    required String firstName,
+    required String middleName,
+    required String lastName,
+    required String pdfFile,
+    required String isVat,
+  }) async {
+    String norm(String v) => v.replaceAll(RegExp(r'\s+'), '');
+    final serials = serialNumber
+        .split('/')
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toList();
+    final entries = <Map<String, dynamic>>[];
+    for (final sn in serials) {
+      SerialEntry? saved;
+      for (final e in existing.serialEntries) {
+        if (norm(e.serialNumber) == norm(sn)) {
+          saved = e;
+          break;
+        }
+      }
+      entries.add(
+        SerialEntry(
+          serialNumberType: saved?.serialNumberType ?? '',
+          serverType: saved?.serverType ?? '',
+          serialNumber: sn,
+          brand: saved?.brand ?? '',
+          model: saved?.model ?? '',
+        ).toJson(),
+      );
+    }
+    final fields = <String, String>{
+      'customer_id': existing.id.toString(),
+      'companyname': companyName,
+      'tin': tin,
+      'branch_code': existing.branchCode,
+      'tin_issuance_date': existing.tinIssuanceDate,
+      'rdo': rdo,
+      'businessline': existing.businessLine,
+      'address': address,
+      'min': existing.min,
+      'ptu': existing.ptu,
+      'pos_date_issued': existing.posDateIssued,
+      'invoice_number': existing.invoiceNumber,
+      'softwarename': softwareName,
+      'acc_number': accNumber,
+      'sn': serials.join('/'),
+      'firstname': firstName,
+      'middlename': middleName,
+      'lastname': lastName,
+      'email': existing.email,
+      'username': existing.username,
+      'password': existing.password,
+      'is_vat': isVat,
+      'province': existing.provinceCode,
+      'province_text': existing.provinceName,
+      'city': existing.cityCode,
+      'city_text': existing.cityName,
+      'pdf_file': pdfFile,
+      'step2': '1',
+      'serial_entries': jsonEncode(entries),
+    };
+    try {
+      final res = await api.post('updateCustomer', body: fields);
+      final ok = res['status'] == 'success' || res['success'] == true;
+      if (ok) return (ok: true, message: 'Customer Updated Successfully');
+      return (
+        ok: false,
+        message:
+            'Customer Not Updated: ${(res['message'] ?? 'Unknown error').toString()}',
+      );
+    } catch (e) {
+      return (ok: false, message: 'An error occurred: $e');
+    }
+  }
+
+  Future<({List<Map<String, dynamic>>? items, String? error})>
+  extractPtuDocuments({
+    required int customerId,
+    required String serialNumber,
+    required List<String> paths,
+  }) async {
+    if (paths.isEmpty) {
+      return (
+        items: null,
+        error: 'Failed to process PDF file. Please try again.',
+      );
+    }
+    try {
+      final r = await api.rawPostMultipart(
+        api.pathUri('step3-pdf-text.php'),
+        fields: {'cus_id': customerId.toString(), 'serialnum': serialNumber},
+        files: [for (final p in paths) (field: 'pdf[]', path: p)],
+      );
+      if (r.statusCode < 200 || r.statusCode >= 300) {
+        return (
+          items: null,
+          error: 'Failed to process PDF file. Please try again.',
+        );
+      }
+      Object? decoded;
+      try {
+        decoded = jsonDecode(r.body.trim());
+      } catch (_) {
+        return (items: null, error: 'Invalid server response');
+      }
+      if (decoded is Map && decoded['error'] != null) {
+        return (items: null, error: decoded['error'].toString());
+      }
+      final list = decoded is List ? decoded : [decoded];
+      return (
+        items: list
+            .whereType<Map>()
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList(),
+        error: null,
+      );
+    } catch (_) {
+      return (
+        items: null,
+        error: 'Failed to process PDF file. Please try again.',
+      );
+    }
+  }
+
+  Future<({bool ok, String message})> step3UpdateCustomerData({
+    required int customerId,
+    required String posDateIssued,
+    required String ptu,
+    required String min,
+    required String filename,
+    required String machineDetails,
+  }) async {
+    try {
+      final res = await api.post(
+        'step3UpdateCustomerData',
+        body: {
+          'customerId': customerId.toString(),
+          'pos_date_issued': posDateIssued,
+          'ptu': ptu,
+          'min': min,
+          'filename': filename,
+          'machineDetails': machineDetails,
+        },
+      );
+      final ok = res['status'] == 'success' || res['success'] == true;
+      if (ok) return (ok: true, message: 'Successfully Added');
+      return (
+        ok: false,
+        message:
+            'Failed to update customer: ${(res['message'] ?? 'Unknown error').toString()}',
+      );
+    } catch (e) {
+      return (ok: false, message: 'Failed to update customer: $e');
+    }
+  }
+
+  Future<({bool ok, String message})> advancePtuManual({
+    required int customerId,
+    required String ptu,
+    required String min,
+    String accNum = '',
+    String posDateIssued = '',
+  }) async {
+    try {
+      final res = await api.post(
+        'advancePtuManual',
+        body: {
+          'customerId': customerId.toString(),
+          'ptu': ptu,
+          'min': min,
+          'acc_num': accNum,
+          'pos_date_issued': posDateIssued,
+        },
+      );
+      if (res['status'] == 'success') {
+        return (ok: true, message: 'Registration completed successfully.');
+      }
+      return (
+        ok: false,
+        message: (res['message'] ?? 'Failed to complete registration.')
+            .toString(),
+      );
+    } catch (e) {
+      return (ok: false, message: 'Failed to complete registration: $e');
+    }
+  }
+
   int? _asIntOrNull(Object? v) {
     if (v == null) return null;
     if (v is int) return v;
@@ -525,7 +1105,6 @@ class LeadService {
   Future<List<LeadBrief>> list() async {
     try {
       final res = await api.get('getleads');
-      // Backend returns either a bare array or ApiClient wraps it as {'data': [...]}.
       final raw = res['data'] ?? res;
       if (raw is List) {
         return raw
@@ -539,8 +1118,10 @@ class LeadService {
 
   Future<bool> updateNote(int id, String note) async {
     try {
-      final res = await api.post('updateLeadNote',
-          body: {'id': id.toString(), 'note': note});
+      final res = await api.post(
+        'updateLeadNote',
+        body: {'id': id.toString(), 'note': note},
+      );
       return res['success'] == true || res['status'] == 'success';
     } catch (_) {
       return false;
@@ -549,8 +1130,7 @@ class LeadService {
 
   Future<bool> delete(int id) async {
     try {
-      final res =
-          await api.post('deleteLead', body: {'id': id.toString()});
+      final res = await api.post('deleteLead', body: {'id': id.toString()});
       return res['success'] == true || res['status'] == 'success';
     } catch (_) {
       return false;
@@ -577,15 +1157,9 @@ class TicketService {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Document-extraction parsing — Dart ports of the web's customer.js prefill
-// logic so the app fills the BIR form the same way the web app does.
-// ─────────────────────────────────────────────────────────────────────────────
-
 ExtractionResult _buildExtraction(Map<String, dynamic> res) {
   String s(dynamic v) => (v ?? '').toString();
 
-  // Stored files — split BIR extraction docs from the (optional) valid-ID entry.
   final rawStored = res['storedFiles'];
   final docs = <UploadedDoc>[];
   Map<String, dynamic>? validIdStored;
@@ -600,7 +1174,6 @@ ExtractionResult _buildExtraction(Map<String, dynamic> res) {
     }
   }
 
-  // Valid ID (present when one was scanned): capture its details + document.
   final vIdType = s(res['ValidIDType']);
   final vIdName = s(res['IDHolderName']);
   final vIdNumber = s(res['ValidIDNumber']);
@@ -623,7 +1196,6 @@ ExtractionResult _buildExtraction(Map<String, dynamic> res) {
     );
   }
 
-  // TIN + branch: digits only; first 9 → TIN (xxx-xxx-xxx), the rest → branch.
   final tinDigits = (s(res['TIN_BranchCode']) + s(res['BranchCode']))
       .replaceAll(RegExp(r'[^0-9]'), '');
   final tin9 = tinDigits.length >= 9 ? tinDigits.substring(0, 9) : tinDigits;
@@ -632,7 +1204,6 @@ ExtractionResult _buildExtraction(Map<String, dynamic> res) {
       ? '${tin9.substring(0, 3)}-${tin9.substring(3, 6)}-${tin9.substring(6, 9)}'
       : _groupBy3(tin9);
 
-  // Owner name → first/middle/last (or promote a corporate name to company).
   var company = s(res['BusinessName']);
   final owner = _parseOwnerName(s(res['OwnerName']));
   var first = owner.first, middle = owner.middle, last = owner.last;
@@ -643,13 +1214,14 @@ ExtractionResult _buildExtraction(Map<String, dynamic> res) {
     last = '';
   }
 
-  // Prefer the valid-ID holder's name for the owner when a valid ID was scanned
-  // (matches the web registration/extraction form).
   if (hasValidId) {
     var idFirst = s(res['IDHolderFirstName']).trim();
     var idMiddle = s(res['IDHolderMiddleName']).trim();
     var idLast = s(res['IDHolderLastName']).trim();
-    if (idFirst.isEmpty && idMiddle.isEmpty && idLast.isEmpty && vIdName.isNotEmpty) {
+    if (idFirst.isEmpty &&
+        idMiddle.isEmpty &&
+        idLast.isEmpty &&
+        vIdName.isNotEmpty) {
       final p = _parseOwnerName(vIdName);
       idFirst = p.first;
       idMiddle = p.middle;
@@ -692,8 +1264,6 @@ String _groupBy3(String digits) {
   return parts.join('-');
 }
 
-/// Port of normalizeRegistrationType() + the raw-text VAT scan in customer.js.
-/// Returns true (VAT), false (Non-VAT), or null when undetermined.
 bool? _detectVat(String registrationType, String rawText) {
   String norm(String v) {
     final u = v.trim().toUpperCase();
@@ -727,13 +1297,9 @@ bool? _detectVat(String registrationType, String rawText) {
   return null;
 }
 
-/// Port of parseOwnerName() in customer.js — turns a raw BIR "name of taxpayer"
-/// string into first/middle/last, rejecting OCR garbage and detecting
-/// corporate names.
 ({String full, String first, String middle, String last, bool isCorporate})
-    _parseOwnerName(String raw) {
-  const empty =
-      (full: '', first: '', middle: '', last: '', isCorporate: false);
+_parseOwnerName(String raw) {
+  const empty = (full: '', first: '', middle: '', last: '', isCorporate: false);
 
   var cleaned = raw
       .replaceAll(RegExp(r'^[\s.,\-_:;|/\\#*]+'), '')
@@ -747,19 +1313,48 @@ bool? _detectVat(String registrationType, String rawText) {
       .replaceAll(';', ',');
 
   const garbage = [
-    'REPUBLIKA', 'PILIPINAS', 'KAGAWARAN', 'PANANALAPI', 'KAWANIHAN',
-    'KAWANEAN', 'RENTAS', 'INTERNAS', 'KAGAWARA', 'EUITWAS', 'PANANALA',
-    'PANANALAP', 'PANAN', 'RERIO', 'RNAS',
-    'BUREAU OF INTERNAL REVENUE', 'CERTIFICATE OF REGISTRATION',
-    'BIR FORM', 'ASSISTANT REVENUE', 'DISTRICT OFFICER',
-    'TIN ISSUANCE', 'NAME OF TAXPAYER', 'OF TAXPAYER',
-    'TIN & BRANCH', 'BRANCH CODE',
-    'REGISTERED NAME', 'DATE OF REGISTRATION', 'BUSINESS ADDRESS',
-    'RDO CODE', 'LINE OF BUSINESS', 'REGISTRATION TYPE',
-    'DATE OCN GENERATED', 'OCN GENERATED',
-    'PAYMENT MODE', 'QUARTERLY', 'MONTHLY', 'ANNUALLY',
-    'SEMI-ANNUALLY', 'HEAD OFFICE', 'REGISTERING OFFICE',
-    'TRADE NAME', 'BUSINESS INFORMATION',
+    'REPUBLIKA',
+    'PILIPINAS',
+    'KAGAWARAN',
+    'PANANALAPI',
+    'KAWANIHAN',
+    'KAWANEAN',
+    'RENTAS',
+    'INTERNAS',
+    'KAGAWARA',
+    'EUITWAS',
+    'PANANALA',
+    'PANANALAP',
+    'PANAN',
+    'RERIO',
+    'RNAS',
+    'BUREAU OF INTERNAL REVENUE',
+    'CERTIFICATE OF REGISTRATION',
+    'BIR FORM',
+    'ASSISTANT REVENUE',
+    'DISTRICT OFFICER',
+    'TIN ISSUANCE',
+    'NAME OF TAXPAYER',
+    'OF TAXPAYER',
+    'TIN & BRANCH',
+    'BRANCH CODE',
+    'REGISTERED NAME',
+    'DATE OF REGISTRATION',
+    'BUSINESS ADDRESS',
+    'RDO CODE',
+    'LINE OF BUSINESS',
+    'REGISTRATION TYPE',
+    'DATE OCN GENERATED',
+    'OCN GENERATED',
+    'PAYMENT MODE',
+    'QUARTERLY',
+    'MONTHLY',
+    'ANNUALLY',
+    'SEMI-ANNUALLY',
+    'HEAD OFFICE',
+    'REGISTERING OFFICE',
+    'TRADE NAME',
+    'BUSINESS INFORMATION',
   ];
   for (final g in garbage) {
     if (cleaned.contains(g)) return empty;
@@ -767,14 +1362,18 @@ bool? _detectVat(String registrationType, String rawText) {
   if (RegExp(r'^(N/A|NA|NONE|NULL|-+)$').hasMatch(cleaned)) return empty;
 
   final corpSuffixes = RegExp(
-      r'\b(INC\.?|INCS?|ING\.?|CORP\.?|CORPORATION|LLC|LTD\.?|LIMITED|ENTERPRISES?|OPC|FOUNDATION|ASSOCIATION)\b');
+    r'\b(INC\.?|INCS?|ING\.?|CORP\.?|CORPORATION|LLC|LTD\.?|LIMITED|ENTERPRISES?|OPC|FOUNDATION|ASSOCIATION)\b',
+  );
   final bizKeywords = RegExp(
-      r'\b(CAFE|RESTAURANT|TRADING|SHOP|STORE|MART|SALON|BAKERY|PHARMACY|HARDWARE|HOTEL|RESORT|CONSTRUCTION|SERVICES|SUPPLY|MANUFACTURING|FOOD|BEVERAGES|REALTY|PROPERTIES|DEVELOPMENT|LOGISTICS|TRANSPORT|FREIGHT|PRINTING|MARKETING)\b');
+    r'\b(CAFE|RESTAURANT|TRADING|SHOP|STORE|MART|SALON|BAKERY|PHARMACY|HARDWARE|HOTEL|RESORT|CONSTRUCTION|SERVICES|SUPPLY|MANUFACTURING|FOOD|BEVERAGES|REALTY|PROPERTIES|DEVELOPMENT|LOGISTICS|TRANSPORT|FREIGHT|PRINTING|MARKETING)\b',
+  );
   var isCorporate = corpSuffixes.hasMatch(cleaned);
   if (!isCorporate) {
     final bizHits = bizKeywords.allMatches(cleaned).length;
-    final wordCount =
-        cleaned.split(RegExp(r'\s+')).where((e) => e.isNotEmpty).length;
+    final wordCount = cleaned
+        .split(RegExp(r'\s+'))
+        .where((e) => e.isNotEmpty)
+        .length;
     isCorporate = bizHits >= 2 || (bizHits >= 1 && wordCount >= 4);
   }
   if (isCorporate) {
@@ -787,20 +1386,20 @@ bool? _detectVat(String registrationType, String rawText) {
   const months =
       'JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER';
   cleaned = cleaned
-      .replaceAll(
-          RegExp(r'\s+(' + months + r')\s+\d{1,2},?\s+\d{4}\s*$'), '')
+      .replaceAll(RegExp(r'\s+(' + months + r')\s+\d{1,2},?\s+\d{4}\s*$'), '')
       .trim();
-  cleaned =
-      cleaned.replaceAll(RegExp(r'\s+(' + months + r')\s*$'), '').trim();
+  cleaned = cleaned.replaceAll(RegExp(r'\s+(' + months + r')\s*$'), '').trim();
   if (cleaned.isEmpty) return empty;
 
   var first = '', middle = '', last = '';
   if (cleaned.contains(',')) {
-    // "LASTNAME, FIRSTNAME MIDDLENAME"
     final commaParts = cleaned.split(',');
     last = commaParts[0].trim();
     final rest = commaParts.sublist(1).join(',').trim();
-    final restWords = rest.split(RegExp(r'\s+')).where((e) => e.isNotEmpty).toList();
+    final restWords = rest
+        .split(RegExp(r'\s+'))
+        .where((e) => e.isNotEmpty)
+        .toList();
     if (restWords.length >= 2) {
       first = restWords.sublist(0, restWords.length - 1).join(' ');
       middle = restWords.last;
@@ -809,8 +1408,10 @@ bool? _detectVat(String registrationType, String rawText) {
     }
     cleaned = [first, middle, last].where((e) => e.isNotEmpty).join(' ');
   } else {
-    // "FIRSTNAME MIDDLENAME LASTNAME"
-    final words = cleaned.split(RegExp(r'\s+')).where((e) => e.isNotEmpty).toList();
+    final words = cleaned
+        .split(RegExp(r'\s+'))
+        .where((e) => e.isNotEmpty)
+        .toList();
     if (words.length >= 3) {
       first = words[0];
       middle = words.sublist(1, words.length - 1).join(' ');
@@ -822,5 +1423,11 @@ bool? _detectVat(String registrationType, String rawText) {
       first = words[0];
     }
   }
-  return (full: cleaned, first: first, middle: middle, last: last, isCorporate: false);
+  return (
+    full: cleaned,
+    first: first,
+    middle: middle,
+    last: last,
+    isCorporate: false,
+  );
 }

@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:open_filex/open_filex.dart';
@@ -10,15 +9,10 @@ import 'package:url_launcher/url_launcher.dart';
 import '../models/models.dart';
 import '../services/services.dart';
 import '../theme.dart';
+import '../widgets/pick_source.dart';
 import '../widgets/premium.dart';
+import 'bir_register_widgets.dart';
 
-/// Create / edit a BIR (customer) record. All processing happens on the web
-/// server — this screen only collects the fields the web intake/edit form
-/// collects and POSTs them to `addcustomer` / `updateCustomer` via
-/// [CustomerService.save].
-///
-/// Pass [existing] to edit; leave it null to create. On a successful save the
-/// screen pops with `true` so the caller can refresh.
 class CustomerFormScreen extends StatefulWidget {
   const CustomerFormScreen({
     super.key,
@@ -30,7 +24,6 @@ class CustomerFormScreen extends StatefulWidget {
   final CustomerService service;
   final CustomerDetail? existing;
 
-  /// Invoice number chosen in the "Find Your Invoice" step (create flow).
   final String? initialInvoiceNumber;
 
   bool get isEdit => existing != null;
@@ -40,20 +33,21 @@ class CustomerFormScreen extends StatefulWidget {
 }
 
 class _CustomerFormScreenState extends State<CustomerFormScreen> {
-  // Web form's <select> option sets (see modal/modal.php + customer.php).
   static const _softwareOptions = <String>[
     'TinkerPro POS - Wholesale/Retail V1.0',
     'TinkerPro POS - QuickServe',
   ];
-  // Version options per software (mirrors customer.js).
   static const _softwareVersions = <String, List<String>>{
     'TinkerPro POS - Wholesale/Retail V1.0': ['V1.0'],
     'TinkerPro POS - QuickServe': ['1'],
   };
-  static const _serialTypeOptions = <String>['Server', 'Terminal', 'Standalone'];
+  static const _serialTypeOptions = <String>[
+    'Server',
+    'Terminal',
+    'Standalone',
+  ];
   static const _serverTypeOptions = <String>['Consolidator', 'Global'];
 
-  // Valid-ID types (value, label) — mirrors the web registration form.
   static const _validIdTypes = <(String, String)>[
     ('NATIONAL ID', 'National ID'),
     ("DRIVER'S LICENSE", "Driver's License"),
@@ -65,7 +59,6 @@ class _CustomerFormScreenState extends State<CustomerFormScreen> {
     ('UMID', 'UMID'),
   ];
 
-  // ── Text controllers ──────────────────────────────────────────────────────
   final _companyName = TextEditingController();
   final _tin = TextEditingController();
   final _branchCode = TextEditingController();
@@ -87,17 +80,12 @@ class _CustomerFormScreenState extends State<CustomerFormScreen> {
   final _username = TextEditingController();
   final _password = TextEditingController();
 
-  // Username/password aren't part of the BIR extraction preview — hidden for
-  // now. Flip to true to collect login credentials again.
   final bool _showLogin = false;
 
-  // ── Selections / state ────────────────────────────────────────────────────
   String? _softwareName;
   String? _softwareVersion;
   bool _isVat = true;
 
-  // Location (province/city) is hidden for now — the BIR extraction add-customer
-  // doesn't collect it. Flip to true to bring the section back.
   final bool _showLocation = false;
   List<Province> _provinces = const [];
   List<City> _cities = const [];
@@ -107,24 +95,18 @@ class _CustomerFormScreenState extends State<CustomerFormScreen> {
 
   final List<_SerialRow> _serialRows = [];
 
-  // Newly uploaded documents (create only — updateCustomer ignores documents).
   final List<UploadedDoc> _extractionDocs = [];
   final List<UploadedDoc> _requirementDocs = [];
   bool _uploading = false;
 
-  // Document extraction (AI/OCR) — create only, mirrors the web scan flow.
-  // Documents are uploaded first (held here), then extracted on demand.
   bool _extracting = false;
-  final String _extractMode = 'accurate'; // default; MODE toggle hidden
+  final String _extractMode = 'accurate';
   final List<({String path, String name})> _pendingDocs = [];
 
-  // Valid ID — read together with the BIR docs during "Attach & extract" (the
-  // reliable keep-alive endpoint). Its extracted details (type/number/birthdate/
-  // holder name) are reviewable + editable below.
   String? _validIdType;
-  String? _pendingValidIdPath; // selected, not yet read
+  String? _pendingValidIdPath;
   String? _pendingValidIdName;
-  UploadedDoc? _validIdFile; // stored on the server (after scan or plain upload)
+  UploadedDoc? _validIdFile;
   final _idNumber = TextEditingController();
 
   Timer? _tinDebounce;
@@ -171,17 +153,19 @@ class _CustomerFormScreenState extends State<CustomerFormScreen> {
     }
     if (e.serialEntries.isNotEmpty) {
       for (final s in e.serialEntries) {
-        _serialRows.add(_SerialRow(
-          type: _serialTypeOptions.contains(s.serialNumberType)
-              ? s.serialNumberType
-              : null,
-          serverType: _serverTypeOptions.contains(s.serverType)
-              ? s.serverType
-              : null,
-          sn: s.serialNumber,
-          brand: s.brand,
-          model: s.model,
-        ));
+        _serialRows.add(
+          _SerialRow(
+            type: _serialTypeOptions.contains(s.serialNumberType)
+                ? s.serialNumberType
+                : null,
+            serverType: _serverTypeOptions.contains(s.serverType)
+                ? s.serverType
+                : null,
+            sn: s.serialNumber,
+            brand: s.brand,
+            model: s.model,
+          ),
+        );
       }
     } else {
       _serialRows.add(_SerialRow());
@@ -268,7 +252,6 @@ class _CustomerFormScreenState extends State<CustomerFormScreen> {
     super.dispose();
   }
 
-  // ── TIN duplicate check (advisory) ─────────────────────────────────────────
   void _onTinChanged(String value) {
     _tinDebounce?.cancel();
     if (value.trim().isEmpty) {
@@ -280,47 +263,36 @@ class _CustomerFormScreenState extends State<CustomerFormScreen> {
 
   Future<void> _checkTin() async {
     final tin = _tin.text.trim();
-    // Editing the same record's own TIN shouldn't warn.
     if (widget.isEdit && tin == widget.existing!.tin) {
       if (mounted && _tinWarning.isNotEmpty) setState(() => _tinWarning = '');
       return;
     }
-    final res =
-        await widget.service.checkTinDuplicate(tin, _branchCode.text.trim());
+    final res = await widget.service.checkTinDuplicate(
+      tin,
+      _branchCode.text.trim(),
+    );
     if (!mounted) return;
     setState(() {
       _tinWarning = res.duplicate
           ? 'A record with this TIN already exists'
-              '${res.company.isEmpty ? '' : ' — ${res.company}'}.'
+                '${res.company.isEmpty ? '' : ' — ${res.company}'}.'
           : '';
     });
   }
 
-  // ── Document extraction (AI/OCR) ────────────────────────────────────────────
-  /// Step 1 — pick BIR document files. They're held locally until you tap
-  /// Extract; nothing is sent yet.
   Future<void> _pickBirDocs() async {
-    FilePickerResult? result;
-    try {
-      result = await FilePicker.platform.pickFiles(
-        allowMultiple: true,
-        type: FileType.custom,
-        allowedExtensions: ['pdf', 'jpg', 'jpeg', 'png', 'gif', 'webp'],
-      );
-    } catch (_) {
-      _toast('Could not open the file picker.');
-      return;
-    }
-    final picked = (result?.files ?? const [])
-        .where((f) => f.path != null)
-        .map((f) => (path: f.path!, name: f.name))
-        .toList();
-    if (picked.isEmpty) return;
+    final picked = await pickWithSource(
+      context,
+      multiple: true,
+      allowedExtensions: ['pdf', 'jpg', 'jpeg', 'png', 'gif', 'webp'],
+      cameraLabel: 'Take a photo of the document',
+      fileLabel: 'Choose documents from files',
+      onError: _toast,
+    );
+    if (picked.isEmpty || !mounted) return;
     setState(() => _pendingDocs.addAll(picked));
   }
 
-  /// Step 3 — run OCR/AI over the uploaded documents (and the valid ID, if any)
-  /// and fill the form.
   Future<void> _extractNow() async {
     if (_pendingDocs.isEmpty) {
       _toast('Upload at least one document first.');
@@ -328,13 +300,18 @@ class _CustomerFormScreenState extends State<CustomerFormScreen> {
     }
     FocusScope.of(context).unfocus();
     setState(() => _extracting = true);
-    final r = await widget.service.extractDocuments(
-      _pendingDocs.map((d) => d.path).toList(),
+    final outcome = await widget.service.extractDocuments(
+      paths: _pendingDocs.map((d) => d.path).toList(),
       mode: _extractMode,
       validIdPath: _pendingValidIdPath,
-      validIdType: _validIdType,
     );
     if (!mounted) return;
+    final data = outcome.data;
+    final r = data == null
+        ? ExtractionResult.error(outcome.failure ?? 'Extraction failed.')
+        : (data['error'] != null
+              ? ExtractionResult.error(data['error'].toString())
+              : widget.service.toExtractionResult(data));
     setState(() => _extracting = false);
     if (!r.ok) {
       _toast(r.error ?? 'Extraction failed. You can still fill the form.');
@@ -343,42 +320,36 @@ class _CustomerFormScreenState extends State<CustomerFormScreen> {
     _applyExtraction(r);
   }
 
-  /// Pick a valid ID. It is read (OCR'd) together with the BIR documents when
-  /// you tap "Attach & extract" — the combined endpoint is the only one that
-  /// survives the production proxy. The ID detail fields stay editable.
   Future<void> _pickValidId() async {
     if ((_validIdType ?? '').isEmpty) {
       _toast('Select the valid ID type first.');
       return;
     }
-    FilePickerResult? result;
-    try {
-      result = await FilePicker.platform.pickFiles(
-        type: FileType.custom,
-        allowedExtensions: ['pdf', 'jpg', 'jpeg', 'png', 'gif', 'webp'],
-      );
-    } catch (_) {
-      _toast('Could not open the file picker.');
-      return;
-    }
-    final file = result?.files.singleOrNull;
-    if (file?.path == null) return;
+    final picked = await pickWithSource(
+      context,
+      allowedExtensions: ['pdf', 'jpg', 'jpeg', 'png', 'gif', 'webp'],
+      cameraLabel: 'Take a photo of the ID',
+      fileLabel: 'Choose image or PDF',
+      onError: _toast,
+    );
+    if (picked.isEmpty || !mounted) return;
+    final file = picked.first;
     setState(() {
-      _pendingValidIdPath = file!.path;
+      _pendingValidIdPath = file.path;
       _pendingValidIdName = file.name;
-      _validIdFile = null; // replaced; will be (re)read on next scan
+      _validIdFile = null;
     });
   }
 
-  /// View the attached valid ID — the uploaded copy on the server, or the
-  /// locally-picked file if it hasn't been sent yet.
   Future<void> _viewValidId() async {
     try {
       final f = _validIdFile;
       if (f != null && f.stored.isNotEmpty) {
         final url = '${widget.service.api.baseUrl}/uploads/${f.stored}';
-        final ok = await launchUrl(Uri.parse(url),
-            mode: LaunchMode.externalApplication);
+        final ok = await launchUrl(
+          Uri.parse(url),
+          mode: LaunchMode.externalApplication,
+        );
         if (!ok && mounted) _toast('Could not open the ID.');
       } else if (_pendingValidIdPath != null) {
         await OpenFilex.open(_pendingValidIdPath!);
@@ -402,7 +373,7 @@ class _CustomerFormScreenState extends State<CustomerFormScreen> {
       if (r.lastName.isNotEmpty) _lastName.text = r.lastName;
       if (r.isVat != null) _isVat = r.isVat!;
       _extractionDocs.addAll(r.storedFiles);
-      _pendingDocs.clear(); // now stored server-side, tracked by _extractionDocs
+      _pendingDocs.clear();
       if (r.validIdDoc != null) {
         _validIdFile = r.validIdDoc;
         _pendingValidIdPath = null;
@@ -412,25 +383,23 @@ class _CustomerFormScreenState extends State<CustomerFormScreen> {
       }
     });
     _checkTin();
-    _toast(r.storedFiles.isEmpty
-        ? 'Extraction complete — review the fields below.'
-        : 'Auto-filled from ${r.storedFiles.length} document(s). Review below.');
+    _toast(
+      r.storedFiles.isEmpty
+          ? 'Extraction complete — review the fields below.'
+          : 'Auto-filled from ${r.storedFiles.length} document(s). Review below.',
+    );
   }
 
-  // ── Documents ──────────────────────────────────────────────────────────────
   Future<void> _pickAndUpload(List<UploadedDoc> target) async {
-    FilePickerResult? result;
-    try {
-      result = await FilePicker.platform.pickFiles(
-        type: FileType.custom,
-        allowedExtensions: ['pdf', 'jpg', 'jpeg', 'png', 'gif', 'webp'],
-      );
-    } catch (_) {
-      _toast('Could not open the file picker.');
-      return;
-    }
-    final path = result?.files.singleOrNull?.path;
-    if (path == null) return;
+    final picked = await pickWithSource(
+      context,
+      allowedExtensions: ['pdf', 'jpg', 'jpeg', 'png', 'gif', 'webp'],
+      cameraLabel: 'Take a photo',
+      fileLabel: 'Choose image or PDF',
+      onError: _toast,
+    );
+    if (picked.isEmpty || !mounted) return;
+    final path = picked.first.path;
 
     setState(() => _uploading = true);
     final doc = await widget.service.uploadDocument(path);
@@ -442,7 +411,6 @@ class _CustomerFormScreenState extends State<CustomerFormScreen> {
     if (doc == null) _toast('Upload failed. Please try again.');
   }
 
-  // ── Save ────────────────────────────────────────────────────────────────────
   List<SerialEntry> _collectSerials() {
     return _serialRows
         .where((r) => !r.isEmpty)
@@ -473,8 +441,10 @@ class _CustomerFormScreenState extends State<CustomerFormScreen> {
     req('Business line', _businessLine.text.trim().isNotEmpty);
     req('Software name', (_softwareName ?? '').isNotEmpty);
     req('Accreditation no.', _accNumber.text.trim().isNotEmpty);
-    req('At least one serial number',
-        serials.any((s) => s.serialNumber.isNotEmpty));
+    req(
+      'At least one serial number',
+      serials.any((s) => s.serialNumber.isNotEmpty),
+    );
     req('Valid ID', _pendingValidIdPath != null || _validIdFile != null);
 
     if (missing.isEmpty) return null;
@@ -515,38 +485,37 @@ class _CustomerFormScreenState extends State<CustomerFormScreen> {
       'province_text': _province?.name ?? '',
       'city': _city?.code ?? '',
       'city_text': _city?.name ?? '',
-      // Without province/city the server's normal validation would reject the
-      // save; extraction_mode switches it to the lenient rule set (company/TIN/
-      // address/VAT), matching the web's BIR extraction add-customer.
       if (!_showLocation) 'extraction_mode': '1',
       'step2': '1',
-      'serial_entries':
-          jsonEncode(serials.map((e) => e.toJson()).toList()),
-      // Documents are only processed by addcustomer (create). Harmless on edit.
-      'document_files':
-          jsonEncode(_extractionDocs.map((e) => e.toJson()).toList()),
-      'valid_id_files': jsonEncode(_validIdFile == null
-          ? const []
-          : [
-              {
-                'original': _validIdFile!.original,
-                'stored': _validIdFile!.stored,
-                'mime': _validIdFile!.mime,
-                'size': _validIdFile!.size,
-                'extracted': {
-                  'id_type': _validIdType ?? '',
-                  'id_name': [
-                    _firstName.text.trim(),
-                    _middleName.text.trim(),
-                    _lastName.text.trim(),
-                  ].where((e) => e.isNotEmpty).join(' '),
-                  'id_number': _idNumber.text.trim(),
-                  'id_birthdate': _birthdate.text.trim(),
+      'serial_entries': jsonEncode(serials.map((e) => e.toJson()).toList()),
+      'document_files': jsonEncode(
+        _extractionDocs.map((e) => e.toJson()).toList(),
+      ),
+      'valid_id_files': jsonEncode(
+        _validIdFile == null
+            ? const []
+            : [
+                {
+                  'original': _validIdFile!.original,
+                  'stored': _validIdFile!.stored,
+                  'mime': _validIdFile!.mime,
+                  'size': _validIdFile!.size,
+                  'extracted': {
+                    'id_type': _validIdType ?? '',
+                    'id_name': [
+                      _firstName.text.trim(),
+                      _middleName.text.trim(),
+                      _lastName.text.trim(),
+                    ].where((e) => e.isNotEmpty).join(' '),
+                    'id_number': _idNumber.text.trim(),
+                    'id_birthdate': _birthdate.text.trim(),
+                  },
                 },
-              }
-            ]),
-      'requirement_files':
-          jsonEncode(_requirementDocs.map((e) => e.toJson()).toList()),
+              ],
+      ),
+      'requirement_files': jsonEncode(
+        _requirementDocs.map((e) => e.toJson()).toList(),
+      ),
     };
   }
 
@@ -560,8 +529,6 @@ class _CustomerFormScreenState extends State<CustomerFormScreen> {
       return;
     }
     setState(() => _saving = true);
-    // A valid ID picked but never run through a scan is uploaded plainly so it's
-    // still saved; its details come from the (editable) fields.
     if (_pendingValidIdPath != null && _validIdFile == null) {
       final doc = await widget.service.uploadDocument(_pendingValidIdPath!);
       if (doc != null) _validIdFile = doc;
@@ -585,10 +552,9 @@ class _CustomerFormScreenState extends State<CustomerFormScreen> {
   void _toast(String message) {
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(
-        content: Text(message),
-        duration: const Duration(seconds: 6),
-      ));
+      ..showSnackBar(
+        SnackBar(content: Text(message), duration: const Duration(seconds: 6)),
+      );
   }
 
   Future<void> _pickDate(TextEditingController controller) async {
@@ -613,85 +579,148 @@ class _CustomerFormScreenState extends State<CustomerFormScreen> {
       stationNumber: widget.isEdit
           ? widget.existing!.id.toString().padLeft(2, '0')
           : '＋',
-      stationLabel: 'BIR REGISTRATION',
-      title: widget.isEdit ? 'Edit client.' : 'New client.',
+      stationLabel: 'BIR Registration',
+      title: widget.isEdit ? 'Edit client' : 'New client',
+      subtitle: widget.isEdit
+          ? widget.existing!.companyName
+          : 'Scan documents or fill in manually',
       showBottomBrand: false,
       onBack: () => Navigator.of(context).pop(),
+      bottomBar: _saveBar(context),
       child: ListView(
         physics: const BouncingScrollPhysics(),
+        padding: const EdgeInsets.only(bottom: 8),
         children: [
           if (!widget.isEdit) ...[
             _extractionSection(context),
-            const SizedBox(height: 36),
+            const SizedBox(height: 16),
           ],
-          _sectionHeader(context, 'Business'),
-          _field('COMPANY NAME', _companyName,
-              textCapitalization: TextCapitalization.characters),
-          _field('TIN', _tin,
-              keyboardType: TextInputType.number, onChanged: _onTinChanged),
-          if (_tinWarning.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.only(top: 6, bottom: 4),
-              child: Text(_tinWarning,
-                  style: Theme.of(context)
-                      .textTheme
-                      .bodySmall
-                      ?.copyWith(color: Brand.signal)),
-            ),
-          _field('BRANCH CODE', _branchCode),
-          _dateField('TIN ISSUANCE DATE', _tinIssuance),
-          _field('RDO', _rdo),
-          _field('BUSINESS LINE', _businessLine),
-          _field('BUSINESS ADDRESS', _address, maxLines: 2),
-          const SizedBox(height: 12),
-          _vatSelector(context),
-
-          if (_showLocation) ...[
-            const SizedBox(height: 36),
-            _sectionHeader(context, 'Location'),
-            _provinceDropdown(context),
-            _cityDropdown(context),
-          ],
-
-          const SizedBox(height: 36),
-          _sectionHeader(context, 'Point-of-sale'),
-          _softwareDropdown(context),
-          _softwareVersionDropdown(context),
-          _field('ACCREDITATION NO.', _accNumber),
-          const SizedBox(height: 24),
-          _serialSection(context),
-
-          const SizedBox(height: 36),
-          _sectionHeader(context, 'Owner / contact'),
-          _field('FIRST NAME', _firstName,
-              textCapitalization: TextCapitalization.words),
-          _field('MIDDLE NAME', _middleName,
-              textCapitalization: TextCapitalization.words),
-          _field('LAST NAME', _lastName,
-              textCapitalization: TextCapitalization.words),
-          _dateField('BIRTHDATE', _birthdate),
-          _field('PHONE NUMBER', _phone, keyboardType: TextInputType.phone),
-          _field('EMAIL', _email, keyboardType: TextInputType.emailAddress),
-          if (_showLogin) ...[
-            _field('USERNAME', _username),
-            _field('PASSWORD', _password),
-          ],
-
-          const SizedBox(height: 36),
-          _sectionHeader(context, 'Documents'),
-          _documentsSection(context),
-
-          const SizedBox(height: 40),
-          SignalButton(
-            label: widget.isEdit ? 'Save changes' : 'Create client',
-            busy: _saving,
-            icon: Icons.check,
-            onPressed: _saving ? null : _save,
+          _sectionCard(
+            context,
+            title: 'Business information',
+            subtitle: 'Registered details from the BIR 2303.',
+            icon: Icons.business_rounded,
+            children: [
+              _field(
+                'Company name',
+                _companyName,
+                required: true,
+                textCapitalization: TextCapitalization.characters,
+              ),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    flex: 3,
+                    child: _field(
+                      'TIN',
+                      _tin,
+                      required: true,
+                      keyboardType: TextInputType.number,
+                      onChanged: _onTinChanged,
+                      bottom: _tinWarning.isEmpty ? 14 : 8,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    flex: 2,
+                    child: _field(
+                      'Branch code',
+                      _branchCode,
+                      bottom: _tinWarning.isEmpty ? 14 : 8,
+                    ),
+                  ),
+                ],
+              ),
+              if (_tinWarning.isNotEmpty) _tinWarningBanner(context),
+              _dateField('TIN issuance date', _tinIssuance),
+              _field('RDO', _rdo, required: true),
+              _field('Business line', _businessLine, required: true),
+              _field('Business address', _address, required: true, maxLines: 2),
+              _vatSelector(context),
+            ],
           ),
-          const SizedBox(height: 12),
-          GhostButton(
-            label: 'Cancel',
-            onPressed: () => Navigator.of(context).pop(),
+          if (_showLocation) ...[
+            const SizedBox(height: 16),
+            _sectionCard(
+              context,
+              title: 'Location',
+              icon: Icons.location_on_rounded,
+              children: [_provinceDropdown(context), _cityDropdown(context)],
+            ),
+          ],
+          const SizedBox(height: 16),
+          _sectionCard(
+            context,
+            title: 'Point-of-sale',
+            subtitle: 'Accredited software installed for this client.',
+            icon: Icons.point_of_sale_rounded,
+            children: [
+              _softwareDropdown(context),
+              _softwareVersionDropdown(context),
+              _field(
+                'Accreditation no.',
+                _accNumber,
+                required: true,
+                bottom: 0,
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          _serialSection(context),
+          const SizedBox(height: 16),
+          _sectionCard(
+            context,
+            title: 'Owner / contact',
+            subtitle: 'The registered owner of the business.',
+            icon: Icons.person_rounded,
+            children: [
+              _field(
+                'First name',
+                _firstName,
+                required: true,
+                textCapitalization: TextCapitalization.words,
+              ),
+              _field(
+                'Middle name',
+                _middleName,
+                textCapitalization: TextCapitalization.words,
+              ),
+              _field(
+                'Last name',
+                _lastName,
+                required: true,
+                textCapitalization: TextCapitalization.words,
+              ),
+              _dateField('Birthdate', _birthdate),
+              _field(
+                'Phone number',
+                _phone,
+                keyboardType: TextInputType.phone,
+                prefixIcon: Icons.phone_rounded,
+              ),
+              _field(
+                'Email',
+                _email,
+                keyboardType: TextInputType.emailAddress,
+                prefixIcon: Icons.mail_outline_rounded,
+                bottom: _showLogin ? 14 : 0,
+              ),
+              if (_showLogin) ...[
+                _field('Username', _username, required: true),
+                _field('Password', _password, required: true, bottom: 0),
+              ],
+            ],
+          ),
+          const SizedBox(height: 16),
+          _sectionCard(
+            context,
+            title: 'Documents',
+            subtitle: widget.isEdit
+                ? 'Files on record for this client.'
+                : 'Supporting requirement files.',
+            icon: Icons.folder_rounded,
+            children: [_documentsSection(context)],
           ),
           const SizedBox(height: 24),
         ],
@@ -699,17 +728,141 @@ class _CustomerFormScreenState extends State<CustomerFormScreen> {
     );
   }
 
-  // ── Building blocks ─────────────────────────────────────────────────────────
-  Widget _sectionHeader(BuildContext context, String title) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
+  Widget _saveBar(BuildContext context) {
+    final b = context.brand;
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: b.surface,
+        border: Border(top: BorderSide(color: b.rule)),
+        boxShadow: b.isDark
+            ? const []
+            : [
+                BoxShadow(
+                  color: Brand.navy.withValues(alpha: 0.08),
+                  blurRadius: 16,
+                  offset: const Offset(0, -4),
+                ),
+              ],
+      ),
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),
+          child: Row(
+            children: [
+              Expanded(
+                flex: 2,
+                child: GhostButton(
+                  label: 'Cancel',
+                  onPressed: () => Navigator.of(context).pop(),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                flex: 3,
+                child: SignalButton(
+                  label: widget.isEdit ? 'Save changes' : 'Create client',
+                  busy: _saving,
+                  icon: Icons.check_rounded,
+                  onPressed: _saving ? null : _save,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _sectionCard(
+    BuildContext context, {
+    required String title,
+    required IconData icon,
+    required List<Widget> children,
+    String? subtitle,
+    Widget? trailing,
+  }) {
+    final text = Theme.of(context).textTheme;
+    final b = context.brand;
+    return AppCard(
+      padding: const EdgeInsets.all(16),
+      radius: Brand.radiusLg,
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text(title, style: Theme.of(context).textTheme.headlineMedium),
-          const SizedBox(height: 8),
-          const Hairline(),
-          const SizedBox(height: 8),
+          Row(
+            children: [
+              Container(
+                width: 40,
+                height: 40,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(12),
+                  color: b.tint(b.signal, 0.12),
+                  border: Border.all(color: b.signal.withValues(alpha: 0.4)),
+                ),
+                child: Icon(icon, size: 20, color: b.signal),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(title, style: text.titleMedium),
+                    if (subtitle != null) ...[
+                      const SizedBox(height: 2),
+                      Text(subtitle, style: text.bodySmall),
+                    ],
+                  ],
+                ),
+              ),
+              if (trailing != null) ...[const SizedBox(width: 8), trailing],
+            ],
+          ),
+          const SizedBox(height: 16),
+          ...children,
+        ],
+      ),
+    );
+  }
+
+  Widget _label(BuildContext context, String label, {bool required = false}) {
+    final b = context.brand;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Text.rich(
+        TextSpan(
+          text: label,
+          children: [
+            if (required)
+              const TextSpan(
+                text: ' *',
+                style: TextStyle(color: Brand.danger),
+              ),
+          ],
+        ),
+        style: Theme.of(context).textTheme.labelLarge?.copyWith(
+          color: b.paper,
+          fontWeight: FontWeight.w500,
+        ),
+      ),
+    );
+  }
+
+  Widget _labeled(
+    BuildContext context,
+    String label,
+    Widget child, {
+    bool required = false,
+    double bottom = 14,
+  }) {
+    return Padding(
+      padding: EdgeInsets.only(bottom: bottom),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _label(context, label, required: required),
+          child,
         ],
       ),
     );
@@ -723,38 +876,52 @@ class _CustomerFormScreenState extends State<CustomerFormScreen> {
     TextCapitalization textCapitalization = TextCapitalization.none,
     ValueChanged<String>? onChanged,
     List<TextInputFormatter>? inputFormatters,
+    bool required = false,
+    IconData? prefixIcon,
+    double bottom = 14,
   }) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: TextField(
+    return _labeled(
+      context,
+      label,
+      TextField(
         controller: controller,
         keyboardType: keyboardType,
         maxLines: maxLines,
         textCapitalization: textCapitalization,
         onChanged: onChanged,
         inputFormatters: inputFormatters,
-        style: Theme.of(context).textTheme.titleMedium,
-        decoration: InputDecoration(labelText: label),
+        decoration: InputDecoration(
+          hintText: 'Enter ${_hintLabel(label)}',
+          prefixIcon: prefixIcon == null ? null : Icon(prefixIcon, size: 20),
+        ),
       ),
+      required: required,
+      bottom: bottom,
     );
   }
 
+  static String _hintLabel(String label) {
+    if (label.length > 1 && label[1] == label[1].toUpperCase()) return label;
+    return label[0].toLowerCase() + label.substring(1);
+  }
+
   Widget _dateField(String label, TextEditingController controller) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: TextField(
+    final b = context.brand;
+    return _labeled(
+      context,
+      label,
+      TextField(
         controller: controller,
         readOnly: true,
         onTap: () => _pickDate(controller),
-        style: Theme.of(context).textTheme.titleMedium,
         decoration: InputDecoration(
-          labelText: label,
           hintText: 'YYYY-MM-DD',
+          prefixIcon: const Icon(Icons.event_rounded, size: 20),
           suffixIcon: controller.text.isEmpty
-              ? Icon(Icons.calendar_today_outlined,
-                  size: 16, color: context.brand.paperDim)
+              ? Icon(Icons.expand_more_rounded, size: 20, color: b.paperDim)
               : IconButton(
-                  icon: Icon(Icons.close, size: 16, color: context.brand.paperDim),
+                  tooltip: 'Clear',
+                  icon: Icon(Icons.close_rounded, size: 18, color: b.paperDim),
                   onPressed: () => setState(() => controller.clear()),
                 ),
         ),
@@ -762,51 +929,82 @@ class _CustomerFormScreenState extends State<CustomerFormScreen> {
     );
   }
 
-  Widget _vatSelector(BuildContext context) {
-    return Row(
-      children: [
-        Text('VAT STATUS',
-            style: Theme.of(context).textTheme.labelMedium),
-        const SizedBox(width: 16),
-        _choiceChip('VAT', _isVat, () => setState(() => _isVat = true)),
-        const SizedBox(width: 8),
-        _choiceChip('NON-VAT', !_isVat, () => setState(() => _isVat = false)),
-      ],
-    );
-  }
-
-  Widget _choiceChip(String label, bool selected, VoidCallback onTap) {
-    return InkWell(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-        decoration: BoxDecoration(
-          color: selected ? Brand.signal : Colors.transparent,
-          border: Border.all(
-              color: selected ? Brand.signal : context.brand.rule, width: 1),
-        ),
-        child: Text(
-          label,
-          style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                color: selected ? Brand.canvas : context.brand.paperDim,
-                fontWeight: FontWeight.w700,
-              ),
-        ),
+  Widget _tinWarningBanner(BuildContext context) {
+    final b = context.brand;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 14),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(Brand.radius),
+        color: b.tint(Brand.warning, 0.12),
+        border: Border.all(color: Brand.warning.withValues(alpha: 0.42)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(
+            Icons.warning_amber_rounded,
+            size: 18,
+            color: Brand.warning,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              _tinWarning,
+              style: Theme.of(
+                context,
+              ).textTheme.bodySmall?.copyWith(color: b.paper),
+            ),
+          ),
+        ],
       ),
     );
   }
 
+  Widget _vatSelector(BuildContext context) {
+    return _labeled(
+      context,
+      'VAT status',
+      ChoicePills<bool>(
+        options: const [true, false],
+        value: _isVat,
+        labelOf: (v) => v ? 'VAT' : 'Non-VAT',
+        onChanged: (v) => setState(() => _isVat = v),
+      ),
+      bottom: 0,
+    );
+  }
+
+  InputDecoration _dropdownDecoration(IconData? icon) {
+    return InputDecoration(
+      prefixIcon: icon == null ? null : Icon(icon, size: 20),
+    );
+  }
+
+  Widget _dropdownHint(BuildContext context, String hint) {
+    return Text(
+      hint,
+      style: Theme.of(
+        context,
+      ).textTheme.bodyMedium?.copyWith(color: context.brand.paperDim),
+    );
+  }
+
   Widget _provinceDropdown(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: DropdownButtonFormField<Province>(
+    return _labeled(
+      context,
+      'Province',
+      DropdownButtonFormField<Province>(
         initialValue: _province,
         isExpanded: true,
         dropdownColor: context.brand.surface,
-        style: Theme.of(context).textTheme.titleMedium,
-        decoration: const InputDecoration(labelText: 'PROVINCE'),
-        hint: Text(_provinces.isEmpty ? 'Loading…' : 'Select province',
-            style: Theme.of(context).textTheme.bodyMedium),
+        borderRadius: BorderRadius.circular(Brand.radius),
+        icon: const Icon(Icons.expand_more_rounded),
+        decoration: _dropdownDecoration(Icons.map_rounded),
+        hint: _dropdownHint(
+          context,
+          _provinces.isEmpty ? 'Loading…' : 'Select province',
+        ),
         items: [
           for (final p in _provinces)
             DropdownMenuItem(value: p, child: Text(p.name)),
@@ -817,24 +1015,27 @@ class _CustomerFormScreenState extends State<CustomerFormScreen> {
           _loadCities(p);
         },
       ),
+      required: true,
     );
   }
 
   Widget _cityDropdown(BuildContext context) {
     final disabled = _province == null;
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: DropdownButtonFormField<City>(
+    return _labeled(
+      context,
+      'City / municipality',
+      DropdownButtonFormField<City>(
         initialValue: _city,
         isExpanded: true,
         dropdownColor: context.brand.surface,
-        style: Theme.of(context).textTheme.titleMedium,
-        decoration: const InputDecoration(labelText: 'CITY / MUNICIPALITY'),
-        hint: Text(
+        borderRadius: BorderRadius.circular(Brand.radius),
+        icon: const Icon(Icons.expand_more_rounded),
+        decoration: _dropdownDecoration(Icons.location_city_rounded),
+        hint: _dropdownHint(
+          context,
           disabled
               ? 'Select a province first'
               : (_loadingCities ? 'Loading…' : 'Select city'),
-          style: Theme.of(context).textTheme.bodyMedium,
         ),
         items: [
           for (final c in _cities)
@@ -842,23 +1043,29 @@ class _CustomerFormScreenState extends State<CustomerFormScreen> {
         ],
         onChanged: disabled ? null : (c) => setState(() => _city = c),
       ),
+      required: true,
+      bottom: 0,
     );
   }
 
   Widget _softwareDropdown(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: DropdownButtonFormField<String>(
+    return _labeled(
+      context,
+      'Software name',
+      DropdownButtonFormField<String>(
         initialValue: _softwareName,
         isExpanded: true,
         dropdownColor: context.brand.surface,
-        style: Theme.of(context).textTheme.titleMedium,
-        decoration: const InputDecoration(labelText: 'SOFTWARE NAME'),
-        hint: Text('Select software',
-            style: Theme.of(context).textTheme.bodyMedium),
+        borderRadius: BorderRadius.circular(Brand.radius),
+        icon: const Icon(Icons.expand_more_rounded),
+        decoration: _dropdownDecoration(Icons.apps_rounded),
+        hint: _dropdownHint(context, 'Select software'),
         items: [
           for (final s in _softwareOptions)
-            DropdownMenuItem(value: s, child: Text(s)),
+            DropdownMenuItem(
+              value: s,
+              child: Text(s, overflow: TextOverflow.ellipsis),
+            ),
         ],
         onChanged: (s) => setState(() {
           _softwareName = s;
@@ -866,22 +1073,26 @@ class _CustomerFormScreenState extends State<CustomerFormScreen> {
           _softwareVersion = versions.length == 1 ? versions.first : null;
         }),
       ),
+      required: true,
     );
   }
 
   Widget _softwareVersionDropdown(BuildContext context) {
     final versions = _softwareVersions[_softwareName] ?? const <String>[];
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: DropdownButtonFormField<String>(
+    return _labeled(
+      context,
+      'Software version',
+      DropdownButtonFormField<String>(
         initialValue: _softwareVersion,
         isExpanded: true,
         dropdownColor: context.brand.surface,
-        style: Theme.of(context).textTheme.titleMedium,
-        decoration: const InputDecoration(labelText: 'SOFTWARE VERSION'),
-        hint: Text(
-            versions.isEmpty ? 'Select a software first' : 'Select version',
-            style: Theme.of(context).textTheme.bodyMedium),
+        borderRadius: BorderRadius.circular(Brand.radius),
+        icon: const Icon(Icons.expand_more_rounded),
+        decoration: _dropdownDecoration(Icons.new_releases_rounded),
+        hint: _dropdownHint(
+          context,
+          versions.isEmpty ? 'Select a software first' : 'Select version',
+        ),
         items: [
           for (final v in versions) DropdownMenuItem(value: v, child: Text(v)),
         ],
@@ -892,9 +1103,6 @@ class _CustomerFormScreenState extends State<CustomerFormScreen> {
     );
   }
 
-  /// Valid Type choices for a serial row given what the OTHER rows already use.
-  /// Rules (POS setup): Standalone is mutually exclusive with Server/Terminal,
-  /// and only one Server is allowed (the rest must be Terminals).
   List<String> _serialTypeOptionsFor(int index) {
     final current = _serialRows[index].type;
     final others = <String>{};
@@ -906,47 +1114,29 @@ class _CustomerFormScreenState extends State<CustomerFormScreen> {
 
     Set<String> opts;
     if (others.contains('Standalone')) {
-      // A standalone setup — no Server/Terminal alongside it.
       opts = {'Standalone'};
     } else if (others.contains('Server') || others.contains('Terminal')) {
-      // A server/terminal setup — no Standalone; only one Server.
       opts = {'Server', 'Terminal'};
       if (others.contains('Server')) opts.remove('Server');
     } else {
       opts = {'Server', 'Terminal', 'Standalone'};
     }
-    // Always keep this row's own current value selectable.
     if (current != null && current.isNotEmpty) opts.add(current);
     return _serialTypeOptions.where((t) => opts.contains(t)).toList();
   }
 
-  // ── Serial entries ──────────────────────────────────────────────────────────
   Widget _serialSection(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+    return _sectionCard(
+      context,
+      title: 'Serial numbers',
+      subtitle: 'At least one serial number is required.',
+      icon: Icons.memory_rounded,
+      trailing: TextButton.icon(
+        onPressed: () => setState(() => _serialRows.add(_SerialRow())),
+        icon: const Icon(Icons.add_rounded, size: 18),
+        label: const Text('Add'),
+      ),
       children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Text('SERIAL NUMBERS',
-                style: Theme.of(context).textTheme.labelMedium),
-            InkWell(
-              onTap: () => setState(() => _serialRows.add(_SerialRow())),
-              child: Row(
-                children: [
-                  const Icon(Icons.add, size: 14, color: Brand.signal),
-                  const SizedBox(width: 4),
-                  Text('ADD',
-                      style: Theme.of(context)
-                          .textTheme
-                          .labelMedium
-                          ?.copyWith(color: Brand.signal)),
-                ],
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 8),
         for (int i = 0; i < _serialRows.length; i++)
           _serialRowWidget(context, i),
       ],
@@ -954,88 +1144,121 @@ class _CustomerFormScreenState extends State<CustomerFormScreen> {
   }
 
   Widget _serialRowWidget(BuildContext context, int index) {
+    final b = context.brand;
+    final text = Theme.of(context).textTheme;
     final row = _serialRows[index];
+    final last = index == _serialRows.length - 1;
     return Container(
-      margin: const EdgeInsets.only(bottom: 16),
-      padding: const EdgeInsets.all(14),
+      margin: EdgeInsets.only(bottom: last ? 0 : 12),
+      padding: const EdgeInsets.fromLTRB(14, 10, 14, 14),
       decoration: BoxDecoration(
-        color: context.brand.surface,
-        border: Border.all(color: context.brand.rule, width: 1),
+        color: b.canvas,
+        borderRadius: BorderRadius.circular(Brand.radiusLg),
+        border: Border.all(color: b.signal.withValues(alpha: 0.18)),
       ),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Row(
             children: [
-              Expanded(
-                child: DropdownButtonFormField<String>(
-                  initialValue: row.type,
-                  isExpanded: true,
-                  dropdownColor: context.brand.surface,
-                  style: Theme.of(context).textTheme.titleMedium,
-                  decoration: const InputDecoration(labelText: 'TYPE'),
-                  hint: Text('Type',
-                      style: Theme.of(context).textTheme.bodyMedium),
-                  items: [
-                    for (final t in _serialTypeOptionsFor(index))
-                      DropdownMenuItem(value: t, child: Text(t)),
-                  ],
-                  onChanged: (t) => setState(() {
-                    row.type = t;
-                    if (t != 'Server') row.serverType = null;
-                  }),
+              Container(
+                width: 24,
+                height: 24,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: b.tint(b.signal, 0.14),
+                  shape: BoxShape.circle,
+                ),
+                child: Text(
+                  '${index + 1}',
+                  style: text.labelMedium?.copyWith(
+                    color: b.signal,
+                    fontWeight: FontWeight.w700,
+                  ),
                 ),
               ),
-              if (_serialRows.length > 1) ...[
-                const SizedBox(width: 8),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Serial entry ${index + 1}',
+                  style: text.titleSmall,
+                ),
+              ),
+              if (_serialRows.length > 1)
                 IconButton(
-                  tooltip: 'Remove',
-                  icon: Icon(Icons.delete_outline,
-                      size: 18, color: context.brand.paperDim),
+                  tooltip: 'Remove serial entry ${index + 1}',
+                  icon: const Icon(
+                    Icons.delete_outline_rounded,
+                    size: 20,
+                    color: Brand.danger,
+                  ),
                   onPressed: () => setState(() {
                     _serialRows.removeAt(index).dispose();
                   }),
+                )
+              else
+                const SizedBox(height: 44),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: _labeled(
+                  context,
+                  'Type',
+                  DropdownButtonFormField<String>(
+                    initialValue: row.type,
+                    isExpanded: true,
+                    dropdownColor: b.surface,
+                    borderRadius: BorderRadius.circular(Brand.radius),
+                    icon: const Icon(Icons.expand_more_rounded),
+                    decoration: _dropdownDecoration(null),
+                    hint: _dropdownHint(context, 'Type'),
+                    items: [
+                      for (final t in _serialTypeOptionsFor(index))
+                        DropdownMenuItem(value: t, child: Text(t)),
+                    ],
+                    onChanged: (t) => setState(() {
+                      row.type = t;
+                      if (t != 'Server') row.serverType = null;
+                    }),
+                  ),
+                ),
+              ),
+              if (row.type == 'Server') ...[
+                const SizedBox(width: 12),
+                Expanded(
+                  child: _labeled(
+                    context,
+                    'Server type',
+                    DropdownButtonFormField<String>(
+                      initialValue: row.serverType,
+                      isExpanded: true,
+                      dropdownColor: b.surface,
+                      borderRadius: BorderRadius.circular(Brand.radius),
+                      icon: const Icon(Icons.expand_more_rounded),
+                      decoration: _dropdownDecoration(null),
+                      hint: _dropdownHint(context, 'Server type'),
+                      items: [
+                        for (final t in _serverTypeOptions)
+                          DropdownMenuItem(value: t, child: Text(t)),
+                      ],
+                      onChanged: (t) => setState(() => row.serverType = t),
+                    ),
+                  ),
                 ),
               ],
             ],
           ),
-          if (row.type == 'Server')
-            DropdownButtonFormField<String>(
-              initialValue: row.serverType,
-              isExpanded: true,
-              dropdownColor: context.brand.surface,
-              style: Theme.of(context).textTheme.titleMedium,
-              decoration: const InputDecoration(labelText: 'SERVER TYPE'),
-              hint: Text('Server type',
-                  style: Theme.of(context).textTheme.bodyMedium),
-              items: [
-                for (final t in _serverTypeOptions)
-                  DropdownMenuItem(value: t, child: Text(t)),
-              ],
-              onChanged: (t) => setState(() => row.serverType = t),
-            ),
-          TextField(
-            controller: row.sn,
-            style: Theme.of(context).textTheme.titleMedium,
-            decoration: const InputDecoration(labelText: 'SERIAL NUMBER'),
-          ),
+          _field('Serial number', row.sn, prefixIcon: Icons.qr_code_rounded),
           Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Expanded(
-                child: TextField(
-                  controller: row.brand,
-                  style: Theme.of(context).textTheme.titleMedium,
-                  decoration: const InputDecoration(labelText: 'BRAND'),
-                ),
-              ),
+              Expanded(child: _field('Brand', row.brand, bottom: 0)),
               const SizedBox(width: 12),
-              Expanded(
-                child: TextField(
-                  controller: row.model,
-                  style: Theme.of(context).textTheme.titleMedium,
-                  decoration: const InputDecoration(labelText: 'MODEL'),
-                ),
-              ),
+              Expanded(child: _field('Model', row.model, bottom: 0)),
             ],
           ),
         ],
@@ -1043,68 +1266,100 @@ class _CustomerFormScreenState extends State<CustomerFormScreen> {
     );
   }
 
-  // ── Extraction (scan) section ────────────────────────────────────────────────
   Widget _extractionSection(BuildContext context) {
     final text = Theme.of(context).textTheme;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+    final b = context.brand;
+    return _sectionCard(
+      context,
+      title: 'Scan documents',
+      subtitle: 'Auto-fill this form from the BIR documents.',
+      icon: Icons.document_scanner_rounded,
       children: [
-        Text('Scan documents', style: text.headlineMedium),
-        const SizedBox(height: 8),
-        const Hairline(),
-        const SizedBox(height: 12),
-        Text(
-          'Upload the BIR 2303 / registration documents and (optionally) a valid '
-          'ID, then tap Extract to auto-fill this form with AI. Review and '
-          'correct everything below before saving.',
-          style: text.bodySmall,
+        Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(Brand.radius),
+            color: b.tint(Brand.info, 0.12),
+            border: Border.all(color: Brand.info.withValues(alpha: 0.4)),
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Icon(
+                Icons.info_outline_rounded,
+                size: 18,
+                color: Brand.info,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Upload the BIR 2303 / registration documents and (optionally) a valid '
+                  'ID, then tap Extract to auto-fill this form with AI. Review and '
+                  'correct everything below before saving.',
+                  style: text.bodySmall?.copyWith(color: b.paper),
+                ),
+              ),
+            ],
+          ),
         ),
-
-        // ── Step 1: documents ────────────────────────────────────────────────
-        const SizedBox(height: 20),
-        Text('DOCUMENTS', style: text.labelMedium),
+        const SizedBox(height: 16),
+        _stepLabel(context, 1, 'BIR documents'),
         const SizedBox(height: 8),
         _uploadBox(
           context,
           _pendingDocs.isEmpty && _extractionDocs.isEmpty
-              ? 'UPLOAD DOCUMENTS'
-              : 'ADD MORE DOCUMENTS',
-          Icons.upload_file,
+              ? 'Upload documents'
+              : 'Add more documents',
+          Icons.upload_file_rounded,
           _extracting ? null : _pickBirDocs,
+          hint: 'PDF, JPG, PNG, GIF or WEBP · multiple allowed',
         ),
-        const SizedBox(height: 8),
+        if (_pendingDocs.isNotEmpty || _extractionDocs.isNotEmpty)
+          const SizedBox(height: 8),
         for (int i = 0; i < _pendingDocs.length; i++)
-          _fileRow(context, _pendingDocs[i].name,
-              () => setState(() => _pendingDocs.removeAt(i))),
+          _fileRow(
+            context,
+            _pendingDocs[i].name,
+            () => setState(() => _pendingDocs.removeAt(i)),
+            caption: 'Ready to extract',
+          ),
         for (int i = 0; i < _extractionDocs.length; i++)
-          _fileRow(context, _extractionDocs[i].original,
-              () => setState(() => _extractionDocs.removeAt(i))),
-
-        // ── Step 2: valid ID ─────────────────────────────────────────────────
-        const SizedBox(height: 24),
+          _fileRow(
+            context,
+            _extractionDocs[i].original,
+            () => setState(() => _extractionDocs.removeAt(i)),
+            caption: 'Uploaded',
+            done: true,
+          ),
+        const SizedBox(height: 16),
+        const Hairline(),
+        const SizedBox(height: 16),
         _validIdBlock(context),
-
-        // ── Step 3: extract ──────────────────────────────────────────────────
-        const SizedBox(height: 24),
+        const SizedBox(height: 16),
         if (_extracting)
           Container(
-            padding: const EdgeInsets.all(16),
+            padding: const EdgeInsets.all(14),
             decoration: BoxDecoration(
-              color: context.brand.surface,
-              border: Border.all(color: context.brand.rule, width: 1),
+              borderRadius: BorderRadius.circular(Brand.radiusLg),
+              color: b.tint(b.signal, 0.12),
+              border: Border.all(color: b.signal.withValues(alpha: 0.4)),
             ),
             child: Row(
               children: [
-                const SizedBox(
-                  width: 16,
-                  height: 16,
+                SizedBox(
+                  width: 18,
+                  height: 18,
                   child: CircularProgressIndicator(
-                      strokeWidth: 2, color: Brand.signal),
+                    strokeWidth: 2,
+                    color: b.signal,
+                  ),
                 ),
                 const SizedBox(width: 12),
                 Expanded(
-                  child: Text('Extracting… this can take up to a minute.',
-                      style: text.bodySmall),
+                  child: Text(
+                    'Extracting… this can take up to a minute.',
+                    style: text.bodySmall?.copyWith(color: b.paper),
+                  ),
                 ),
               ],
             ),
@@ -1112,227 +1367,392 @@ class _CustomerFormScreenState extends State<CustomerFormScreen> {
         else
           SignalButton(
             label: 'Extract',
-            icon: Icons.document_scanner_outlined,
+            icon: Icons.auto_awesome_rounded,
             onPressed: _pendingDocs.isEmpty ? null : _extractNow,
           ),
       ],
     );
   }
 
+  Widget _stepLabel(BuildContext context, int step, String label) {
+    final text = Theme.of(context).textTheme;
+    return Row(
+      children: [
+        Container(
+          width: 22,
+          height: 22,
+          alignment: Alignment.center,
+          decoration: const BoxDecoration(
+            shape: BoxShape.circle,
+            color: Brand.orange,
+          ),
+          child: Text(
+            '$step',
+            style: const TextStyle(
+              color: Brand.onSignal,
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Text(label, style: text.titleSmall),
+      ],
+    );
+  }
+
   Widget _validIdBlock(BuildContext context) {
     final text = Theme.of(context).textTheme;
+    final hasId = _pendingValidIdPath != null || _validIdFile != null;
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Text('VALID ID', style: text.labelMedium),
-        const SizedBox(height: 8),
-        Text(
-          'Pick the ID type and attach a photo/scan — it is read together with '
-          "your BIR documents to fill the owner's name and ID details.",
-          style: text.bodySmall,
+        _stepLabel(context, 2, 'Valid ID'),
+        const SizedBox(height: 4),
+        Padding(
+          padding: const EdgeInsets.only(left: 28),
+          child: Text(
+            'Pick the ID type and attach a photo/scan — it is read together with '
+            "your BIR documents to fill the owner's name and ID details.",
+            style: text.bodySmall,
+          ),
         ),
         const SizedBox(height: 12),
-        DropdownButtonFormField<String>(
-          initialValue: _validIdType,
-          isExpanded: true,
-          dropdownColor: context.brand.surface,
-          style: text.titleMedium,
-          decoration: const InputDecoration(labelText: 'ID TYPE'),
-          hint: Text('Select ID type', style: text.bodyMedium),
-          items: [
-            for (final t in _validIdTypes)
-              DropdownMenuItem(value: t.$1, child: Text(t.$2)),
-          ],
-          onChanged: (v) => setState(() => _validIdType = v),
+        _labeled(
+          context,
+          'ID type',
+          DropdownButtonFormField<String>(
+            initialValue: _validIdType,
+            isExpanded: true,
+            dropdownColor: context.brand.surface,
+            borderRadius: BorderRadius.circular(Brand.radius),
+            icon: const Icon(Icons.expand_more_rounded),
+            decoration: _dropdownDecoration(Icons.badge_rounded),
+            hint: _dropdownHint(context, 'Select ID type'),
+            items: [
+              for (final t in _validIdTypes)
+                DropdownMenuItem(value: t.$1, child: Text(t.$2)),
+            ],
+            onChanged: (v) => setState(() => _validIdType = v),
+          ),
+          required: true,
+          bottom: 12,
         ),
-        const SizedBox(height: 12),
         _uploadBox(
           context,
-          (_pendingValidIdPath != null || _validIdFile != null)
-              ? 'REPLACE VALID ID'
-              : 'ATTACH VALID ID',
-          Icons.badge_outlined,
+          hasId ? 'Replace valid ID' : 'Attach valid ID',
+          Icons.add_photo_alternate_rounded,
           _extracting ? null : _pickValidId,
+          hint: (_validIdType ?? '').isEmpty
+              ? 'Select the ID type first'
+              : 'Photo or scan · PDF, JPG, PNG, GIF or WEBP',
         ),
         if (_pendingValidIdPath != null) ...[
           const SizedBox(height: 8),
-          _fileRow(context, _pendingValidIdName ?? 'Valid ID', () {
-            setState(() {
-              _pendingValidIdPath = null;
-              _pendingValidIdName = null;
-            });
-          }, onView: _viewValidId),
-          Padding(
-            padding: const EdgeInsets.only(left: 24, bottom: 4),
-            child: Text('Will be read when you tap Extract.',
-                style: text.labelMedium),
+          _fileRow(
+            context,
+            _pendingValidIdName ?? 'Valid ID',
+            () {
+              setState(() {
+                _pendingValidIdPath = null;
+                _pendingValidIdName = null;
+              });
+            },
+            onView: _viewValidId,
+            caption: 'Will be read when you tap Extract.',
           ),
         ],
         if (_validIdFile != null) ...[
           const SizedBox(height: 8),
-          _fileRow(context, _validIdFile!.original, () {
-            setState(() {
-              _validIdFile = null;
-              _idNumber.clear();
-            });
-          }, onView: _viewValidId),
+          _fileRow(
+            context,
+            _validIdFile!.original,
+            () {
+              setState(() {
+                _validIdFile = null;
+                _idNumber.clear();
+              });
+            },
+            onView: _viewValidId,
+            caption: 'Uploaded',
+            done: true,
+          ),
         ],
-        // ID number — editable, saved with the valid ID. (Birthdate lives in the
-        // Owner / contact section, matching the web extraction preview.)
-        if (_pendingValidIdPath != null || _validIdFile != null) ...[
-          const SizedBox(height: 4),
-          _field('ID NUMBER', _idNumber),
+        if (hasId) ...[
+          const SizedBox(height: 8),
+          _field(
+            'ID number',
+            _idNumber,
+            prefixIcon: Icons.numbers_rounded,
+            bottom: 0,
+          ),
         ],
       ],
     );
   }
 
-  /// Big, clearly-visible upload affordance — a full-width bordered box, used
-  /// for both the documents and valid-ID pickers so they read as real inputs.
   Widget _uploadBox(
-      BuildContext context, String label, IconData icon, VoidCallback? onTap) {
+    BuildContext context,
+    String label,
+    IconData icon,
+    VoidCallback? onTap, {
+    String? hint,
+    bool busy = false,
+  }) {
+    final b = context.brand;
     final text = Theme.of(context).textTheme;
     final enabled = onTap != null;
-    return InkWell(
-      onTap: onTap,
-      child: Container(
-        width: double.infinity,
-        padding: const EdgeInsets.symmetric(vertical: 22, horizontal: 16),
+    final accent = enabled ? b.signal : b.paperDim;
+    return Material(
+      color: Colors.transparent,
+      borderRadius: BorderRadius.circular(Brand.radiusLg),
+      child: Ink(
         decoration: BoxDecoration(
-          color: context.brand.surface,
-          border: Border.all(
-            color: enabled ? Brand.signal : context.brand.rule,
-            width: 1,
-          ),
+          borderRadius: BorderRadius.circular(Brand.radiusLg),
+          color: enabled ? b.tint(b.signal, 0.08) : b.surfaceHi,
         ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(icon,
-                size: 18, color: enabled ? Brand.signal : context.brand.paperDim),
-            const SizedBox(width: 10),
-            Text(
-              label,
-              style: text.labelLarge?.copyWith(
-                color: enabled ? Brand.signal : context.brand.paperDim,
-                fontSize: 12,
-                letterSpacing: 2.5,
-                fontWeight: FontWeight.w700,
-              ),
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(Brand.radiusLg),
+          child: CustomPaint(
+            painter: BirDashedBorderPainter(
+              color: enabled ? b.tint(b.signal, 0.6) : b.rule,
+              radius: Brand.radiusLg,
             ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _fileRow(BuildContext context, String name, VoidCallback onRemove,
-      {VoidCallback? onView}) {
-    final text = Theme.of(context).textTheme;
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 6),
-      child: Row(
-        children: [
-          Icon(Icons.insert_drive_file_outlined,
-              size: 16, color: context.brand.paperDim),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(name,
-                style: text.bodySmall,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis),
-          ),
-          if (onView != null) ...[
-            InkWell(
-              onTap: onView,
-              child: Row(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 18, horizontal: 16),
+              child: Column(
                 children: [
-                  const Icon(Icons.visibility_outlined,
-                      size: 15, color: Brand.signal),
-                  const SizedBox(width: 4),
-                  Text('VIEW',
-                      style: text.labelMedium?.copyWith(color: Brand.signal)),
+                  if (busy)
+                    SizedBox(
+                      width: 40,
+                      height: 40,
+                      child: Center(
+                        child: SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: b.signal,
+                          ),
+                        ),
+                      ),
+                    )
+                  else
+                    Container(
+                      width: 40,
+                      height: 40,
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: b.tint(accent, 0.14),
+                        border: Border.all(
+                          color: accent.withValues(alpha: 0.4),
+                        ),
+                      ),
+                      child: Icon(icon, size: 20, color: accent),
+                    ),
+                  const SizedBox(height: 10),
+                  Text(
+                    label,
+                    textAlign: TextAlign.center,
+                    style: text.titleSmall?.copyWith(
+                      color: enabled ? b.signalInk : b.paperDim,
+                    ),
+                  ),
+                  if (hint != null) ...[
+                    const SizedBox(height: 2),
+                    Text(
+                      hint,
+                      textAlign: TextAlign.center,
+                      style: text.bodySmall,
+                    ),
+                  ],
                 ],
               ),
             ),
-            const SizedBox(width: 14),
-          ],
-          InkWell(
-            onTap: onRemove,
-            child: Icon(Icons.close, size: 16, color: context.brand.paperDim),
           ),
-        ],
+        ),
       ),
     );
   }
 
-  // ── Documents ──────────────────────────────────────────────────────────────
+  static IconData _fileIcon(String name) {
+    final n = name.toLowerCase();
+    if (n.endsWith('.pdf')) return Icons.picture_as_pdf_rounded;
+    if (RegExp(r'\.(png|jpe?g|gif|webp|heic|bmp)$').hasMatch(n)) {
+      return Icons.image_rounded;
+    }
+    return Icons.insert_drive_file_rounded;
+  }
+
+  Widget _fileRow(
+    BuildContext context,
+    String name,
+    VoidCallback? onRemove, {
+    VoidCallback? onView,
+    String? caption,
+    bool done = false,
+  }) {
+    final b = context.brand;
+    final text = Theme.of(context).textTheme;
+    final accent = done ? Brand.success : b.signal;
+    return FadeSlideIn(
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 8),
+        padding: const EdgeInsets.fromLTRB(10, 8, 4, 8),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(Brand.radius),
+          color: b.tint(accent, 0.1),
+          border: Border.all(color: accent.withValues(alpha: 0.28)),
+        ),
+        child: Row(
+          children: [
+            IconTile(
+              icon: _fileIcon(name),
+              color: accent,
+              size: 34,
+              iconSize: 18,
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    name,
+                    style: text.bodyMedium?.copyWith(
+                      fontWeight: FontWeight.w500,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  if (caption != null)
+                    Text(
+                      caption,
+                      style: text.bodySmall?.copyWith(
+                        color: done ? Brand.success : null,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                ],
+              ),
+            ),
+            if (onView != null)
+              TextButton.icon(
+                onPressed: onView,
+                style: TextButton.styleFrom(
+                  minimumSize: const Size(44, 44),
+                  padding: const EdgeInsets.symmetric(horizontal: 10),
+                ),
+                icon: const Icon(Icons.visibility_rounded, size: 16),
+                label: const Text('View'),
+              ),
+            if (onRemove != null)
+              IconButton(
+                tooltip: 'Remove $name',
+                onPressed: onRemove,
+                icon: Icon(Icons.close_rounded, size: 18, color: b.paperDim),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _documentsSection(BuildContext context) {
     final existing = widget.existing?.documents ?? const <CustomerDocument>[];
+    final text = Theme.of(context).textTheme;
+    final b = context.brand;
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         if (widget.isEdit) ...[
-          // Existing docs are read-only (no per-document API), and new uploads
-          // aren't processed by updateCustomer — so on edit we only display.
           if (existing.isEmpty)
-            Text('No documents on file.',
-                style: Theme.of(context).textTheme.bodySmall)
+            Container(
+              padding: const EdgeInsets.symmetric(vertical: 20),
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: b.surfaceHi,
+                borderRadius: BorderRadius.circular(Brand.radius),
+              ),
+              child: Column(
+                children: [
+                  Icon(Icons.folder_off_rounded, size: 24, color: b.paperDim),
+                  const SizedBox(height: 6),
+                  Text('No documents on file.', style: text.bodySmall),
+                ],
+              ),
+            )
           else ...[
-            _existingDocGroup(context, 'Extraction docs',
-                existing.where((d) => d.docType == 'extraction_doc')),
-            _existingDocGroup(context, 'Valid IDs',
-                existing.where((d) => d.docType == 'valid_id')),
-            _existingDocGroup(context, 'Requirements',
-                existing.where((d) => d.docType == 'requirement')),
+            _existingDocGroup(
+              context,
+              'Extraction docs',
+              existing.where((d) => d.docType == 'extraction_doc'),
+            ),
+            _existingDocGroup(
+              context,
+              'Valid IDs',
+              existing.where((d) => d.docType == 'valid_id'),
+            ),
+            _existingDocGroup(
+              context,
+              'Requirements',
+              existing.where((d) => d.docType == 'requirement'),
+            ),
           ],
           const SizedBox(height: 8),
-          Text(
-            'Add or remove documents from the web portal — mobile edits keep '
-            'the existing files.',
-            style: Theme.of(context).textTheme.bodySmall,
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(Icons.info_outline_rounded, size: 16, color: b.paperDim),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  'Add or remove documents from the web portal — mobile edits keep '
+                  'the existing files.',
+                  style: text.bodySmall,
+                ),
+              ),
+            ],
           ),
         ] else ...[
-          // Extraction docs + valid IDs are attached at the top (scan flow).
-          // Here we only collect the supporting requirement files.
-          _uploadGroup(context, 'REQUIREMENTS', _requirementDocs),
+          _uploadGroup(context, 'Requirements', _requirementDocs),
         ],
       ],
     );
   }
 
   Widget _existingDocGroup(
-      BuildContext context, String label, Iterable<CustomerDocument> docs) {
+    BuildContext context,
+    String label,
+    Iterable<CustomerDocument> docs,
+  ) {
     final list = docs.toList();
     if (list.isEmpty) return const SizedBox.shrink();
     return Padding(
-      padding: const EdgeInsets.only(bottom: 16),
+      padding: const EdgeInsets.only(bottom: 8),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text(label.toUpperCase(),
-              style: Theme.of(context).textTheme.labelMedium),
-          const SizedBox(height: 8),
-          for (final d in list)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 6),
-              child: Row(
-                children: [
-                  Icon(Icons.insert_drive_file_outlined,
-                      size: 16, color: context.brand.paperDim),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      d.originalFilename.isEmpty
-                          ? d.storedFilename
-                          : d.originalFilename,
-                      style: Theme.of(context).textTheme.bodySmall,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                ],
+          Row(
+            children: [
+              Expanded(child: _label(context, label)),
+              StatusPill(
+                label: '${list.length}',
+                color: context.brand.paperDim,
               ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          for (final d in list)
+            _fileRow(
+              context,
+              d.originalFilename.isEmpty
+                  ? d.storedFilename
+                  : d.originalFilename,
+              null,
             ),
         ],
       ),
@@ -1340,63 +1760,38 @@ class _CustomerFormScreenState extends State<CustomerFormScreen> {
   }
 
   Widget _uploadGroup(
-      BuildContext context, String label, List<UploadedDoc> target) {
+    BuildContext context,
+    String label,
+    List<UploadedDoc> target,
+  ) {
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Text(label, style: Theme.of(context).textTheme.labelMedium),
-            InkWell(
-              onTap: _uploading ? null : () => _pickAndUpload(target),
-              child: Row(
-                children: [
-                  Icon(Icons.upload_file, size: 14, color: Brand.signal),
-                  const SizedBox(width: 4),
-                  Text('ATTACH',
-                      style: Theme.of(context)
-                          .textTheme
-                          .labelMedium
-                          ?.copyWith(color: Brand.signal)),
-                ],
-              ),
-            ),
-          ],
+        _label(context, label),
+        _uploadBox(
+          context,
+          _uploading ? 'Uploading…' : 'Attach file',
+          Icons.upload_file_rounded,
+          _uploading ? null : () => _pickAndUpload(target),
+          hint: target.isEmpty
+              ? 'No files attached · PDF, JPG, PNG, GIF or WEBP'
+              : '${target.length} file(s) attached',
+          busy: _uploading,
         ),
-        const SizedBox(height: 8),
-        if (target.isEmpty)
-          Text('No files attached.',
-              style: Theme.of(context).textTheme.bodySmall)
-        else
-          for (int i = 0; i < target.length; i++)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 6),
-              child: Row(
-                children: [
-                  Icon(Icons.insert_drive_file_outlined,
-                      size: 16, color: context.brand.paperDim),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(target[i].original,
-                        style: Theme.of(context).textTheme.bodySmall,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis),
-                  ),
-                  InkWell(
-                    onTap: () => setState(() => target.removeAt(i)),
-                    child: Icon(Icons.close,
-                        size: 16, color: context.brand.paperDim),
-                  ),
-                ],
-              ),
-            ),
+        if (target.isNotEmpty) const SizedBox(height: 8),
+        for (int i = 0; i < target.length; i++)
+          _fileRow(
+            context,
+            target[i].original,
+            () => setState(() => target.removeAt(i)),
+            caption: 'Uploaded',
+            done: true,
+          ),
       ],
     );
   }
 }
 
-/// Mutable holder for one serial-entry row in the form.
 class _SerialRow {
   _SerialRow({
     this.type,
@@ -1404,9 +1799,9 @@ class _SerialRow {
     String sn = '',
     String brand = '',
     String model = '',
-  })  : sn = TextEditingController(text: sn),
-        brand = TextEditingController(text: brand),
-        model = TextEditingController(text: model);
+  }) : sn = TextEditingController(text: sn),
+       brand = TextEditingController(text: brand),
+       model = TextEditingController(text: model);
 
   String? type;
   String? serverType;
@@ -1421,12 +1816,12 @@ class _SerialRow {
       (type == null || type!.isEmpty);
 
   SerialEntry toEntry() => SerialEntry(
-        serialNumberType: type ?? '',
-        serverType: type == 'Server' ? (serverType ?? '') : '',
-        serialNumber: sn.text.trim(),
-        brand: brand.text.trim(),
-        model: model.text.trim(),
-      );
+    serialNumberType: type ?? '',
+    serverType: type == 'Server' ? (serverType ?? '') : '',
+    serialNumber: sn.text.trim(),
+    brand: brand.text.trim(),
+    model: model.text.trim(),
+  );
 
   void dispose() {
     sn.dispose();
