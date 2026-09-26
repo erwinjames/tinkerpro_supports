@@ -1,21 +1,3 @@
-; TinkerPro Support — Desktop Console · Inno Setup installer
-; ----------------------------------------------------------------------
-; Wraps the Flutter Windows release bundle into a single Setup .exe:
-; copies the app into Program Files, adds Start Menu + optional Desktop
-; shortcuts, writes an uninstaller, and offers to launch on finish.
-;
-; Unlike the employee_app installer, the support console has no POS /
-; MariaDB provisioning — it just talks to https://support.tinkerpro.io —
-; so there is no [Code] wizard or post-install script here.
-;
-; Compile:  iscc.exe tinkerpro-support-desktop.iss
-;
-; Build-time variables (set with /D):
-;   AppVersion — semver, defaults to 1.0.0
-;   SourceDir  — folder with support_desktop.exe + DLLs + data\
-;                (defaults to ..\build\windows\x64\runner\Release)
-;   OutputDir  — where Setup .exe is written (defaults to .\out)
-; ----------------------------------------------------------------------
 
 #ifndef AppVersion
   #define AppVersion "1.0.0"
@@ -33,8 +15,6 @@
 #define AppURL         "https://tinkerpro.io"
 
 [Setup]
-; Stable GUID — never change after the first published build so Windows
-; recognises upgrades vs. fresh installs. (Distinct from employee_app's.)
 AppId={{2C9F4D8B-71E6-4A3C-B5D2-9E1A77C4F210}}
 AppName={#AppName}
 AppVersion={#AppVersion}
@@ -58,7 +38,7 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayName={#AppName}
 UninstallDisplayIcon={app}\{#AppExeName}
-; If the app is running during an upgrade, ask the user to close it.
+SetupIconFile=..\windows\runner\resources\app_icon.ico
 CloseApplications=force
 RestartApplications=no
 
@@ -70,8 +50,6 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; \
     GroupDescription: "Additional shortcuts:"; Flags: unchecked
 
 [Files]
-; Recursively copy the whole Flutter release output — the .exe alone
-; won't run without its DLLs and data\flutter_assets\.
 Source: "{#SourceDir}\*"; DestDir: "{app}"; \
     Flags: ignoreversion recursesubdirs createallsubdirs
 
@@ -85,6 +63,4 @@ Filename: "{app}\{#AppExeName}"; Description: "Launch {#AppName}"; \
     Flags: nowait postinstall skipifsilent runasoriginaluser
 
 [UninstallDelete]
-; Remove leftover Flutter shader/state caches under the install tree so
-; a reinstall is clean. User prefs live under %APPDATA% and are kept.
 Type: filesandordirs; Name: "{app}\data"

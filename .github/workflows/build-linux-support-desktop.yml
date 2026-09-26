@@ -1,8 +1,5 @@
 name: Build Linux installer (support_desktop)
 
-# Triggers:
-#   - manual via the Actions tab ("Run workflow")
-#   - automatic on tags like sd-v1.2.3 (shared with the Windows workflow)
 on:
   workflow_dispatch:
     inputs:
@@ -20,8 +17,6 @@ on:
 
 jobs:
   build:
-    # 22.04 = older glibc → the AppImage/tarball runs on a wider range of
-    # distros than if we built on 24.04.
     runs-on: ubuntu-22.04
     defaults:
       run:
@@ -34,9 +29,6 @@ jobs:
       - name: Install Linux build deps
         run: |
           sudo apt-get update
-          # libunwind-dev is installed first: gstreamer-dev depends on it but
-          # apt won't auto-resolve it on the 22.04 runner ("held broken
-          # packages"), so we pull it in explicitly.
           sudo apt-get install -y libunwind-dev
           sudo apt-get install -y \
             clang cmake ninja-build pkg-config \
@@ -104,10 +96,8 @@ jobs:
           APPDIR="$PWD/AppDir"
           rm -rf "$APPDIR"
           mkdir -p "$APPDIR/usr/bin"
-          # Flutter's exe needs lib/ + data/ beside it — copy the whole bundle.
           cp -r "$BUNDLE"/. "$APPDIR/usr/bin/"
 
-          # Desktop entry (root + the standard applications path).
           cat > "$APPDIR/support_desktop.desktop" <<'EOF'
           [Desktop Entry]
           Type=Application
@@ -115,18 +105,17 @@ jobs:
           Comment=TinkerPro Support — Control Suite
           Exec=support_desktop
           Icon=support_desktop
+          StartupWMClass=io.tinkerpro.support_desktop
           Categories=Utility;Office;
           Terminal=false
           EOF
           mkdir -p "$APPDIR/usr/share/applications"
           cp "$APPDIR/support_desktop.desktop" "$APPDIR/usr/share/applications/"
 
-          # Icon (root + hicolor 256px).
-          cp assets/brand/tinkerpro-icon-512.png "$APPDIR/support_desktop.png"
+          cp assets/brand/app-icon.png "$APPDIR/support_desktop.png"
           mkdir -p "$APPDIR/usr/share/icons/hicolor/256x256/apps"
-          cp assets/brand/tinkerpro-icon-512.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/support_desktop.png"
+          cp assets/brand/app-icon-256.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/support_desktop.png"
 
-          # AppRun launcher.
           cat > "$APPDIR/AppRun" <<'EOF'
           #!/bin/bash
           HERE="$(dirname "$(readlink -f "${0}")")"
@@ -134,7 +123,6 @@ jobs:
           EOF
           chmod +x "$APPDIR/AppRun"
 
-          # appimagetool — extract-and-run so it works without FUSE on the runner.
           wget -q https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x appimagetool-x86_64.AppImage
           OUT="TinkerProSupport-${{ steps.ver.outputs.appVer }}-x86_64.AppImage"
