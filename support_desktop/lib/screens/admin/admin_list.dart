@@ -1,20 +1,16 @@
-// Reusable scaffold for the admin/console list pages (POS Version, Release
-// Notes, License Key, Users, Email, Help, Credentials, Blog, BIR, Files,
-// Activity Logs). Handles the station header, optional search box, the
-// load / error / empty / list states, pull-to-refresh, and an optional
-// "add" action — so each concrete page only supplies its fetch + row UI.
-
 import 'package:flutter/material.dart';
 
 import '../../models/admin_models.dart';
+import '../../services/live_sync.dart';
 import '../../theme.dart';
 import '../../widgets/premium.dart';
+import '../../widgets/tp_loader.dart';
 
 typedef AdminFetch<T> = Future<Paged<T>> Function(String search);
-typedef AdminItemBuilder<T> = Widget Function(
-    BuildContext context, T item, VoidCallback refresh);
-typedef AdminAdd = Future<void> Function(
-    BuildContext context, VoidCallback refresh);
+typedef AdminItemBuilder<T> =
+    Widget Function(BuildContext context, T item, VoidCallback refresh);
+typedef AdminAdd =
+    Future<void> Function(BuildContext context, VoidCallback refresh);
 
 class AdminListPage<T> extends StatefulWidget {
   const AdminListPage({
@@ -28,6 +24,7 @@ class AdminListPage<T> extends StatefulWidget {
     this.addLabel = 'New',
     this.searchable = true,
     this.searchHint = 'Search…',
+    this.liveKeys = const [],
   });
 
   final String stationNumber;
@@ -39,12 +36,14 @@ class AdminListPage<T> extends StatefulWidget {
   final String addLabel;
   final bool searchable;
   final String searchHint;
+  final List<String> liveKeys;
 
   @override
   State<AdminListPage<T>> createState() => _AdminListPageState<T>();
 }
 
-class _AdminListPageState<T> extends State<AdminListPage<T>> {
+class _AdminListPageState<T> extends State<AdminListPage<T>>
+    with LiveRefresh<AdminListPage<T>> {
   final _searchCtrl = TextEditingController();
   String _search = '';
   bool _loading = true;
@@ -64,11 +63,20 @@ class _AdminListPageState<T> extends State<AdminListPage<T>> {
     super.dispose();
   }
 
-  Future<void> _load() async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
+  @override
+  List<String> get liveKeys => widget.liveKeys;
+
+  @override
+  void onLiveChange() => _load(silent: true);
+
+  Future<void> _load({bool silent = false}) async {
+    if (silent && _loading) return;
+    if (!silent) {
+      setState(() {
+        _loading = true;
+        _error = null;
+      });
+    }
     try {
       final page = await widget.fetch(_search);
       if (!mounted) return;
@@ -76,9 +84,10 @@ class _AdminListPageState<T> extends State<AdminListPage<T>> {
         _items = page.items;
         _total = page.total;
         _loading = false;
+        _error = null;
       });
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted || silent) return;
       setState(() {
         _loading = false;
         _error = e.toString().replaceFirst('Exception: ', '');
@@ -94,77 +103,80 @@ class _AdminListPageState<T> extends State<AdminListPage<T>> {
       stationLabel: widget.stationLabel,
       title: widget.title,
       showBottomBrand: false,
+      leading: !_loading && _error == null
+          ? Text(
+              '$_total record${_total == 1 ? '' : 's'}',
+              style: text.bodyMedium?.copyWith(
+                color: context.brand.paperDim,
+                fontWeight: FontWeight.w600,
+              ),
+            )
+          : null,
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (widget.onAdd != null)
-            SignalButton(
-              label: widget.addLabel,
-              icon: Icons.add,
-              onPressed: () => widget.onAdd!(context, _load),
-            ),
-          const SizedBox(width: 8),
-          StationAction(
-              icon: Icons.refresh, tooltip: 'Refresh', onPressed: _load),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
           if (widget.searchable) ...[
-            TextField(
+            SearchField(
               controller: _searchCtrl,
-              decoration: InputDecoration(
-                hintText: widget.searchHint,
-                prefixIcon: const Icon(Icons.search, size: 18),
-                isDense: true,
-              ),
+              hint: widget.searchHint,
+              width: 300,
               onSubmitted: (v) {
                 _search = v.trim();
                 _load();
               },
             ),
-            const SizedBox(height: 16),
+            const SizedBox(width: 10),
           ],
-          if (!_loading && _error == null)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: Text('$_total RECORD${_total == 1 ? '' : 'S'}',
-                  style: text.labelMedium),
+          StationAction(
+            icon: Icons.refresh,
+            tooltip: 'Refresh',
+            onPressed: _load,
+          ),
+          if (widget.onAdd != null) ...[
+            const SizedBox(width: 10),
+            SignalButton(
+              label: widget.addLabel,
+              icon: Icons.add,
+              onPressed: () => widget.onAdd!(context, _load),
             ),
-          Expanded(child: _body()),
+          ],
         ],
+      ),
+      child: WebCard(
+        padding: EdgeInsets.zero,
+        expandChild: true,
+        child: _body(),
       ),
     );
   }
 
   Widget _body() {
     if (_loading) {
-      return const Center(
-        child: SizedBox(
-          width: 22,
-          height: 22,
-          child: CircularProgressIndicator(strokeWidth: 2, color: Brand.signal),
-        ),
-      );
+      return const Center(child: TpLoader());
     }
     if (_error != null) {
       return Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text('COULD NOT LOAD',
-                style: Theme.of(context).textTheme.labelLarge),
-            const SizedBox(height: 8),
-            Text(_error!,
-                textAlign: TextAlign.center,
-                style: Theme.of(context).textTheme.bodySmall),
-            const SizedBox(height: 16),
-            SizedBox(
-              width: 160,
-              child: SignalButton(
-                  label: 'Retry', icon: Icons.refresh, onPressed: _load),
+            const IconTile(
+              icon: Icons.error_outline,
+              size: 48,
+              color: Brand.danger,
             ),
+            const SizedBox(height: 12),
+            Text(
+              'Could not load',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 4),
+            Text(
+              _error!,
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            const SizedBox(height: 16),
+            SignalButton(label: 'Retry', icon: Icons.refresh, onPressed: _load),
           ],
         ),
       );
@@ -178,8 +190,11 @@ class _AdminListPageState<T> extends State<AdminListPage<T>> {
     return RefreshIndicator(
       color: Brand.signal,
       onRefresh: _load,
-      child: ListView.builder(
+      child: ListView.separated(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
         itemCount: _items.length,
+        separatorBuilder: (_, _) =>
+            Divider(height: 1, color: context.brand.rule),
         itemBuilder: (context, i) =>
             widget.itemBuilder(context, _items[i], _load),
       ),
@@ -187,38 +202,39 @@ class _AdminListPageState<T> extends State<AdminListPage<T>> {
   }
 }
 
-// ── Small shared helpers for the concrete pages ──────────────────────────
-
-/// A confirm dialog returning true when the user accepts. Used by the
-/// per-row delete actions.
 Future<bool> confirmDialog(
   BuildContext context, {
   required String title,
   required String message,
   String confirmLabel = 'Delete',
 }) async {
-  final ok = await showDialog<bool>(
-    context: context,
-    builder: (ctx) => AlertDialog(
-      title: Text(title),
-      content: Text(message),
-      actions: [
-        TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Cancel')),
-        // Autofocused so a global Enter confirms; Esc cancels via the
-        // app-wide back shortcut.
-        FilledButton(
-            autofocus: true,
-            onPressed: () => Navigator.pop(ctx, true),
-            child: Text(confirmLabel)),
-      ],
-    ),
+  final destructive = RegExp(
+    r'delete|remove|revoke|disable|clear|reset',
+    caseSensitive: false,
+  ).hasMatch(confirmLabel);
+  final ok = await showWebModal<bool>(
+    context,
+    title: title,
+    icon: destructive ? Icons.warning_amber_rounded : Icons.help_outline,
+    width: 460,
+    builder: (_) =>
+        Text(message, style: Theme.of(context).textTheme.bodyMedium),
+    actions: (ctx) => [
+      GhostButton(label: 'Cancel', onPressed: () => Navigator.pop(ctx, false)),
+      destructive
+          ? DangerButton(
+              label: confirmLabel,
+              onPressed: () => Navigator.pop(ctx, true),
+            )
+          : SignalButton(
+              label: confirmLabel,
+              onPressed: () => Navigator.pop(ctx, true),
+            ),
+    ],
   );
   return ok ?? false;
 }
 
 void toast(BuildContext context, String message) {
-  ScaffoldMessenger.of(context)
-      .showSnackBar(SnackBar(content: Text(message)));
+  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
 }

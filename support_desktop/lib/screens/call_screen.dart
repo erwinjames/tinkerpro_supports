@@ -4,13 +4,6 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import '../services/call_service.dart';
 import '../theme.dart';
 
-/// Full-screen call UI. Renders four states off the same scaffold:
-///   * outgoing  → calling / ringing
-///   * incoming  → ringing with Accept / Decline
-///   * connecting
-///   * connected → mute, camera (video only), end
-///
-/// Pops itself when the underlying [CallService] returns to idle.
 class CallScreen extends StatefulWidget {
   const CallScreen({super.key, required this.calls});
 
@@ -21,11 +14,6 @@ class CallScreen extends StatefulWidget {
 }
 
 class _CallScreenState extends State<CallScreen> {
-  // CallService.notifyListeners fires twice during teardown — once when
-  // phase flips to `ended`, again 50ms later when it settles to `idle`.
-  // The pop animation isn't finished yet when the second one fires, so
-  // our listener is still attached. Without this guard we'd pop a second
-  // time and accidentally close the chat thread underneath us.
   bool _popped = false;
 
   @override
@@ -44,16 +32,6 @@ class _CallScreenState extends State<CallScreen> {
     if (!mounted || _popped) return;
     if (widget.calls.phase == CallPhase.idle ||
         widget.calls.phase == CallPhase.ended) {
-      // Auto-pop when the call wraps up (locally or remotely). Use the
-      // root navigator because [HomeShell._onCallChange] pushed this
-      // route via `rootNavigator: true`; the nested tab navigator we'd
-      // otherwise resolve doesn't own this route.
-      //
-      // Use pop() (not maybePop) because PopScope below still has the
-      // stale canPop=false from the just-active call — we haven't rebuilt
-      // yet, so maybePop() would be blocked. The user already initiated
-      // the dismissal (or the peer ended); PopScope is meant to guard
-      // against accidental swipe-back, not against our own teardown.
       _popped = true;
       Navigator.of(context, rootNavigator: true).pop();
       return;
@@ -67,14 +45,17 @@ class _CallScreenState extends State<CallScreen> {
     final isVideo = c.media == CallMedia.video;
     final isIncoming =
         c.role == CallRole.callee && c.phase == CallPhase.ringing;
-    final showRemote = isVideo &&
+
+    final showMesh = c.isGroup && !isIncoming;
+    final showRemote = !showMesh &&
+        isVideo &&
         c.phase == CallPhase.connected &&
-        c.remoteRenderer.srcObject != null;
+        c.remoteRenderer?.srcObject != null;
 
     final status = switch (c.phase) {
       CallPhase.calling => 'Calling…',
       CallPhase.ringing => isIncoming
-          ? 'Incoming ${isVideo ? 'video' : 'voice'} call'
+          ? 'Incoming ${c.isGroup ? 'group ' : ''}${isVideo ? 'video' : 'voice'} call'
           : 'Ringing…',
       CallPhase.connecting => 'Connecting…',
       CallPhase.connected => c.elapsedLabel,
@@ -82,26 +63,32 @@ class _CallScreenState extends State<CallScreen> {
     };
 
     return PopScope(
-      // Prevent accidental back-out mid-call; the Decline / End buttons
-      // are the only path off this screen.
       canPop: !c.isActive,
       child: Scaffold(
-        backgroundColor: Brand.canvas,
+        backgroundColor: Brand.navy,
         body: Stack(
           fit: StackFit.expand,
           children: [
-            // Remote full-bleed video (only after we have a stream).
-            if (showRemote)
+            const DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [Brand.navyHi, Brand.navy, Color(0xFF081627)],
+                ),
+              ),
+            ),
+            if (showMesh)
+              _MeshGrid(calls: c)
+            else if (showRemote)
               RTCVideoView(
-                c.remoteRenderer,
+                c.remoteRenderer!,
                 objectFit: RTCVideoViewObjectFit
                     .RTCVideoViewObjectFitCover,
               )
             else
-              _StagePortrait(name: c.peerName, pulse: !isIncoming),
-
-            // Soft brand glow on the dark canvas.
-            if (!showRemote)
+              _StagePortrait(name: c.title, pulse: !isIncoming),
+            if (!showRemote && !showMesh)
               IgnorePointer(
                 child: Container(
                   decoration: BoxDecoration(
@@ -116,9 +103,8 @@ class _CallScreenState extends State<CallScreen> {
                   ),
                 ),
               ),
-
-            // Self preview — picture-in-picture on top right (video only).
             if (isVideo &&
+                !showMesh &&
                 (c.phase == CallPhase.connected ||
                     c.phase == CallPhase.connecting ||
                     c.phase == CallPhase.calling))
@@ -129,14 +115,6 @@ class _CallScreenState extends State<CallScreen> {
                 height: 160,
                 child: _SelfPreview(renderer: c.localRenderer),
               ),
-
-            // Top bar — pinned to the top with Positioned + Center so the
-            // Row doesn't get vertically centered by the surrounding Stack
-            // on platforms without a status-bar inset (Linux/Windows
-            // desktop), and the pill stays above the avatar instead of
-            // overlapping it. The redundant "VOICE CALL"/"VIDEO CALL" type
-            // label is removed — the controls and the call_screen context
-            // already make the call type unambiguous.
             Positioned(
               top: 0,
               left: 0,
@@ -150,8 +128,6 @@ class _CallScreenState extends State<CallScreen> {
                 ),
               ),
             ),
-
-            // Stage caption (over remote video this becomes a subtle overlay).
             if (showRemote)
               Positioned(
                 left: 0,
@@ -166,9 +142,9 @@ class _CallScreenState extends State<CallScreen> {
                       borderRadius: BorderRadius.circular(999),
                     ),
                     child: Text(
-                      c.peerName,
-                      style: const TextStyle(
-                        color: Brand.paper,
+                      c.title,
+                      style: TextStyle(
+                        color: Colors.white,
                         fontSize: 14,
                         fontWeight: FontWeight.w600,
                         letterSpacing: 0.2,
@@ -177,8 +153,6 @@ class _CallScreenState extends State<CallScreen> {
                   ),
                 ),
               ),
-
-            // Controls.
             Positioned(
               left: 0,
               right: 0,
@@ -207,7 +181,169 @@ class _CallScreenState extends State<CallScreen> {
   }
 }
 
-// ─────────────────────────────────────── stage (no remote video yet) ────────
+class _MeshGrid extends StatelessWidget {
+  const _MeshGrid({required this.calls});
+
+  final CallService calls;
+
+  @override
+  Widget build(BuildContext context) {
+    final isVideo = calls.media == CallMedia.video;
+    final tiles = <Widget>[
+      _MeshTile(
+        label: 'You',
+        renderer: isVideo ? calls.localRenderer : null,
+        hasVideo: isVideo && !calls.cameraOff,
+        mirror: true,
+        connecting: false,
+      ),
+      for (final p in calls.participants)
+        _MeshTile(
+          label: p.name,
+          renderer: isVideo ? p.renderer : null,
+          hasVideo: isVideo && p.hasVideo,
+          mirror: false,
+          connecting: !p.connected,
+        ),
+    ];
+
+    final cols = tiles.length <= 1
+        ? 1
+        : tiles.length <= 4
+            ? 2
+            : 3;
+
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 60, 16, 120),
+        child: GridView.count(
+          crossAxisCount: cols,
+          mainAxisSpacing: 10,
+          crossAxisSpacing: 10,
+          childAspectRatio: 16 / 10,
+          physics: const NeverScrollableScrollPhysics(),
+          shrinkWrap: true,
+          children: tiles,
+        ),
+      ),
+    );
+  }
+}
+
+class _MeshTile extends StatelessWidget {
+  const _MeshTile({
+    required this.label,
+    required this.renderer,
+    required this.hasVideo,
+    required this.mirror,
+    required this.connecting,
+  });
+
+  final String label;
+  final RTCVideoRenderer? renderer;
+  final bool hasVideo;
+  final bool mirror;
+  final bool connecting;
+
+  @override
+  Widget build(BuildContext context) {
+    final initial =
+        label.trim().isEmpty ? '?' : label.trim()[0].toUpperCase();
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(14),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: Brand.navyHi,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: connecting
+                ? Brand.signalGlow(0.45)
+                : Colors.white.withValues(alpha: 0.08),
+          ),
+        ),
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            if (hasVideo && renderer != null)
+              RTCVideoView(
+                renderer!,
+                mirror: mirror,
+                objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+              )
+            else
+              Center(
+                child: Container(
+                  width: 64,
+                  height: 64,
+                  decoration: const BoxDecoration(
+                    shape: BoxShape.circle,
+                    gradient: LinearGradient(
+                      colors: [Color(0xFFFF9433), Brand.signal],
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                    ),
+                  ),
+                  alignment: Alignment.center,
+                  child: Text(
+                    initial,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 24,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+              ),
+            if (connecting)
+              Positioned(
+                top: 6,
+                right: 6,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 8, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.55),
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: Text(
+                    'Connecting…',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ),
+            Positioned(
+              left: 6,
+              bottom: 6,
+              right: 6,
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.55),
+                  borderRadius: BorderRadius.circular(999),
+                ),
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
 
 class _StagePortrait extends StatefulWidget {
   const _StagePortrait({required this.name, required this.pulse});
@@ -303,8 +439,8 @@ class _StagePortraitState extends State<_StagePortrait>
           const SizedBox(height: 24),
           Text(
             widget.name,
-            style: const TextStyle(
-              color: Brand.paper,
+            style: TextStyle(
+              color: Colors.white,
               fontSize: 26,
               fontWeight: FontWeight.w700,
               letterSpacing: -0.4,
@@ -316,8 +452,6 @@ class _StagePortraitState extends State<_StagePortrait>
   }
 }
 
-// ─────────────────────────────────────── self preview ───────────────────────
-
 class _SelfPreview extends StatelessWidget {
   const _SelfPreview({required this.renderer});
   final RTCVideoRenderer renderer;
@@ -328,7 +462,7 @@ class _SelfPreview extends StatelessWidget {
       borderRadius: BorderRadius.circular(14),
       child: DecoratedBox(
         decoration: BoxDecoration(
-          color: Brand.surface,
+          color: Brand.navyHi,
           borderRadius: BorderRadius.circular(14),
           border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
           boxShadow: [
@@ -348,8 +482,6 @@ class _SelfPreview extends StatelessWidget {
     );
   }
 }
-
-// ─────────────────────────────────────── glass pill ─────────────────────────
 
 class _GlassPill extends StatelessWidget {
   const _GlassPill({required this.label, this.monospace = false});
@@ -371,7 +503,7 @@ class _GlassPill extends StatelessWidget {
           Text(
             label,
             style: TextStyle(
-              color: Brand.paper,
+              color: Colors.white,
               fontSize: 12,
               fontWeight: FontWeight.w600,
               letterSpacing: monospace ? 1.2 : 0.4,
@@ -385,8 +517,6 @@ class _GlassPill extends StatelessWidget {
     );
   }
 }
-
-// ─────────────────────────────────────── controls ───────────────────────────
 
 class _ActiveControls extends StatelessWidget {
   const _ActiveControls({
@@ -524,13 +654,13 @@ class _CallButtonState extends State<_CallButton>
   Widget build(BuildContext context) {
     final bg = switch (widget.tone) {
       _CallButtonTone.glass =>
-        widget.active ? Brand.paper : Colors.white.withValues(alpha: 0.10),
+        widget.active ? Colors.white : Colors.white.withValues(alpha: 0.10),
       _CallButtonTone.danger => const Color(0xFFDC2626),
       _CallButtonTone.success => const Color(0xFF10B981),
     };
     final fg = switch (widget.tone) {
       _CallButtonTone.glass =>
-        widget.active ? Brand.canvas : Brand.paper,
+        widget.active ? Brand.navy : Colors.white,
       _ => Colors.white,
     };
     final glow = switch (widget.tone) {

@@ -1,21 +1,13 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../theme.dart';
+import 'resizable_columns.dart';
+import 'tp_loader.dart';
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Structural chrome
-// ─────────────────────────────────────────────────────────────────────────────
+export 'resizable_columns.dart';
 
-/// Every primary screen in the app uses StationScaffold. It provides:
-///  * the oversized faint station numeral watermark
-///  * the "STATION NN · LABEL" mono tag
-///  * an animated draw-in hairline under the tag
-///  * the big serif title
-///  * an optional back affordance and a trailing action slot
-///  * a globe+wordmark tag pinned to the bottom-left gutter
-///
-/// The animation sequence (numeral → rule → content) runs once per mount.
-class StationScaffold extends StatefulWidget {
+class StationScaffold extends StatelessWidget {
   const StationScaffold({
     super.key,
     required this.stationNumber,
@@ -27,6 +19,8 @@ class StationScaffold extends StatefulWidget {
     this.onBack,
     this.showBottomBrand = true,
     this.bottomBar,
+    this.leading,
+    this.padding = const EdgeInsets.fromLTRB(20, 16, 20, 20),
   });
 
   final String stationNumber;
@@ -34,199 +28,94 @@ class StationScaffold extends StatefulWidget {
   final String title;
   final Widget child;
   final Widget? trailing;
-
-  /// Optional right-aligned widget rendered immediately below the animated
-  /// hairline rule. Used by list screens to host a notification bell that
-  /// shouldn't crowd the trailing slot next to STATION NN · LABEL.
   final Widget? belowRule;
   final VoidCallback? onBack;
   final bool showBottomBrand;
   final Widget? bottomBar;
-
-  @override
-  State<StationScaffold> createState() => _StationScaffoldState();
-}
-
-class _StationScaffoldState extends State<StationScaffold>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _entrance;
-  late final Animation<double> _numeralFade;
-  late final Animation<double> _ruleDraw;
-  late final Animation<double> _contentFade;
-
-  @override
-  void initState() {
-    super.initState();
-    _entrance = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 750),
-    );
-    _numeralFade = CurvedAnimation(
-      parent: _entrance,
-      curve: const Interval(0.0, 0.27, curve: Curves.easeOut),
-    );
-    _ruleDraw = CurvedAnimation(
-      parent: _entrance,
-      curve: const Interval(0.27, 0.67, curve: Curves.easeOutCubic),
-    );
-    _contentFade = CurvedAnimation(
-      parent: _entrance,
-      curve: const Interval(0.55, 1.0, curve: Curves.easeOut),
-    );
-    _entrance.forward();
-  }
-
-  @override
-  void dispose() {
-    _entrance.dispose();
-    super.dispose();
-  }
+  final Widget? leading;
+  final EdgeInsets padding;
 
   @override
   Widget build(BuildContext context) {
-    final text = Theme.of(context).textTheme;
+    final showTitle = onBack != null;
+    final hasBar =
+        showTitle || trailing != null || belowRule != null || leading != null;
     return Scaffold(
-      bottomNavigationBar: widget.bottomBar,
-      body: SafeArea(
-        child: Stack(
-          children: [
-            // ── Numeral watermark ────────────────────────────────────────
-            Positioned(
-              top: -18,
-              right: -26,
-              child: FadeTransition(
-                opacity: _numeralFade,
-                child: Text(
-                  widget.stationNumber,
-                  style: text.displayLarge,
-                ),
-              ),
-            ),
-
-            // ── Bottom gutter wordmark ───────────────────────────────────
-            if (widget.showBottomBrand)
-              Positioned(
-                bottom: 20,
-                left: 24,
-                child: FadeTransition(
-                  opacity: _contentFade,
-                  child: Row(
-                    children: [
-                      Image.asset(
-                        'assets/brand/tinkerpro-icon-192.png',
-                        width: 16,
-                        height: 16,
-                        // Degrade gracefully if the asset bundle / manifest
-                        // is momentarily unavailable (e.g. launched from a
-                        // stale build) instead of throwing a visible error.
-                        errorBuilder: (_, _, _) => const Icon(Icons.public,
-                            size: 16, color: Brand.signal),
-                      ),
-                      const SizedBox(width: 8),
-                      Text('TINKERPRO · SUPPORT',
-                          style: text.labelMedium?.copyWith(
-                            color: Brand.paperDim,
-                            letterSpacing: 2.4,
-                          )),
-                    ],
-                  ),
-                ),
-              ),
-
-            // ── Foreground column ────────────────────────────────────────
-            Padding(
-              padding: EdgeInsets.fromLTRB(
-                24,
-                20,
-                24,
-                widget.showBottomBrand ? 72 : 24,
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      if (widget.onBack != null) ...[
-                        _SquareIconButton(
-                          icon: Icons.arrow_back,
-                          onTap: widget.onBack,
+      backgroundColor: context.brand.canvas,
+      bottomNavigationBar: bottomBar,
+      body: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (hasBar)
+            PageToolbar(
+              leading: showTitle
+                  ? Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
                           tooltip: 'Back',
+                          onPressed: onBack,
+                          icon: const Icon(Icons.arrow_back, size: 20),
                         ),
-                        const SizedBox(width: 8),
+                        const SizedBox(width: 4),
+                        Text(
+                          title,
+                          style: Theme.of(context).textTheme.titleLarge,
+                        ),
                       ],
-                      Expanded(
-                        child: Text(
-                          'STATION ${widget.stationNumber} · ${widget.stationLabel}',
-                          style: text.labelLarge,
-                        ),
-                      ),
-                      if (widget.trailing != null) widget.trailing!,
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  AnimatedBuilder(
-                    animation: _ruleDraw,
-                    builder: (_, __) => Align(
-                      alignment: Alignment.centerLeft,
-                      child: FractionallySizedBox(
-                        widthFactor: _ruleDraw.value,
-                        child: Container(height: 1, color: Brand.paper),
-                      ),
-                    ),
-                  ),
-                  if (widget.belowRule != null) ...[
-                    const SizedBox(height: 8),
-                    Align(
-                      alignment: Alignment.centerRight,
-                      child: widget.belowRule!,
-                    ),
-                    const SizedBox(height: 24),
-                  ] else
-                    const SizedBox(height: 40),
-                  FadeTransition(
-                    opacity: _contentFade,
-                    child: Text(widget.title, style: text.headlineLarge),
-                  ),
-                  const SizedBox(height: 28),
-                  Expanded(
-                    child: FadeTransition(
-                      opacity: _contentFade,
-                      child: widget.child,
-                    ),
-                  ),
-                ],
-              ),
+                    )
+                  : leading,
+              actions: [?belowRule, ?trailing],
             ),
-          ],
-        ),
+          Expanded(
+            child: Padding(padding: padding, child: child),
+          ),
+        ],
       ),
     );
   }
 }
 
-/// A flat, square, monospaced icon button. No ripple circle.
-class _SquareIconButton extends StatelessWidget {
-  const _SquareIconButton({required this.icon, this.onTap, this.tooltip});
-  final IconData icon;
-  final VoidCallback? onTap;
-  final String? tooltip;
+class PageToolbar extends StatelessWidget {
+  const PageToolbar({super.key, this.leading, this.actions = const []});
+  final Widget? leading;
+  final List<Widget> actions;
+
+  static Widget _cell(Widget child) => ConstrainedBox(
+    constraints: const BoxConstraints(minHeight: 56),
+    child: Align(widthFactor: 1, alignment: Alignment.centerLeft, child: child),
+  );
 
   @override
   Widget build(BuildContext context) {
-    final button = InkWell(
-      onTap: onTap,
-      child: Container(
-        width: 32,
-        height: 32,
-        decoration: const BoxDecoration(color: Colors.transparent),
-        child: Icon(icon, size: 18, color: Brand.paper),
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 20),
+      alignment: leading == null ? Alignment.centerRight : Alignment.centerLeft,
+      decoration: BoxDecoration(
+        color: context.brand.surface,
+        border: Border(bottom: BorderSide(color: context.brand.rule)),
+      ),
+      child: Wrap(
+        alignment: leading == null
+            ? WrapAlignment.end
+            : WrapAlignment.spaceBetween,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        spacing: 10,
+        children: [
+          if (leading != null) _cell(leading!),
+          if (actions.isNotEmpty)
+            Wrap(
+              alignment: WrapAlignment.end,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              spacing: 10,
+              children: [for (final a in actions) _cell(a)],
+            ),
+        ],
       ),
     );
-    return tooltip == null ? button : Tooltip(message: tooltip!, child: button);
   }
 }
 
-/// Trailing icon action for the station header.
 class StationAction extends StatelessWidget {
   const StationAction({
     super.key,
@@ -241,22 +130,55 @@ class StationAction extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return IconButton(
+    return OutlinedIconButton(
+      icon: icon,
       tooltip: tooltip,
       onPressed: onPressed,
-      icon: Icon(icon, size: 20, color: Brand.paper),
-      style: IconButton.styleFrom(
-        padding: EdgeInsets.zero,
-        minimumSize: const Size(32, 32),
-        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    );
+  }
+}
+
+class OutlinedIconButton extends StatelessWidget {
+  const OutlinedIconButton({
+    super.key,
+    required this.icon,
+    required this.tooltip,
+    required this.onPressed,
+    this.color,
+    this.size = 38,
+  });
+
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback? onPressed;
+  final Color? color;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: tooltip,
+      child: Material(
+        color: context.brand.surface,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(6),
+          side: BorderSide(color: Theme.of(context).colorScheme.outline),
+        ),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(6),
+          mouseCursor: SystemMouseCursors.click,
+          onTap: onPressed,
+          child: SizedBox(
+            width: size,
+            height: size,
+            child: Icon(icon, size: 18, color: color ?? context.brand.paperDim),
+          ),
+        ),
       ),
     );
   }
 }
 
-/// Bell icon with a small orange badge in the top-right corner whenever
-/// [count] is greater than zero. Footprint matches [StationAction] so it can
-/// stack cleanly under the refresh button.
 class NotificationBell extends StatelessWidget {
   const NotificationBell({
     super.key,
@@ -271,51 +193,563 @@ class NotificationBell extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final hasUnseen = count > 0;
-    return Tooltip(
-      message: tooltip,
-      child: InkWell(
-        onTap: onPressed,
-        child: SizedBox(
-          width: 32,
-          height: 32,
-          child: Stack(
-            clipBehavior: Clip.none,
-            children: [
-              const Center(
-                child: Icon(
-                  Icons.notifications_none_outlined,
-                  size: 20,
-                  color: Brand.paper,
-                ),
-              ),
-              if (hasUnseen)
-                Positioned(
-                  top: 4,
-                  right: 4,
-                  child: Container(
-                    constraints:
-                        const BoxConstraints(minWidth: 14, minHeight: 14),
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-                    decoration: BoxDecoration(
-                      color: Brand.signal,
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: Brand.canvas, width: 1.2),
-                    ),
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        OutlinedIconButton(
+          icon: Icons.notifications_none_outlined,
+          tooltip: tooltip,
+          onPressed: onPressed,
+        ),
+        if (count > 0)
+          Positioned(top: -5, right: -5, child: CountBadge(count: count)),
+      ],
+    );
+  }
+}
+
+class CountBadge extends StatelessWidget {
+  const CountBadge({super.key, required this.count, this.color});
+  final int count;
+  final Color? color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      constraints: const BoxConstraints(minWidth: 18, minHeight: 18),
+      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+      decoration: BoxDecoration(
+        color: color ?? Brand.signal,
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: context.brand.surface, width: 1.5),
+      ),
+      child: Text(
+        count > 99 ? '99+' : '$count',
+        textAlign: TextAlign.center,
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 10.5,
+          fontWeight: FontWeight.w700,
+          height: 1.3,
+        ),
+      ),
+    );
+  }
+}
+
+class SignalButton extends StatelessWidget {
+  const SignalButton({
+    super.key,
+    required this.label,
+    required this.onPressed,
+    this.busy = false,
+    this.icon,
+    this.expand = false,
+  });
+
+  final String label;
+  final VoidCallback? onPressed;
+  final bool busy;
+  final IconData? icon;
+  final bool expand;
+
+  @override
+  Widget build(BuildContext context) {
+    final button = ElevatedButton(
+      onPressed: busy ? null : onPressed,
+      style: ElevatedButton.styleFrom(
+        minimumSize: const Size(0, 40),
+        disabledBackgroundColor: Brand.signal.withValues(alpha: 0.45),
+        disabledForegroundColor: Colors.white,
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (busy)
+            const SizedBox(
+              width: 14,
+              height: 14,
+              child: TpLoader(strokeWidth: 2, color: Colors.white),
+            )
+          else if (icon != null)
+            Icon(icon, size: 16),
+          if (busy || icon != null) const SizedBox(width: 8),
+          Text(label.toUpperCase()),
+        ],
+      ),
+    );
+    return expand ? SizedBox(width: double.infinity, child: button) : button;
+  }
+}
+
+class GhostButton extends StatelessWidget {
+  const GhostButton({
+    super.key,
+    required this.label,
+    required this.onPressed,
+    this.icon,
+  });
+
+  final String label;
+  final VoidCallback? onPressed;
+  final IconData? icon;
+
+  @override
+  Widget build(BuildContext context) {
+    return OutlinedButton(
+      onPressed: onPressed,
+      style: OutlinedButton.styleFrom(minimumSize: const Size(0, 40)),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (icon != null) ...[Icon(icon, size: 16), const SizedBox(width: 8)],
+          Text(label),
+        ],
+      ),
+    );
+  }
+}
+
+class DangerButton extends StatelessWidget {
+  const DangerButton({
+    super.key,
+    required this.label,
+    required this.onPressed,
+    this.icon,
+  });
+
+  final String label;
+  final VoidCallback? onPressed;
+  final IconData? icon;
+
+  @override
+  Widget build(BuildContext context) {
+    return ElevatedButton(
+      onPressed: onPressed,
+      style: ElevatedButton.styleFrom(
+        backgroundColor: Brand.danger,
+        minimumSize: const Size(0, 40),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (icon != null) ...[Icon(icon, size: 16), const SizedBox(width: 8)],
+          Text(label.toUpperCase()),
+        ],
+      ),
+    );
+  }
+}
+
+class SearchField extends StatelessWidget {
+  const SearchField({
+    super.key,
+    this.controller,
+    this.hint = 'Search…',
+    this.onChanged,
+    this.onSubmitted,
+    this.width = 320,
+    this.autofocus = false,
+  });
+
+  final TextEditingController? controller;
+  final String hint;
+  final ValueChanged<String>? onChanged;
+  final ValueChanged<String>? onSubmitted;
+  final double? width;
+  final bool autofocus;
+
+  @override
+  Widget build(BuildContext context) {
+    final field = TextField(
+      controller: controller,
+      autofocus: autofocus,
+      onChanged: onChanged,
+      onSubmitted: onSubmitted,
+      decoration: InputDecoration(
+        hintText: hint,
+        prefixIcon: const Icon(Icons.search, size: 18),
+        prefixIconConstraints: const BoxConstraints(minWidth: 38),
+      ),
+    );
+    return width == null ? field : SizedBox(width: width, child: field);
+  }
+}
+
+class WebCard extends StatelessWidget {
+  const WebCard({
+    super.key,
+    required this.child,
+    this.title,
+    this.icon,
+    this.trailing,
+    this.padding = const EdgeInsets.all(16),
+    this.expandChild = false,
+  });
+
+  final Widget child;
+  final String? title;
+  final IconData? icon;
+  final Widget? trailing;
+  final EdgeInsets padding;
+  final bool expandChild;
+
+  @override
+  Widget build(BuildContext context) {
+    final body = Padding(padding: padding, child: child);
+    return Container(
+      decoration: BoxDecoration(
+        color: context.brand.surface,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: context.brand.rule),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: expandChild ? MainAxisSize.max : MainAxisSize.min,
+        children: [
+          if (title != null) ...[
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
+              child: Row(
+                children: [
+                  if (icon != null) ...[
+                    IconTile(icon: icon!, size: 30),
+                    const SizedBox(width: 10),
+                  ],
+                  Expanded(
                     child: Text(
-                      count > 99 ? '99+' : count.toString(),
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(
-                        color: Brand.canvas,
-                        fontSize: 9,
+                      title!,
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
                         fontWeight: FontWeight.w700,
-                        letterSpacing: 0.5,
-                        height: 1.1,
                       ),
                     ),
                   ),
+                  ?trailing,
+                ],
+              ),
+            ),
+            Divider(height: 1, color: context.brand.rule),
+          ],
+          if (expandChild) Expanded(child: body) else body,
+        ],
+      ),
+    );
+  }
+}
+
+class IconTile extends StatelessWidget {
+  const IconTile({super.key, required this.icon, this.size = 36, this.color});
+  final IconData icon;
+  final double size;
+  final Color? color;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = color ?? Brand.signal;
+    return Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        color: c.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(size * 0.24),
+      ),
+      child: Icon(icon, size: size * 0.52, color: c),
+    );
+  }
+}
+
+class StatusPill extends StatelessWidget {
+  const StatusPill({super.key, required this.label, this.color});
+  final String label;
+  final Color? color;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = color ?? context.brand.paperDim;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+      decoration: BoxDecoration(
+        color: c.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(color: c, fontSize: 11.5, fontWeight: FontWeight.w700),
+      ),
+    );
+  }
+}
+
+class StatStrip extends StatelessWidget {
+  const StatStrip({super.key, required this.items});
+  final List<StatItem> items;
+
+  @override
+  Widget build(BuildContext context) {
+    final text = Theme.of(context).textTheme;
+    return WebCard(
+      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+      child: Wrap(
+        spacing: 48,
+        runSpacing: 12,
+        children: [
+          for (final s in items)
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (s.icon != null) ...[
+                      Icon(s.icon, size: 13, color: s.color ?? Brand.signal),
+                      const SizedBox(width: 6),
+                    ],
+                    Text(
+                      s.label.toUpperCase(),
+                      style: text.labelSmall?.copyWith(
+                        color: s.color ?? Brand.signal,
+                      ),
+                    ),
+                  ],
                 ),
+                const SizedBox(height: 4),
+                Text(
+                  s.value,
+                  style: text.headlineMedium?.copyWith(fontSize: 18),
+                ),
+              ],
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class ResponsiveGrid extends StatelessWidget {
+  const ResponsiveGrid({
+    super.key,
+    required this.children,
+    this.minItemWidth = 220,
+    this.spacing = 16,
+    this.runSpacing,
+    this.maxColumns,
+    this.crossAxisAlignment = CrossAxisAlignment.stretch,
+  });
+
+  final List<Widget> children;
+  final double minItemWidth;
+  final double spacing;
+  final double? runSpacing;
+  final int? maxColumns;
+  final CrossAxisAlignment crossAxisAlignment;
+
+  static int columnsFor(int count, double width, double minItem, double gap,
+      {int? max}) {
+    if (count <= 1) return 1;
+    var cols = ((width + gap) / (minItem + gap)).floor();
+    cols = cols.clamp(1, max ?? count);
+    if (cols >= count) return count;
+    if (count % cols != 0) {
+      for (var c = cols; c >= 1; c--) {
+        if (count % c == 0) return c;
+      }
+    }
+    return cols;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, box) {
+        final cols = columnsFor(
+          children.length,
+          box.maxWidth,
+          minItemWidth,
+          spacing,
+          max: maxColumns,
+        );
+        final rows = <Widget>[];
+        for (var i = 0; i < children.length; i += cols) {
+          if (rows.isNotEmpty) {
+            rows.add(SizedBox(height: runSpacing ?? spacing));
+          }
+          final cells = <Widget>[];
+          for (var j = 0; j < cols; j++) {
+            if (j > 0) cells.add(SizedBox(width: spacing));
+            final k = i + j;
+            cells.add(
+              Expanded(
+                child: k < children.length ? children[k] : const SizedBox(),
+              ),
+            );
+          }
+          rows.add(
+            crossAxisAlignment == CrossAxisAlignment.stretch
+                ? IntrinsicHeight(
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: cells,
+                    ),
+                  )
+                : Row(crossAxisAlignment: crossAxisAlignment, children: cells),
+          );
+        }
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: rows,
+        );
+      },
+    );
+  }
+}
+
+class StatItem {
+  const StatItem(this.label, this.value, {this.icon, this.color});
+  final String label;
+  final String value;
+  final IconData? icon;
+  final Color? color;
+}
+
+Future<T?> showWebModal<T>(
+  BuildContext context, {
+  required String title,
+  required Widget Function(BuildContext) builder,
+  String? subtitle,
+  IconData? icon,
+  List<Widget> Function(BuildContext)? actions,
+  double width = 640,
+  double? height,
+  bool scrollable = true,
+  bool barrierDismissible = true,
+  EdgeInsets bodyPadding = const EdgeInsets.all(20),
+}) {
+  return showDialog<T>(
+    context: context,
+    barrierDismissible: barrierDismissible,
+    builder: (ctx) => WebModal(
+      title: title,
+      subtitle: subtitle,
+      icon: icon,
+      width: width,
+      height: height,
+      scrollable: scrollable,
+      bodyPadding: bodyPadding,
+      actions: actions?.call(ctx),
+      child: Builder(builder: builder),
+    ),
+  );
+}
+
+class WebModal extends StatelessWidget {
+  const WebModal({
+    super.key,
+    required this.title,
+    required this.child,
+    this.subtitle,
+    this.icon,
+    this.actions,
+    this.width = 640,
+    this.height,
+    this.scrollable = true,
+    this.bodyPadding = const EdgeInsets.all(20),
+    this.onClose,
+  });
+
+  final String title;
+  final String? subtitle;
+  final IconData? icon;
+  final Widget child;
+  final List<Widget>? actions;
+  final double width;
+  final double? height;
+  final bool scrollable;
+  final EdgeInsets bodyPadding;
+  final VoidCallback? onClose;
+
+  @override
+  Widget build(BuildContext context) {
+    final text = Theme.of(context).textTheme;
+    final screen = MediaQuery.sizeOf(context);
+    final inset = screen.width < 900 || screen.height < 640 ? 12.0 : 32.0;
+    final maxH = screen.height - inset * 2;
+    final w = width.clamp(280.0, screen.width - inset * 2).toDouble();
+    final close = onClose ?? () => Navigator.of(context).maybePop();
+    final body = Padding(padding: bodyPadding, child: child);
+
+    return CallbackShortcuts(
+      bindings: {const SingleActivator(LogicalKeyboardKey.escape): close},
+      child: Dialog(
+        insetPadding: EdgeInsets.all(inset),
+        clipBehavior: Clip.antiAlias,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxWidth: w,
+            minWidth: w,
+            maxHeight: height == null ? maxH : height!.clamp(160, maxH),
+            minHeight: height == null ? 0 : height!.clamp(160, maxH),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 16, 12, 16),
+                child: Row(
+                  children: [
+                    if (icon != null) ...[
+                      IconTile(icon: icon!, size: 38),
+                      const SizedBox(width: 12),
+                    ],
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            title,
+                            style: text.titleLarge,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          if (subtitle != null && subtitle!.isNotEmpty)
+                            Text(
+                              subtitle!,
+                              style: text.bodySmall,
+                              maxLines: 3,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: 'Close',
+                      onPressed: close,
+                      icon: Icon(
+                        Icons.close,
+                        size: 20,
+                        color: context.brand.paperDim,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Divider(height: 1, color: context.brand.rule),
+              Flexible(
+                fit: height == null ? FlexFit.loose : FlexFit.tight,
+                child: scrollable ? SingleChildScrollView(child: body) : body,
+              ),
+              if (actions != null && actions!.isNotEmpty) ...[
+                Divider(height: 1, color: context.brand.rule),
+                Container(
+                  color: context.brand.surfaceHi,
+                  padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),
+                  child: _ModalActionBar(actions: actions!),
+                ),
+              ],
             ],
           ),
         ),
@@ -324,125 +758,119 @@ class NotificationBell extends StatelessWidget {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Actions
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Primary CTA. Flat orange rectangle with outline; inverts to ink on press.
-class SignalButton extends StatefulWidget {
-  const SignalButton({
-    super.key,
-    required this.label,
-    required this.onPressed,
-    this.busy = false,
-    this.icon = Icons.arrow_forward,
-  });
-
-  final String label;
-  final VoidCallback? onPressed;
-  final bool busy;
-  final IconData? icon;
-
-  @override
-  State<SignalButton> createState() => _SignalButtonState();
-}
-
-class _SignalButtonState extends State<SignalButton> {
-  bool _pressed = false;
+class _ModalActionBar extends StatelessWidget {
+  const _ModalActionBar({required this.actions});
+  final List<Widget> actions;
 
   @override
   Widget build(BuildContext context) {
-    final disabled = widget.onPressed == null || widget.busy;
-    final bg = _pressed
-        ? Brand.canvas
-        : (disabled ? Brand.surfaceHi : Brand.signal);
-    final fg = _pressed
-        ? Brand.signal
-        : (disabled ? Brand.paperDim : Brand.canvas);
-    return GestureDetector(
-      onTapDown: disabled ? null : (_) => setState(() => _pressed = true),
-      onTapCancel: () => setState(() => _pressed = false),
-      onTapUp: disabled ? null : (_) => setState(() => _pressed = false),
-      onTap: disabled ? null : widget.onPressed,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 120),
-        height: 52,
-        decoration: BoxDecoration(
-          color: bg,
-          border: Border.all(color: Brand.signal, width: 1),
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
+    final flexible = [
+      for (final a in actions)
+        if (a is Flexible) a.child,
+    ];
+    final hasFlex = flexible.isNotEmpty || actions.any((a) => a is Spacer);
+    final rest = [
+      for (final a in actions)
+        if (a is! Flexible && a is! Spacer) a,
+    ];
+    final wrap = Wrap(
+      alignment: WrapAlignment.end,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      spacing: 10,
+      runSpacing: 8,
+      children: rest,
+    );
+    if (!hasFlex) return wrap;
+    return LayoutBuilder(
+      builder: (context, box) {
+        if (box.maxWidth >= 720) {
+          return Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              for (var i = 0; i < actions.length; i++) ...[
+                if (i > 0) const SizedBox(width: 10),
+                actions[i],
+              ],
+            ],
+          );
+        }
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            if (widget.busy) ...[
-              SizedBox(
-                width: 14,
-                height: 14,
-                child: CircularProgressIndicator(strokeWidth: 2, color: fg),
-              ),
-              const SizedBox(width: 12),
-            ],
-            Text(
-              widget.label.toUpperCase(),
-              style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                    color: fg,
-                    fontSize: 12,
-                    letterSpacing: 3,
-                    fontWeight: FontWeight.w700,
-                  ),
-            ),
-            if (widget.icon != null) ...[
-              const SizedBox(width: 8),
-              Icon(widget.icon, size: 14, color: fg),
-            ],
+            for (final f in flexible) ...[f, const SizedBox(height: 8)],
+            Align(alignment: Alignment.centerRight, child: wrap),
           ],
-        ),
-      ),
+        );
+      },
     );
   }
 }
 
-/// Ghost secondary action. Used next to the primary CTA.
-class GhostButton extends StatelessWidget {
-  const GhostButton({
+class FormRow extends StatelessWidget {
+  const FormRow({
     super.key,
     required this.label,
-    required this.onPressed,
+    required this.child,
+    this.required = false,
+    this.icon,
+    this.labelWidth = 200,
   });
 
   final String label;
-  final VoidCallback onPressed;
+  final Widget child;
+  final bool required;
+  final IconData? icon;
+  final double labelWidth;
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onPressed,
-      child: Container(
-        height: 52,
-        alignment: Alignment.center,
-        decoration: BoxDecoration(
-          border: Border.all(color: Brand.rule, width: 1),
+    final text = Theme.of(context).textTheme;
+    final labelRow = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (icon != null) ...[
+          Icon(icon, size: 15, color: Brand.signal),
+          const SizedBox(width: 8),
+        ],
+        Flexible(
+          child: Text(
+            label,
+            style: text.bodyMedium?.copyWith(fontWeight: FontWeight.w700),
+          ),
         ),
-        child: Text(
-          label.toUpperCase(),
-          style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                fontSize: 12,
-                letterSpacing: 3,
-                fontWeight: FontWeight.w500,
-                color: Brand.paperDim,
-              ),
-        ),
+        if (required)
+          const Text(
+            ' *',
+            style: TextStyle(color: Brand.danger, fontWeight: FontWeight.w700),
+          ),
+      ],
+    );
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: LayoutBuilder(
+        builder: (context, box) {
+          if (box.maxWidth < labelWidth + 280) {
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              mainAxisSize: MainAxisSize.min,
+              children: [labelRow, const SizedBox(height: 6), child],
+            );
+          }
+          return Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              SizedBox(width: labelWidth, child: labelRow),
+              const SizedBox(width: 16),
+              Expanded(child: child),
+            ],
+          );
+        },
       ),
     );
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Data display
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Small key/value pair with a hairline underneath — the look of a printed
-/// datasheet. Used on the Home / device status / detail screens.
 class StationDataRow extends StatelessWidget {
   const StationDataRow({
     super.key,
@@ -456,56 +884,54 @@ class StationDataRow extends StatelessWidget {
   final String label;
   final String value;
   final TextStyle? valueStyle;
-
-  /// When set, the whole row becomes tappable and the value is rendered in
-  /// [Brand.signal] to hint at the affordance.
   final VoidCallback? onTap;
-
-  /// Optional trailing icon shown to the right of the value — pairs with
-  /// [onTap] to make the affordance visible (e.g. phone receiver icon).
   final IconData? trailingIcon;
 
   @override
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
-    final effectiveValueStyle = valueStyle ??
+    final effectiveValueStyle =
+        valueStyle ??
         text.bodyMedium?.copyWith(
-          color: onTap != null ? Brand.signal : Brand.paper,
-          decoration: onTap != null ? TextDecoration.underline : null,
-          decorationColor: Brand.signal,
-          decorationThickness: 1,
+          color: onTap != null ? Brand.signal : context.brand.paper,
+          fontWeight: FontWeight.w600,
         );
-
-    final body = Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(label, style: text.labelMedium),
-        const SizedBox(height: 6),
-        Row(
-          children: [
-            Expanded(
-              child: Text(value,
-                  style: effectiveValueStyle,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis),
+    final body = Padding(
+      padding: const EdgeInsets.symmetric(vertical: 9),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(width: 170, child: Text(label, style: text.bodySmall)),
+          Expanded(
+            child: Text(
+              value.isEmpty ? '—' : value,
+              style: effectiveValueStyle,
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
             ),
-            if (trailingIcon != null && onTap != null) ...[
-              const SizedBox(width: 8),
-              Icon(trailingIcon, size: 18, color: Brand.signal),
-            ],
+          ),
+          if (trailingIcon != null && onTap != null) ...[
+            const SizedBox(width: 8),
+            Icon(trailingIcon, size: 16, color: Brand.signal),
           ],
-        ),
-        const SizedBox(height: 10),
-        Container(height: 1, color: Brand.rule),
-      ],
+        ],
+      ),
     );
-
-    if (onTap == null) return body;
-    return InkWell(onTap: onTap, child: body);
+    final row = DecoratedBox(
+      decoration: BoxDecoration(
+        border: Border(bottom: BorderSide(color: context.brand.rule)),
+      ),
+      child: body,
+    );
+    if (onTap == null) return row;
+    return InkWell(
+      mouseCursor: SystemMouseCursors.click,
+      onTap: onTap,
+      child: row,
+    );
   }
 }
 
-/// Headline metric card used on the Dashboard.
 class MetricTile extends StatelessWidget {
   const MetricTile({
     super.key,
@@ -513,12 +939,14 @@ class MetricTile extends StatelessWidget {
     required this.value,
     this.delta,
     this.positive = true,
+    this.icon,
   });
 
   final String label;
   final String value;
   final String? delta;
   final bool positive;
+  final IconData? icon;
 
   @override
   Widget build(BuildContext context) {
@@ -526,30 +954,44 @@ class MetricTile extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
-        color: Brand.surface,
-        border: Border.all(color: Brand.rule, width: 1),
+        color: context.brand.surface,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: context.brand.rule),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text(label, style: text.labelMedium),
-          const SizedBox(height: 18),
-          Text(value, style: text.displayMedium?.copyWith(fontSize: 32)),
+          Row(
+            children: [
+              if (icon != null) ...[
+                IconTile(icon: icon!, size: 26),
+                const SizedBox(width: 8),
+              ],
+              Expanded(
+                child: Text(label.toUpperCase(), style: text.labelSmall),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Text(
+            value,
+            style: text.displayMedium?.copyWith(fontSize: 28, height: 1),
+          ),
           if (delta != null) ...[
-            const SizedBox(height: 12),
+            const SizedBox(height: 8),
             Row(
               children: [
                 Icon(
                   positive ? Icons.trending_up : Icons.trending_down,
-                  size: 12,
-                  color: positive ? Brand.signal : Brand.paperDim,
+                  size: 14,
+                  color: positive ? Brand.success : context.brand.paperDim,
                 ),
                 const SizedBox(width: 6),
                 Text(
                   delta!,
-                  style: text.labelMedium?.copyWith(
-                    color: positive ? Brand.signal : Brand.paperDim,
+                  style: text.bodySmall?.copyWith(
+                    color: positive ? Brand.success : context.brand.paperDim,
                   ),
                 ),
               ],
@@ -561,9 +1003,6 @@ class MetricTile extends StatelessWidget {
   }
 }
 
-/// One row in an activity / recent / list stream. Each row has a small
-/// orange dot on the left — the only colour moment — and a mono timestamp
-/// on the right. Taps are swallowed unless [onTap] is provided.
 class ActivityRow extends StatelessWidget {
   const ActivityRow({
     super.key,
@@ -586,9 +1025,10 @@ class ActivityRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
     return InkWell(
+      mouseCursor: onTap != null ? SystemMouseCursors.click : MouseCursor.defer,
       onTap: onTap,
       child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 16),
+        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 4),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -598,22 +1038,26 @@ class ActivityRow extends StatelessWidget {
               margin: const EdgeInsets.only(top: 6, right: 12),
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: showSignalDot ? Brand.signal : Brand.rule,
+                color: showSignalDot ? Brand.signal : context.brand.rule,
               ),
             ),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(title,
-                      style: text.titleSmall,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis),
+                  Text(
+                    title,
+                    style: text.titleSmall,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
                   const SizedBox(height: 2),
-                  Text(subtitle,
-                      style: text.bodySmall,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis),
+                  Text(
+                    subtitle,
+                    style: text.bodySmall,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
                 ],
               ),
             ),
@@ -621,7 +1065,7 @@ class ActivityRow extends StatelessWidget {
             Column(
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
-                Text(meta, style: text.labelMedium),
+                Text(meta, style: text.labelSmall),
                 if (trailingText != null) ...[
                   const SizedBox(height: 4),
                   Text(trailingText!, style: text.bodySmall),
@@ -635,41 +1079,123 @@ class ActivityRow extends StatelessWidget {
   }
 }
 
-/// Thin horizontal divider that respects the design language.
 class Hairline extends StatelessWidget {
   const Hairline({super.key});
   @override
   Widget build(BuildContext context) =>
-      Container(height: 1, color: Brand.rule);
+      Container(height: 1, color: context.brand.rule);
 }
 
-/// Empty-state placeholder shown when a list has no results.
 class EmptyState extends StatelessWidget {
   const EmptyState({
     super.key,
     required this.label,
     required this.hint,
+    this.icon = Icons.inbox_outlined,
   });
 
   final String label;
   final String hint;
+  final IconData icon;
 
   @override
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
     return Center(
       child: Padding(
-        padding: const EdgeInsets.all(24),
+        padding: const EdgeInsets.all(32),
         child: Column(
           mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.center,
           children: [
-            Text(label,
-                style: text.headlineMedium?.copyWith(color: Brand.paperDim)),
-            const SizedBox(height: 8),
-            Text(hint,
-                style: text.bodySmall, textAlign: TextAlign.center),
+            IconTile(icon: icon, size: 52, color: context.brand.paperDim),
+            const SizedBox(height: 14),
+            Text(label, style: text.titleMedium),
+            const SizedBox(height: 4),
+            Text(hint, style: text.bodySmall, textAlign: TextAlign.center),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class WebTableHeader extends StatelessWidget {
+  const WebTableHeader({super.key, required this.cells});
+  final List<Widget> cells;
+
+  @override
+  Widget build(BuildContext context) {
+    final scoped = ColumnResizeScope.maybeOf(context) != null;
+    return Container(
+      padding: scoped
+          ? const EdgeInsets.symmetric(horizontal: 16)
+          : const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: BoxDecoration(
+        color: context.brand.surfaceHi,
+        border: Border(bottom: BorderSide(color: context.brand.rule)),
+      ),
+      child: DefaultTextStyle.merge(
+        style: Theme.of(context).textTheme.labelLarge!,
+        child: Row(
+          children: resizableRowCells(
+            context,
+            cells,
+            header: true,
+            extra: 32,
+            headerPadding: const EdgeInsets.symmetric(vertical: 12),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class WebTableRow extends StatefulWidget {
+  const WebTableRow({
+    super.key,
+    required this.cells,
+    this.onTap,
+    this.selected = false,
+    this.crossAxisAlignment = CrossAxisAlignment.center,
+  });
+
+  final List<Widget> cells;
+  final VoidCallback? onTap;
+  final bool selected;
+  final CrossAxisAlignment crossAxisAlignment;
+
+  @override
+  State<WebTableRow> createState() => _WebTableRowState();
+}
+
+class _WebTableRowState extends State<WebTableRow> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final bg = widget.selected
+        ? Brand.signalGlow(0.08)
+        : (_hover ? context.brand.surfaceHi : context.brand.surface);
+    return MouseRegion(
+      cursor: widget.onTap != null
+          ? SystemMouseCursors.click
+          : MouseCursor.defer,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 120),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 11),
+          decoration: BoxDecoration(
+            color: bg,
+            border: Border(bottom: BorderSide(color: context.brand.rule)),
+          ),
+          child: Row(
+            crossAxisAlignment: widget.crossAxisAlignment,
+            children: resizableRowCells(context, widget.cells),
+          ),
         ),
       ),
     );

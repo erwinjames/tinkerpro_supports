@@ -1,22 +1,25 @@
 import 'package:flutter/material.dart';
 
+import '../services/live_sync.dart';
 import '../services/notification_center.dart';
 import '../theme.dart';
 import '../widgets/premium.dart';
+import '../widgets/tp_loader.dart';
 
-/// Bottom sheet that lists new leads and customers since the user last
-/// dismissed the panel. On close we mark everything as seen so the badge
-/// resets.
 class NotificationPanel extends StatefulWidget {
   const NotificationPanel({super.key, required this.center});
 
   final NotificationCenter center;
 
   static Future<void> show(BuildContext context, NotificationCenter center) {
-    return showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: Brand.surface,
-      isScrollControlled: true,
+    return showWebModal<void>(
+      context,
+      title: 'Notifications',
+      icon: Icons.notifications_none,
+      width: 520,
+      height: 560,
+      scrollable: false,
+      bodyPadding: EdgeInsets.zero,
       builder: (_) => NotificationPanel(center: center),
     );
   }
@@ -25,19 +28,24 @@ class NotificationPanel extends StatefulWidget {
   State<NotificationPanel> createState() => _NotificationPanelState();
 }
 
-class _NotificationPanelState extends State<NotificationPanel> {
+class _NotificationPanelState extends State<NotificationPanel>
+    with LiveRefresh<NotificationPanel> {
+  @override
+  List<String> get liveKeys => const ['clientOffer', 'customer', 'notifications'];
+
+  @override
+  void onLiveChange() => widget.center.refresh();
+
   @override
   void initState() {
     super.initState();
     widget.center.addListener(_onChange);
-    // Pull fresh data the moment the sheet opens.
     widget.center.refresh();
   }
 
   @override
   void dispose() {
     widget.center.removeListener(_onChange);
-    // Clear the badge — anything visible here counts as seen.
     widget.center.markAllSeen();
     super.dispose();
   }
@@ -54,104 +62,97 @@ class _NotificationPanelState extends State<NotificationPanel> {
     final total = leads.length + customers.length;
     final loading = widget.center.loading;
 
-    return DraggableScrollableSheet(
-      initialChildSize: 0.6,
-      minChildSize: 0.35,
-      maxChildSize: 0.92,
-      expand: false,
-      builder: (_, scrollController) {
-        return Container(
-          decoration: const BoxDecoration(
-            color: Brand.surface,
-            border: Border(top: BorderSide(color: Brand.signal, width: 2)),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Container(
+          height: 44,
+          padding: const EdgeInsets.symmetric(horizontal: 20),
+          decoration: BoxDecoration(
+            color: context.brand.surfaceHi,
+            border: Border(bottom: BorderSide(color: context.brand.rule)),
           ),
-          padding: const EdgeInsets.fromLTRB(24, 20, 24, 24),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
+          child: Row(
             children: [
-              Row(
-                children: [
-                  Text('NOTIFICATIONS · NEW',
-                      style: text.labelLarge),
-                  const Spacer(),
-                  Text(
-                    total == 0
-                        ? 'ALL CLEAR'
-                        : '$total ${total == 1 ? 'ITEM' : 'ITEMS'}',
-                    style: text.labelMedium?.copyWith(
-                      color: total == 0 ? Brand.paperDim : Brand.signal,
+              Text(
+                'New leads & customers',
+                style: text.bodyMedium?.copyWith(fontWeight: FontWeight.w700),
+              ),
+              const Spacer(),
+              if (loading)
+                const Padding(
+                  padding: EdgeInsets.only(right: 10),
+                  child: SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: TpLoader(
+                      strokeWidth: 2,
+                      color: Brand.signal,
                     ),
                   ),
-                ],
-              ),
-              const SizedBox(height: 10),
-              const Hairline(),
-              Expanded(
-                child: total == 0 && !loading
-                    ? Center(
-                        child: Padding(
-                          padding: const EdgeInsets.all(24),
-                          child: Text(
-                            'No new leads or customers since your last visit.',
-                            style: text.bodySmall,
-                            textAlign: TextAlign.center,
-                          ),
-                        ),
-                      )
-                    : ListView(
-                        controller: scrollController,
-                        padding: const EdgeInsets.only(top: 12),
-                        children: [
-                          if (loading && total == 0)
-                            const Padding(
-                              padding: EdgeInsets.symmetric(vertical: 32),
-                              child: Center(
-                                child: SizedBox(
-                                  width: 18,
-                                  height: 18,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                    color: Brand.signal,
-                                  ),
-                                ),
-                              ),
-                            ),
-                          if (leads.isNotEmpty) ...[
-                            _SectionHeader(
-                                label: 'NEW LEADS', count: leads.length),
-                            ...leads.map((l) => _NotificationRow(
-                                  title: l.name.isEmpty ? 'No name' : l.name,
-                                  subtitle: [l.businessType, l.email, l.phone]
-                                      .where((e) => e.isNotEmpty)
-                                      .join(' · '),
-                                  meta: 'LEAD',
-                                )),
-                            const SizedBox(height: 18),
-                          ],
-                          if (customers.isNotEmpty) ...[
-                            _SectionHeader(
-                                label: 'NEW CUSTOMERS',
-                                count: customers.length),
-                            ...customers.map((c) => _NotificationRow(
-                                  title: c.companyName,
-                                  subtitle: [c.ownerName, c.tin]
-                                      .where((e) => e.isNotEmpty)
-                                      .join(' · '),
-                                  meta: c.status.toUpperCase(),
-                                )),
-                          ],
-                        ],
-                      ),
-              ),
-              const SizedBox(height: 16),
-              GhostButton(
-                label: 'Close',
-                onPressed: () => Navigator.of(context).pop(),
+                ),
+              StatusPill(
+                label: total == 0
+                    ? 'All clear'
+                    : '$total ${total == 1 ? 'item' : 'items'}',
+                color: total == 0 ? context.brand.paperDim : Brand.signal,
               ),
             ],
           ),
-        );
-      },
+        ),
+        Expanded(
+          child: total == 0
+              ? (loading
+                    ? const Center(child: TpLoader())
+                    : const EmptyState(
+                        icon: Icons.notifications_off_outlined,
+                        label: 'You are all caught up',
+                        hint:
+                            'No new leads or customers since your last visit.',
+                      ))
+              : ListView(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  children: [
+                    if (leads.isNotEmpty) ...[
+                      _SectionHeader(label: 'New leads', count: leads.length),
+                      ...leads.map(
+                        (l) => _NotificationRow(
+                          icon: Icons.person_add_alt_1_outlined,
+                          title: l.name.isEmpty ? 'No name' : l.name,
+                          subtitle: [
+                            l.businessType,
+                            l.email,
+                            l.phone,
+                          ].where((e) => e.isNotEmpty).join(' · '),
+                          meta: l.createdAt,
+                          tag: 'Lead',
+                          tagColor: Brand.signal,
+                        ),
+                      ),
+                    ],
+                    if (customers.isNotEmpty) ...[
+                      _SectionHeader(
+                        label: 'New customers',
+                        count: customers.length,
+                      ),
+                      ...customers.map(
+                        (c) => _NotificationRow(
+                          icon: Icons.storefront_outlined,
+                          title: c.companyName,
+                          subtitle: [
+                            c.ownerName,
+                            c.tin,
+                          ].where((e) => e.isNotEmpty).join(' · '),
+                          meta: '',
+                          tag: c.status.isEmpty ? 'Customer' : c.status,
+                          tagColor: Brand.info,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+        ),
+      ],
     );
   }
 }
@@ -164,14 +165,13 @@ class _SectionHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 4),
+    return Container(
+      padding: const EdgeInsets.fromLTRB(20, 14, 20, 6),
       child: Row(
         children: [
-          Text(label, style: text.labelMedium),
+          Text(label.toUpperCase(), style: text.labelLarge),
           const SizedBox(width: 8),
-          Text('· $count',
-              style: text.labelMedium?.copyWith(color: Brand.signal)),
+          CountBadge(count: count),
         ],
       ),
     );
@@ -180,27 +180,68 @@ class _SectionHeader extends StatelessWidget {
 
 class _NotificationRow extends StatelessWidget {
   const _NotificationRow({
+    required this.icon,
     required this.title,
     required this.subtitle,
     required this.meta,
+    required this.tag,
+    required this.tagColor,
   });
 
+  final IconData icon;
   final String title;
   final String subtitle;
   final String meta;
+  final String tag;
+  final Color tagColor;
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      children: [
-        ActivityRow(
-          title: title,
-          subtitle: subtitle.isEmpty ? meta : subtitle,
-          meta: meta,
-          showSignalDot: true,
-        ),
-        const Hairline(),
-      ],
+    final text = Theme.of(context).textTheme;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+      decoration: BoxDecoration(
+        border: Border(bottom: BorderSide(color: context.brand.rule)),
+      ),
+      child: Row(
+        children: [
+          IconTile(icon: icon, size: 32, color: tagColor),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: text.bodyMedium?.copyWith(fontWeight: FontWeight.w700),
+                ),
+                if (subtitle.isNotEmpty)
+                  Text(
+                    subtitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: text.bodySmall,
+                  ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              StatusPill(label: tag, color: tagColor),
+              if (meta.isNotEmpty) ...[
+                const SizedBox(height: 4),
+                Text(meta, style: text.bodySmall),
+              ],
+            ],
+          ),
+        ],
+      ),
     );
   }
 }

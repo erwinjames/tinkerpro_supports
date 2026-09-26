@@ -1,8 +1,3 @@
-// Desktop chat page. Renders the inbox against the shell-owned [ChatRuntime]
-// (a single shared realtime connection / inbox / CallService). Incoming-call
-// handling lives in the shell now, so it works on any page — see
-// DesktopShell, which listens to runtime.calls.
-
 import 'package:flutter/material.dart';
 
 import '../api_client.dart';
@@ -11,6 +6,7 @@ import '../services/chat_runtime.dart';
 import '../theme.dart';
 import '../widgets/premium.dart';
 import 'chat_inbox_screen.dart';
+import '../widgets/tp_loader.dart';
 
 class ChatPage extends StatefulWidget {
   const ChatPage({
@@ -55,36 +51,36 @@ class _ChatPageState extends State<ChatPage> {
     final rt = widget.runtime;
     if (!rt.ready) {
       return Scaffold(
-        backgroundColor: Brand.canvas,
+        backgroundColor: context.brand.canvas,
         body: Center(
           child: rt.error == null
               ? const SizedBox(
                   width: 22,
                   height: 22,
-                  child: CircularProgressIndicator(
+                  child: TpLoader(
                       strokeWidth: 2, color: Brand.signal))
-              : Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 32),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text('CHAT UNAVAILABLE',
-                          style: Theme.of(context).textTheme.labelLarge),
-                      const SizedBox(height: 8),
-                      const Hairline(),
-                      const SizedBox(height: 16),
-                      Text(rt.error!,
-                          textAlign: TextAlign.center,
-                          style: Theme.of(context).textTheme.bodyMedium),
-                      const SizedBox(height: 20),
-                      SizedBox(
-                        width: 200,
-                        child: SignalButton(
-                            label: 'Retry',
-                            icon: Icons.refresh,
-                            onPressed: rt.bootstrap),
-                      ),
-                    ],
+              : SizedBox(
+                  width: 440,
+                  child: WebCard(
+                    title: 'Chat unavailable',
+                    icon: Icons.forum_outlined,
+                    padding: const EdgeInsets.all(20),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(rt.error!,
+                            style: Theme.of(context).textTheme.bodyMedium),
+                        const SizedBox(height: 16),
+                        Align(
+                          alignment: Alignment.centerRight,
+                          child: SignalButton(
+                              label: 'Retry',
+                              icon: Icons.refresh,
+                              onPressed: rt.bootstrap),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
         ),
@@ -100,6 +96,7 @@ class _ChatPageState extends State<ChatPage> {
       chatPrefs: widget.chatPrefs,
       onSignOut: widget.onSignOut,
       calls: rt.calls,
+      twoPane: true,
     );
   }
 }

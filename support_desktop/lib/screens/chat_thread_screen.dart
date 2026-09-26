@@ -1,18 +1,18 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart'
     show
         Clipboard,
         ClipboardData,
-        PlatformException,
         HardwareKeyboard,
         KeyEvent,
         KeyDownEvent,
         LogicalKeyboardKey;
-import 'package:image_picker/image_picker.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:http/http.dart' as http;
@@ -24,12 +24,16 @@ import '../services/chat_prefs.dart';
 import '../services/chat_realtime.dart';
 import '../services/chat_service.dart';
 import '../services/chat_state.dart';
+import '../services/chat_ui_data_service.dart';
+import '../services/chatflow_service.dart';
+import '../services/chatflow_thread_extras.dart';
+import '../services/sound_engine.dart';
 import '../theme.dart';
 import '../widgets/premium.dart';
 import 'chat_participants_screen.dart';
+import 'chat_ui_widgets.dart';
+import '../widgets/tp_loader.dart';
 
-/// Full-screen conversation view. Subscribes to the conversation's Pusher
-/// channel on init, unsubscribes on dispose via [ChatThread.dispose].
 class ChatThreadScreen extends StatefulWidget {
   const ChatThreadScreen({
     super.key,
@@ -41,48 +45,131 @@ class ChatThreadScreen extends StatefulWidget {
     required this.api,
     required this.chatPrefs,
     this.calls,
+    this.embedded = false,
+    this.onClosed,
+    this.ui,
+    this.onInboxReload,
+    this.conversations,
   });
 
   final int conversationId;
-
-  /// Seed metadata (name, peer) used for the header. May be null if the
-  /// conversation was created a moment ago and the inbox hasn't rehydrated.
   final Conversation? conversation;
   final int myUserId;
   final ChatService service;
   final ChatRealtimeService realtime;
   final ApiClient api;
   final ChatPrefs chatPrefs;
-
-  /// WebRTC call wiring. Null until HomeShell has finished bootstrap; in that
-  /// case the call buttons are hidden.
   final CallService? calls;
+  final bool embedded;
+  final VoidCallback? onClosed;
+  final ChatUiDataService? ui;
+  final VoidCallback? onInboxReload;
+  final List<Conversation> Function()? conversations;
 
   @override
   State<ChatThreadScreen> createState() => _ChatThreadScreenState();
 }
 
+Future<bool> _chatConfirm(
+  BuildContext context, {
+  required String title,
+  required String message,
+  required String confirmLabel,
+  bool danger = false,
+}) async {
+  final ok = await showWebModal<bool>(
+    context,
+    title: title,
+    icon: danger ? Icons.warning_amber_rounded : Icons.help_outline,
+    width: 460,
+    builder: (_) => Text(message, style: Theme.of(context).textTheme.bodyMedium),
+    actions: (ctx) => [
+      GhostButton(label: 'Cancel', onPressed: () => Navigator.pop(ctx, false)),
+      danger
+          ? DangerButton(label: confirmLabel, onPressed: () => Navigator.pop(ctx, true))
+          : SignalButton(label: confirmLabel, onPressed: () => Navigator.pop(ctx, true)),
+    ],
+  );
+  return ok ?? false;
+}
+
+class _Gate {
+  const _Gate({
+    this.locked = false,
+    this.aiOwned = false,
+    this.ticketId,
+    this.status,
+    this.claimedByOther = false,
+    this.agentName = '',
+    this.willReopen = false,
+    this.willEmail = false,
+  });
+  final bool locked;
+  final bool aiOwned;
+  final int? ticketId;
+  final String? status;
+  final bool claimedByOther;
+  final String agentName;
+  final bool willReopen;
+  final bool willEmail;
+}
+
+String _fmtTicketNo(int id) => '#${id.toString().padLeft(4, '0')}';
+
+final RegExp _quoteRe = RegExp(
+    r'^>\s*@([^\[:\n]+?)(?:\s*\[#(\d+)\])?\s*:[ \t]*([^\n]*?)(?:\r?\n\r?\n([\s\S]+))?$');
+
+class _Quoted {
+  const _Quoted(this.sender, this.targetId, this.preview, this.reply);
+  final String sender;
+  final int targetId;
+  final String preview;
+  final String reply;
+}
+
+String _stripNestedQuotes(String preview) {
+  final re = RegExp(r'^>\s*@[^\[:\n]+?(?:\s*\[#\d+\])?\s*:\s*');
+  var s = preview;
+  for (var i = 0; i < 8 && re.hasMatch(s); i++) {
+    s = s.replaceFirst(re, '').trim();
+  }
+  return s;
+}
+
+_Quoted? _parseQuoted(String body) {
+  final m = _quoteRe.firstMatch(body);
+  if (m == null) return null;
+  final p = _stripNestedQuotes((m.group(3) ?? '').trim());
+  return _Quoted(
+    (m.group(1) ?? '').trim(),
+    int.tryParse(m.group(2) ?? '') ?? 0,
+    p.isEmpty ? '[attachment]' : p,
+    (m.group(4) ?? '').trim(),
+  );
+}
+
 class _ChatThreadScreenState extends State<ChatThreadScreen> {
   late final ChatThread _thread;
+  late final ChatflowService _flow = ChatflowService(widget.api);
+  late final ChatflowThreadExtras _extras;
+  late final ChatUiDataService _ui;
+  bool _ownsUi = false;
   final _composer = TextEditingController();
-  // Intercept Enter on the composer's own focus node (fires before the field
-  // inserts text) so a bare Enter SENDS instead of adding a line break.
-  // Shift+Enter still inserts a newline — the desktop chat convention.
   late final FocusNode _composerFocus =
       FocusNode(onKeyEvent: _handleComposerKey);
   final _scroll = ScrollController();
-  final _picker = ImagePicker();
 
-  /// Pending attachments — picked locally, uploaded in the background, sent
-  /// when the user taps Send.
   final List<_PendingAttachment> _pending = [];
 
-  /// Live status for any ticket referenced in this thread, keyed by public
-  /// ticket number. Drives the inline Accept (claim) / Resolve footer that
-  /// mirrors the web chat. Empty for ordinary conversations.
   final Map<int, TicketStatusInfo> _ticketStatuses = {};
-  final Set<int> _ticketBusy = {};
+  final Set<String> _busy = {};
   bool _ticketRefreshing = false;
+
+  List<Map<String, dynamic>> _participants = const [];
+  Message? _replyTo;
+  final List<DateTime> _sendTimes = [];
+  bool _fbHandoverBlocked = false;
+  StreamSubscription<Map<String, dynamic>>? _reactSub;
 
   @override
   void initState() {
@@ -93,6 +180,12 @@ class _ChatThreadScreenState extends State<ChatThreadScreen> {
       service: widget.service,
       realtime: widget.realtime,
     );
+    _ownsUi = widget.ui == null;
+    _ui = widget.ui ?? ChatUiDataService(widget.api);
+    if (_ownsUi) _ui.refresh();
+    _ui.addListener(_onPresenceChange);
+    _extras = ChatflowThreadExtras(_flow, widget.conversationId);
+    _extras.addListener(_onPresenceChange);
     _thread.addListener(_onThreadChange);
     _thread.loadInitial().then((_) {
       _markNewestRead();
@@ -100,16 +193,44 @@ class _ChatThreadScreenState extends State<ChatThreadScreen> {
     });
     _scroll.addListener(_maybeLoadOlder);
     _composer.addListener(_onComposerChanged);
+    _loadParticipants();
 
-    // Tell the FCM handler we're viewing this conversation so it can
-    // suppress local notifications for incoming messages on this thread.
     widget.realtime.currentlyViewedConv.value = widget.conversationId;
+    _reactSub = widget.realtime.reactionEvents.listen(_onReactionEvent);
 
-    // Live presence dot in the header.
     widget.realtime.onlineUsers.addListener(_onPresenceChange);
-    // Theme changes (Settings → chat theme picker) should immediately
-    // re-tint the bubbles in any open thread.
     widget.chatPrefs.addListener(_onPresenceChange);
+  }
+
+  bool _visible = true;
+  ValueListenable<TickerModeData>? _tickerMode;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final n = TickerMode.getValuesNotifier(context);
+    if (!identical(n, _tickerMode)) {
+      _tickerMode?.removeListener(_onTickerModeChange);
+      _tickerMode = n..addListener(_onTickerModeChange);
+      _applyVisibility(n.value.enabled);
+    }
+  }
+
+  void _onTickerModeChange() {
+    final n = _tickerMode;
+    if (n != null && mounted) _applyVisibility(n.value.enabled);
+  }
+
+  void _applyVisibility(bool visible) {
+    if (visible == _visible) return;
+    _visible = visible;
+    if (visible) {
+      widget.realtime.currentlyViewedConv.value = widget.conversationId;
+      _markNewestRead();
+    } else if (widget.realtime.currentlyViewedConv.value ==
+        widget.conversationId) {
+      widget.realtime.currentlyViewedConv.value = null;
+    }
   }
 
   void _onPresenceChange() {
@@ -120,8 +241,6 @@ class _ChatThreadScreenState extends State<ChatThreadScreen> {
   void _onComposerChanged() {
     if (!mounted) return;
     setState(() {});
-    // Only fire typing on actual user edits, not clear() calls from our
-    // own send. And only while the field is non-empty.
     final text = _composer.text;
     if (text.isNotEmpty && text != _lastComposerText) {
       _thread.notifyTyping();
@@ -133,15 +252,37 @@ class _ChatThreadScreenState extends State<ChatThreadScreen> {
     if (mounted) {
       setState(() {});
       _markNewestRead();
-      // A new 👋/✅ ticket bubble may have arrived (or a new ticket was
-      // submitted) — re-pull live statuses so the footer stays accurate.
       _refreshTicketStatuses();
     }
   }
 
-  /// Scan the thread for ticket references and refresh their live status via
-  /// getTicketsByIds. No-op (and clears) when the thread has no tickets, so
-  /// ordinary DMs never hit the endpoint.
+  Future<void> _loadParticipants() async {
+    final r = await _flow.conversation(widget.conversationId);
+    if (!mounted || !r.ok) return;
+    final raw = r.data['participants'];
+    setState(() {
+      _participants = [
+        if (raw is List)
+          for (final p in raw)
+            if (p is Map) Map<String, dynamic>.from(p),
+      ];
+    });
+  }
+
+  String _senderName(int senderId) {
+    for (final p in _participants) {
+      if (int.tryParse('${p['id']}') == senderId) {
+        final f = '${p['full_name'] ?? ''}';
+        if (f.isNotEmpty) return f;
+        final u = '${p['username'] ?? ''}';
+        if (u.isNotEmpty) return u;
+      }
+    }
+    return 'User $senderId';
+  }
+
+  ChatConvMeta get _meta => _ui.meta(widget.conversationId);
+
   Future<void> _refreshTicketStatuses() async {
     if (_ticketRefreshing) return;
     final ids = <int>{};
@@ -166,24 +307,191 @@ class _ChatThreadScreenState extends State<ChatThreadScreen> {
     });
   }
 
-  Future<void> _acceptTicket(int ticketId) async {
-    if (_ticketBusy.contains(ticketId)) return;
-    setState(() => _ticketBusy.add(ticketId));
-    final ok = await widget.service.acceptTicket(ticketId, widget.myUserId);
-    if (!mounted) return;
-    setState(() => _ticketBusy.remove(ticketId));
-    _toast(ok ? 'Ticket #$ticketId accepted' : 'Could not accept ticket');
-    if (ok) await _refreshTicketStatuses();
+  Iterable<Message> get _visibleMessages =>
+      _thread.messages.where((m) => !_extras.isRemoved(m.id));
+
+  List<({int id, TicketStatusInfo t})> _openTicketsOnThread() {
+    final seen = <int>{};
+    final out = <({int id, TicketStatusInfo t})>[];
+    for (final m in _visibleMessages) {
+      final ref = detectTicketRef(m.body);
+      if (ref == null || !seen.add(ref.id)) continue;
+      final t = _ticketStatuses[ref.id];
+      if (t == null || t.isResolved || t.isClosed) continue;
+      out.add((id: ref.id, t: t));
+    }
+    return out;
   }
 
-  Future<void> _resolveTicket(int ticketId) async {
-    if (_ticketBusy.contains(ticketId)) return;
-    setState(() => _ticketBusy.add(ticketId));
-    final ok = await widget.service.resolveTicket(ticketId, widget.myUserId);
+  ({int id, TicketStatusInfo t})? _activeHeaderTicket() {
+    for (final m in _visibleMessages) {
+      final ref = detectTicketRef(m.body);
+      if (ref == null) continue;
+      final t = _ticketStatuses[ref.id];
+      if (t == null || !t.isInProgress) continue;
+      if (t.assignedAgentId != widget.myUserId) continue;
+      return (id: ref.id, t: t);
+    }
+    return null;
+  }
+
+  ({int id, TicketStatusInfo t})? _activeHeaderReopenTicket() {
+    for (final m in _visibleMessages) {
+      final ref = detectTicketRef(m.body);
+      if (ref == null) continue;
+      final t = _ticketStatuses[ref.id];
+      if (t == null) continue;
+      if (t.isResolved || t.isClosed) return (id: ref.id, t: t);
+      return null;
+    }
+    return null;
+  }
+
+  ({int id, TicketStatusInfo t})? _activeHeaderAcceptTicket() {
+    for (final m in _visibleMessages) {
+      final ref = detectTicketRef(m.body);
+      if (ref == null) continue;
+      final t = _ticketStatuses[ref.id];
+      if (t == null || !t.isNew) continue;
+      return (id: ref.id, t: t);
+    }
+    return null;
+  }
+
+  _Gate _gate() {
+    final meta = _meta;
+    if (meta.fbAiOwned) {
+      return const _Gate(locked: true, aiOwned: true);
+    }
+    for (final o in _openTicketsOnThread()) {
+      if (o.t.isInProgress && o.t.assignedAgentId == widget.myUserId) {
+        return _Gate(ticketId: o.id, status: o.t.status);
+      }
+    }
+    TicketRef? ref;
+    TicketRef? liveRef;
+    for (final m in _visibleMessages) {
+      final r = detectTicketRef(m.body);
+      if (r == null) continue;
+      ref ??= r;
+      final cached = _ticketStatuses[r.id];
+      if (cached == null || (!cached.isResolved && !cached.isClosed)) {
+        liveRef = r;
+        break;
+      }
+    }
+    ref = liveRef ?? ref;
+    if (ref == null) return const _Gate();
+    final t = _ticketStatuses[ref.id];
+    if (t == null) return _Gate(locked: true, ticketId: ref.id);
+    final assignedTo = t.assignedAgentId ?? 0;
+    final isGuestConv = meta.guestStatus.isNotEmpty && meta.guestStatus != 'none';
+    if ((t.isResolved || t.isClosed) && (meta.isDesktopApp || isGuestConv)) {
+      return _Gate(
+        ticketId: ref.id,
+        status: t.status,
+        willReopen: true,
+        willEmail: isGuestConv && !meta.isDesktopApp,
+      );
+    }
+    final claimedByMe = t.isInProgress && assignedTo > 0 && assignedTo == widget.myUserId;
+    final claimedByOther = t.isInProgress && assignedTo > 0 && assignedTo != widget.myUserId;
+    return _Gate(
+      locked: !claimedByMe,
+      ticketId: ref.id,
+      status: t.status,
+      claimedByOther: claimedByOther,
+      agentName: t.agentName ?? '',
+    );
+  }
+
+  Future<void> _acceptTicket(int ticketId) async {
+    final key = 'accept-$ticketId';
+    if (_busy.contains(key)) return;
+    final choice = await showDialog<_AcceptChoice>(
+      context: context,
+      builder: (_) => _AcceptTicketDialog(
+        flow: _flow,
+        ticketId: ticketId,
+        conversationId: widget.conversationId,
+      ),
+    );
+    if (!mounted || choice == null) return;
+    setState(() => _busy.add(key));
+    final res = await _flow.acceptTicket(
+      ticketId: ticketId,
+      agentId: widget.myUserId,
+      alias: choice.alias,
+      saveDefault: choice.saveDefault,
+      greetingMessage: choice.greetingMessage,
+    );
     if (!mounted) return;
-    setState(() => _ticketBusy.remove(ticketId));
-    _toast(ok ? 'Ticket #$ticketId resolved' : 'Could not resolve ticket');
-    if (ok) await _refreshTicketStatuses();
+    setState(() => _busy.remove(key));
+    _toast(res.ok ? 'Ticket accepted' : (res.message ?? 'Could not accept ticket'));
+    await _refreshTicketStatuses();
+  }
+
+  Future<void> _resolveTickets(List<int> ids) async {
+    if (ids.isEmpty || _busy.contains('resolve')) return;
+    final many = ids.length > 1;
+    final ok = await _chatConfirm(
+      context,
+      title: many
+          ? 'Resolve ${ids.length} tickets?'
+          : 'Resolve ticket ${_fmtTicketNo(ids.first)}?',
+      message: many
+          ? 'Marks every open ticket on this chat as resolved '
+              '(${ids.map(_fmtTicketNo).join(', ')}).\n\n'
+              'They came from chats that were merged — a confirmation is posted for each.'
+          : 'This will post a confirmation in the chat.',
+      confirmLabel: many ? 'Resolve all' : 'Mark resolved',
+    );
+    if (!ok || !mounted) return;
+    setState(() => _busy.add('resolve'));
+    var done = 0;
+    var failed = 0;
+    for (final id in ids) {
+      final r = await _flow.resolveTicket(id, widget.myUserId);
+      if (r.ok) {
+        done++;
+      } else {
+        failed++;
+      }
+    }
+    if (!mounted) return;
+    setState(() => _busy.remove('resolve'));
+    if (done > 0 && failed == 0) {
+      _toast(done > 1 ? '$done tickets resolved' : 'Ticket resolved');
+    } else if (done > 0) {
+      _toast('$done resolved, $failed failed');
+    } else {
+      _toast('Could not resolve ticket${ids.length > 1 ? 's' : ''}');
+    }
+    await _refreshTicketStatuses();
+    if (done > 0) widget.onInboxReload?.call();
+  }
+
+  Future<void> _reopenTicket(int ticketId) async {
+    if (_busy.contains('reopen')) return;
+    final ok = await _chatConfirm(
+      context,
+      title: 'Reopen this ticket?',
+      message: 'Puts ticket ${_fmtTicketNo(ticketId)} back in progress under '
+          'your name and lets both sides carry on in this chat.',
+      confirmLabel: 'Reopen ticket',
+    );
+    if (!ok || !mounted) return;
+    setState(() => _busy.add('reopen'));
+    final r = await _flow.reopenTicketAsAgent(widget.conversationId);
+    if (!mounted) return;
+    setState(() => _busy.remove('reopen'));
+    if (!r.ok) {
+      _toast(r.message ?? 'Could not reopen the ticket');
+      return;
+    }
+    _toast('Ticket reopened');
+    widget.onInboxReload?.call();
+    await _refreshTicketStatuses();
   }
 
   Future<void> _openTicketDetail(int ticketId) async {
@@ -193,22 +501,32 @@ class _ChatThreadScreenState extends State<ChatThreadScreen> {
       _toast('Ticket details unavailable');
       return;
     }
-    showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: Brand.surface,
-      isScrollControlled: true,
-      builder: (_) => _TicketDetailSheet(detail: detail),
+    final no = detail.ticketNumber ?? detail.id;
+    await showWebModal<void>(
+      context,
+      title: 'Ticket #$no',
+      subtitle: detail.subject.isEmpty ? null : detail.subject,
+      icon: Icons.confirmation_number_outlined,
+      width: 620,
+      builder: (_) => _TicketDetailBody(detail: detail),
+      actions: (ctx) => [
+        GhostButton(
+          label: 'Close',
+          onPressed: () => Navigator.of(ctx).pop(),
+        ),
+      ],
     );
   }
 
-  /// The ticket to surface in the header: the most recent non-closed ticket
-  /// referenced in this thread whose live status we know. Null when the
-  /// conversation has no actionable ticket. Mirrors the web's
-  /// activeHeaderTicket(), but also surfaces NEW tickets so they can be
-  /// claimed straight from the header.
-  ({int id, TicketStatusInfo status})? _activeTicket() {
-    for (final m in _thread.messages) {
-      // messages are newest-first, so the first hit is the latest ticket.
+  String _ticketStatusLabel(TicketStatusInfo st) {
+    if (st.isNew) return 'New';
+    if (st.isInProgress) return 'In progress';
+    if (st.isResolved) return 'Resolved';
+    return 'Closed';
+  }
+
+  ({int id, TicketStatusInfo status})? _subTicket() {
+    for (final m in _visibleMessages) {
       final ref = detectTicketRef(m.body);
       if (ref == null) continue;
       final st = _ticketStatuses[ref.id];
@@ -218,337 +536,714 @@ class _ChatThreadScreenState extends State<ChatThreadScreen> {
     return null;
   }
 
-  String _ticketStatusLabel(TicketStatusInfo st) {
-    if (st.isNew) return 'NEW';
-    if (st.isInProgress) return 'IN PROGRESS';
-    if (st.isResolved) return 'RESOLVED';
-    return 'CLOSED';
-  }
-
-  /// Fire a debounced markRead for the newest known message id. Called
-  /// after the initial load and whenever a new message arrives while the
-  /// thread is open. The thread's internal monotonic guard handles dupes.
   void _markNewestRead() {
+    if (!_visible) return;
     if (_thread.messages.isEmpty) return;
-    final newest = _thread.messages.first; // sorted DESC
+    final newest = _thread.messages.first;
     final id = newest.id;
     if (id == null) return;
     _thread.scheduleMarkRead(id);
   }
 
   void _maybeLoadOlder() {
-    // ListView is reversed — `maxScrollExtent` is the "top" of history.
     if (_scroll.position.pixels >= _scroll.position.maxScrollExtent - 160) {
       _thread.loadOlder();
     }
   }
 
   bool get _canSend {
-    if (_chatLocked) return false;
+    if (_gate().locked) return false;
     if (_pending.any((p) => p.status == _UploadStatus.uploading)) return false;
     final hasReady = _pending.any((p) => p.status == _UploadStatus.ready);
     return _composer.text.trim().isNotEmpty || hasReady;
   }
 
-  /// True when this is a customer/guest portal support thread that has no
-  /// filed ticket at all. Staff can't message the customer until a ticket
-  /// exists in the thread; once any ticket has been filed (whatever its
-  /// status — including resolved / closed) the composer stays open. Internal
-  /// staff DMs, ordinary staff groups, and channels are never locked.
-  bool get _chatLocked {
-    final conv = widget.conversation;
-    if (conv == null) return false;
-    if (!_isCustomerSupportThread(conv)) return false;
-    return !_hasFiledTicket();
-  }
-
-  /// Customer / guest portal support threads are server-created groups whose
-  /// `topic` is keyed `customer:<id>` or `guest:<id>` (see ChatFacade —
-  /// addCustomer / createGuestSupportConversation). Ordinary staff groups
-  /// have a null topic, DMs carry a peer instead, so the topic prefix is the
-  /// reliable signal that the other side is a portal customer.
-  bool _isCustomerSupportThread(Conversation conv) {
-    final topic = conv.topic?.trim().toLowerCase() ?? '';
-    return topic.startsWith('customer:') || topic.startsWith('guest:');
-  }
-
-  /// True when the thread contains at least one filed ticket, in any status.
-  /// Detected purely from the ticket system-messages already in the thread,
-  /// so it doesn't depend on live ticket-status loading.
-  bool _hasFiledTicket() {
-    for (final m in _thread.messages) {
-      if (detectTicketRef(m.body) != null) return true;
-    }
-    return false;
-  }
-
-  /// Enter sends; Shift+Enter inserts a newline. Returning `handled` for a
-  /// bare Enter swallows the event so the field never adds the line break.
   KeyEventResult _handleComposerKey(FocusNode node, KeyEvent event) {
     final isEnter = event.logicalKey == LogicalKeyboardKey.enter ||
         event.logicalKey == LogicalKeyboardKey.numpadEnter;
     if (!isEnter) return KeyEventResult.ignored;
     if (HardwareKeyboard.instance.isShiftPressed) {
-      return KeyEventResult.ignored; // Shift+Enter → newline
+      return KeyEventResult.ignored;
     }
     if (event is KeyDownEvent) {
-      if (_canSend) _handleSend();
+      _handleSend();
     }
-    // Swallow both down/up of a bare Enter so no line break is inserted.
     return KeyEventResult.handled;
   }
 
   Future<void> _handleSend() async {
-    if (!_canSend) return;
-    final text = _composer.text;
+    if (_pending.any((p) => p.status == _UploadStatus.uploading)) return;
+    if (_gate().locked) {
+      _toast('Accept the ticket before replying to the customer.');
+      return;
+    }
+    final text = _composer.text.trim();
     final ready = _pending
         .where((p) => p.status == _UploadStatus.ready)
         .map((p) => p.attachment!)
         .toList(growable: false);
+    if (text.isEmpty && ready.isEmpty) return;
+
+    final now = DateTime.now();
+    _sendTimes.removeWhere(
+        (t) => now.difference(t) >= const Duration(milliseconds: 3000));
+    if (_sendTimes.length >= 5) {
+      _toast("You're sending messages too quickly. Please slow down.");
+      return;
+    }
+
+    var finalText = text;
+    final reply = _replyTo;
+    if (reply != null && reply.id != null) {
+      final r = await _flow.replyBody(
+        conversationId: widget.conversationId,
+        replyToId: reply.id!,
+        body: text,
+      );
+      if (!mounted) return;
+      if (!r.ok || r.data['body'] == null) {
+        _toast(r.message ?? 'Could not send reply');
+        return;
+      }
+      finalText = '${r.data['body']}';
+    }
+    _sendTimes.add(now);
     setState(() {
+      _replyTo = null;
       _composer.clear();
       _pending.removeWhere((p) => p.status == _UploadStatus.ready);
     });
-    await _thread.send(text, attachments: ready);
+    await _thread.send(finalText, attachments: ready);
   }
 
-  Future<void> _openParticipants() async {
-    final result = await Navigator.of(context).push<Object?>(
-      MaterialPageRoute(
-        builder: (_) => ChatParticipantsScreen(
-          service: widget.service,
-          realtime: widget.realtime,
-          conversationId: widget.conversationId,
-          myUserId: widget.myUserId,
-        ),
-      ),
-    );
-    if (!mounted) return;
-    if (result == participantsResultLeft) {
+  void _close() {
+    if (widget.onClosed != null) {
+      widget.onClosed!();
+    } else {
       Navigator.of(context).pop();
     }
   }
 
-  /// Roles allowed to place / receive voice & video calls. Customer (and any
-  /// other non-staff) DMs don't get call buttons — calling is a staff-to-staff
-  /// feature. Compared case-insensitively against the peer's `role`.
+  Future<void> _openParticipants() async {
+    final result = await ChatParticipantsScreen.show(
+      context,
+      service: widget.service,
+      realtime: widget.realtime,
+      conversationId: widget.conversationId,
+      myUserId: widget.myUserId,
+    );
+    if (!mounted) return;
+    if (result == participantsResultLeft) {
+      widget.onInboxReload?.call();
+      _close();
+    } else {
+      _loadParticipants();
+    }
+  }
+
   static const _callableRoles = {'admin', 'super_admin', 'user'};
 
-  /// True when the DM peer is a staff member eligible for calls. Drives both
-  /// the header buttons and the [_placeCall] guard so the two never disagree.
   bool get _peerCallable {
     final role = widget.conversation?.peer?.role.trim().toLowerCase();
     return role != null && _callableRoles.contains(role);
   }
 
-  /// Group/channel calls require an SFU — for the MVP we only place
-  /// two-party DM calls. The button is hidden in non-DM threads and in DMs
-  /// with a non-callable peer (see [_callableRoles]).
+  bool get _isMultiparty {
+    final t = widget.conversation?.type;
+    return t == 'group' || t == 'channel';
+  }
+
   Future<void> _placeCall(CallMedia media) async {
     final calls = widget.calls;
     final conv = widget.conversation;
     if (calls == null) return;
-    if (conv == null || conv.type != 'dm' || conv.peer == null) {
-      _toast('CALLS ARE DM-ONLY FOR NOW');
+    if (conv == null) return;
+    if (!_isMultiparty && (conv.type != 'dm' || conv.peer == null)) {
+      _toast('Calls are DM-only for now');
       return;
     }
-    if (!_peerCallable) {
-      _toast('CALLS AREN\'T AVAILABLE FOR THIS USER');
+    if (!_isMultiparty && !_peerCallable) {
+      _toast('Calls aren\'t available for this user');
       return;
     }
 
-    // Block only when there's an actual peer connection in progress. Stuck
-    // `calling` / `ringing` (caller-side) phases are recovered by force-
-    // resetting — they're a sign the previous attempt was abandoned, not a
-    // live call we need to protect.
     if (calls.isInLiveCall) {
-      _toast('ALREADY IN A CALL');
+      _toast('Already in a call');
       return;
     }
     if (calls.isIncomingRinging) {
-      _toast('ANSWER INCOMING CALL FIRST');
+      _toast('Answer the incoming call first');
       return;
     }
     if (calls.isActive) {
-      // Stuck caller-side: clear it so the user can start fresh.
       calls.forceReset();
     }
 
-    final ok = await calls.placeCall(
-      peerId: conv.peer!.id,
-      peerName: conv.peer!.displayName,
-      media: media,
-    );
+    final bool ok;
+    if (_isMultiparty) {
+      final detail = await widget.service.conversation(widget.conversationId);
+      if (!mounted) return;
+      final members = (detail?.participants ?? [])
+          .where((m) => m.id != widget.myUserId)
+          .map((m) => {'id': m.id, 'name': m.displayName})
+          .toList();
+      if (members.isEmpty) {
+        _toast('No one else is in this conversation');
+        return;
+      }
+      if (members.length > kMeshMaxPeers) {
+        _toast('Group calls support up to ${kMeshMaxPeers + 1} people');
+        return;
+      }
+      ok = await calls.placeGroupCall(
+        conversationId: widget.conversationId,
+        groupName: conv.name,
+        members: members,
+        media: media,
+      );
+    } else {
+      ok = await calls.placeCall(
+        peerId: conv.peer!.id,
+        peerName: conv.peer!.displayName,
+        media: media,
+      );
+    }
     if (!ok && mounted) {
-      _toast('COULD NOT START CALL');
+      _toast('Could not start call');
     }
   }
 
-  Widget? _buildHeaderActions({required bool isDm, required bool peerOnline}) {
-    final canCall = widget.calls != null && isDm && _peerCallable;
-    final children = <Widget>[];
+  Future<void> _togglePriority() async {
+    final next = !_meta.priority;
+    final err = await _ui.setPriority(widget.conversationId, next);
+    if (err != null && mounted) _toast('Could not update priority: $err');
+  }
 
-    // Ticket controls live in the upper-right header so staff can see at a
-    // glance that the conversation has a ticket and Claim / Resolve it
-    // without scrolling. Shown only when there's an active, non-closed
-    // ticket. The orange button is the primary action; the ticket icon
-    // opens full details.
-    final ticket = _activeTicket();
-    if (ticket != null) {
-      final st = ticket.status;
-      final id = ticket.id;
-      if (_ticketBusy.contains(id)) {
-        children.add(const _HeaderTicketButton(
-          icon: Icons.hourglass_top,
-          tooltip: 'Working…',
-        ));
-      } else if (st.isNew) {
-        children.add(_HeaderTicketButton(
-          icon: Icons.check,
-          tooltip: 'Claim ticket #$id',
-          onTap: () => _acceptTicket(id),
-        ));
-      } else if (st.isInProgress && st.assignedAgentId == widget.myUserId) {
-        children.add(_HeaderTicketButton(
-          icon: Icons.flag_outlined,
-          tooltip: 'Resolve ticket #$id',
-          onTap: () => _resolveTicket(id),
-        ));
+  Future<void> _toggleArchive() async {
+    final next = !_meta.archived;
+    final err = await _ui.setArchived(widget.conversationId, next);
+    if (!mounted) return;
+    _toast(err == null
+        ? (next ? 'Archived' : 'Moved to inbox')
+        : 'Could not ${next ? 'archive' : 'unarchive'}: $err');
+  }
+
+  Future<void> _hideConversation() async {
+    final name = widget.conversation?.name ?? '';
+    final ok = await _chatConfirm(
+      context,
+      title: 'Hide this conversation?',
+      message: 'Hides ${name.isEmpty ? 'this conversation' : name} from your '
+          'inbox.\n\nThis only affects your account — the other participants '
+          'still see it, and a new message brings it back.',
+      confirmLabel: 'Hide',
+    );
+    if (!ok || !mounted) return;
+    final err = await _ui.hideForMe(widget.conversationId);
+    if (!mounted) return;
+    if (err == null) {
+      widget.onInboxReload?.call();
+      _close();
+    } else {
+      _toast('Could not hide: $err');
+    }
+  }
+
+  Future<void> _rename() async {
+    final current = widget.conversation?.name ?? '';
+    final ctrl = TextEditingController(text: current);
+    final name = await showWebModal<String>(
+      context,
+      title: 'Rename conversation',
+      icon: Icons.edit_outlined,
+      width: 460,
+      builder: (ctx) => Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            'Use something you’ll recognise — the customer’s real name, for example.',
+            style: Theme.of(ctx).textTheme.bodyMedium,
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: ctrl,
+            autofocus: true,
+            onSubmitted: (v) => Navigator.of(ctx).pop(v),
+          ),
+        ],
+      ),
+      actions: (ctx) => [
+        GhostButton(label: 'Cancel', onPressed: () => Navigator.of(ctx).pop()),
+        SignalButton(
+            label: 'Rename', onPressed: () => Navigator.of(ctx).pop(ctrl.text)),
+      ],
+    );
+    ctrl.dispose();
+    if (name == null || !mounted) return;
+    final trimmed = name.trim();
+    if (trimmed.isEmpty) {
+      _toast('Name cannot be empty');
+      return;
+    }
+    if (trimmed == current) return;
+    final r = await _flow.renameConversation(widget.conversationId, trimmed);
+    if (!mounted) return;
+    if (r.ok) {
+      widget.onInboxReload?.call();
+      _toast('Renamed');
+    } else {
+      _toast('Could not rename${r.message == null ? '' : ': ${r.message}'}');
+    }
+  }
+
+  Future<void> _moveRequest() async {
+    if (_busy.contains('fb')) return;
+    setState(() => _busy.add('fb'));
+    final r = await _flow.moveRequestToInbox(widget.conversationId);
+    if (!mounted) return;
+    setState(() => _busy.remove('fb'));
+    if (r.ok) {
+      _ui.patch(widget.conversationId, fbMoved: true);
+      widget.onInboxReload?.call();
+      _toast('Moved to agents — support can now reply');
+    } else {
+      _toast(r.message ?? 'Could not move to agents');
+    }
+  }
+
+  Future<void> _returnRequest() async {
+    if (_busy.contains('fb')) return;
+    final ok = await _chatConfirm(
+      context,
+      title: 'Move back to Facebook Chats?',
+      message: 'Puts this thread back under the Facebook Chats tab and removes '
+          'every member who has no Facebook chat access.',
+      confirmLabel: 'Move back',
+    );
+    if (!ok || !mounted) return;
+    setState(() => _busy.add('fb'));
+    final r = await _flow.returnRequestToFacebook(widget.conversationId);
+    if (!mounted) return;
+    setState(() => _busy.remove('fb'));
+    if (r.ok) {
+      _ui.patch(widget.conversationId, fbMoved: false, priority: false);
+      widget.onInboxReload?.call();
+      final dropped = int.tryParse('${r.data['removed'] ?? 0}') ?? 0;
+      _toast(dropped > 0
+          ? 'Back in Facebook Chats — removed $dropped member${dropped == 1 ? '' : 's'} without access'
+          : 'Back in Facebook Chats');
+    } else {
+      _toast(r.message ?? 'Could not move back to Facebook Chats');
+    }
+  }
+
+  Future<void> _returnToAi() async {
+    if (_busy.contains('fb')) return;
+    setState(() => _busy.add('fb'));
+    final r = await _flow.fbReturnToAi(widget.conversationId);
+    if (!mounted) return;
+    setState(() => _busy.remove('fb'));
+    if (r.ok) {
+      _ui.patch(widget.conversationId, fbAiOwned: true);
+      widget.onInboxReload?.call();
+      _toast('Handed back to the Page AI');
+    } else {
+      _toast(r.message ?? 'Could not hand back to the AI');
+    }
+  }
+
+  Future<void> _takeOver() async {
+    if (_busy.contains('takeover')) return;
+    setState(() => _busy.add('takeover'));
+    final r = await _flow.fbTakeOver(widget.conversationId);
+    if (!mounted) return;
+    setState(() => _busy.remove('takeover'));
+    if (r.ok) {
+      _ui.patch(widget.conversationId, fbAiOwned: false);
+      widget.onInboxReload?.call();
+      _toast('You now control this conversation');
+    } else {
+      final msg = r.message ?? 'Could not take over from the AI';
+      if (RegExp('conversation control|conversation routing|handover',
+              caseSensitive: false)
+          .hasMatch(msg)) {
+        setState(() => _fbHandoverBlocked = true);
       }
-      children
-        ..add(const SizedBox(width: 6))
-        ..add(StationAction(
-          icon: Icons.confirmation_number_outlined,
-          tooltip: 'Ticket #$id details',
-          onPressed: () => _openTicketDetail(id),
-        ));
+      _toast(msg);
+    }
+  }
+
+  Future<void> _showMoreMenu(Offset pos, {required bool isDm}) async {
+    final m = _meta;
+    final type = widget.conversation?.type;
+    final picked = await showChatMenu(context, pos, [
+      ChatMenuEntry('priority', m.priority ? 'Remove priority' : 'Mark as priority'),
+      if (type == 'group') const ChatMenuEntry('rename', 'Rename'),
+      if (!isDm) const ChatMenuEntry('members', 'Members'),
+      ChatMenuEntry('archive', m.archived ? 'Move to inbox' : 'Archive'),
+      const ChatMenuEntry('delete', 'Delete for me', danger: true),
+    ]);
+    if (!mounted) return;
+    switch (picked) {
+      case 'priority':
+        await _togglePriority();
+        break;
+      case 'rename':
+        await _rename();
+        break;
+      case 'members':
+        await _openParticipants();
+        break;
+      case 'archive':
+        await _toggleArchive();
+        break;
+      case 'delete':
+        await _hideConversation();
+        break;
+    }
+  }
+
+  List<Widget> _buildHeaderActions({required bool isDm}) {
+    final meta = _meta;
+    final gate = _gate();
+    final isGuest = meta.guestStatus.isNotEmpty && meta.guestStatus != 'none';
+    final canCall = widget.calls != null &&
+        !meta.isFacebook &&
+        !isGuest &&
+        ((isDm && _peerCallable) || _isMultiparty);
+    final children = <Widget>[];
+    final fbBusy = _busy.contains('fb');
+
+    if (meta.isFacebook && _ui.canMessageRequests && !meta.fbMoved) {
+      children.add(_HeaderTicketButton(
+        icon: Icons.reply_all,
+        label: 'Move to agents',
+        tooltip: 'Move to the whole support team so any agent can reply',
+        onTap: fbBusy ? null : _moveRequest,
+      ));
+    }
+    if (meta.isFacebook && _ui.canMessageRequests && meta.fbMoved) {
+      children.add(_HeaderTicketButton(
+        icon: Icons.reply,
+        label: 'Back to Facebook',
+        tooltip: 'Move back to Facebook Chats and drop agents without Facebook access',
+        onTap: fbBusy ? null : _returnRequest,
+      ));
+    }
+    if (meta.isFacebook && !meta.fbAiOwned) {
+      children.add(_HeaderTicketButton(
+        icon: Icons.smart_toy_outlined,
+        label: 'Return to AI',
+        tooltip: 'Hand this conversation back to the Page AI assistant',
+        onTap: fbBusy ? null : _returnToAi,
+      ));
+    }
+
+    final accept = _activeHeaderAcceptTicket();
+    if (accept != null) {
+      final busy = _busy.contains('accept-${accept.id}');
+      children.add(_HeaderTicketButton(
+        icon: busy ? Icons.hourglass_top : Icons.check,
+        label: busy ? 'Working…' : 'Accept ticket ${_fmtTicketNo(accept.id)}',
+        tooltip: 'Accept ticket ${_fmtTicketNo(accept.id)}',
+        onTap: busy ? null : () => _acceptTicket(accept.id),
+      ));
+    }
+    final reopen = accept == null ? _activeHeaderReopenTicket() : null;
+    if (reopen != null) {
+      final busy = _busy.contains('reopen');
+      children.add(_HeaderTicketButton(
+        icon: busy ? Icons.hourglass_top : Icons.undo,
+        label: busy ? 'Working…' : 'Reopen ticket ${_fmtTicketNo(reopen.id)}',
+        tooltip: 'Reopen ticket ${_fmtTicketNo(reopen.id)}',
+        onTap: busy ? null : () => _reopenTicket(reopen.id),
+      ));
+    }
+    final openAll = _openTicketsOnThread();
+    ({int id, TicketStatusInfo t})? mineOpen;
+    for (final o in openAll) {
+      if (o.t.isInProgress && o.t.assignedAgentId == widget.myUserId) {
+        mineOpen = o;
+        break;
+      }
+    }
+    final active = mineOpen ?? _activeHeaderTicket();
+    if (active != null) {
+      final ids = openAll.isNotEmpty ? openAll.map((o) => o.id).toList() : [active.id];
+      final many = ids.length > 1;
+      final busy = _busy.contains('resolve');
+      children.add(_HeaderTicketButton(
+        icon: busy ? Icons.hourglass_top : Icons.flag_outlined,
+        label: busy
+            ? 'Working…'
+            : many
+                ? 'Resolve ${ids.length} tickets'
+                : 'Resolve ticket ${_fmtTicketNo(active.id)}',
+        tooltip: many
+            ? 'Mark all ${ids.length} open tickets on this chat resolved'
+            : 'Mark ticket ${_fmtTicketNo(active.id)} resolved',
+        onTap: busy ? null : () => _resolveTickets(ids),
+      ));
+    }
+    final detailTicket = _subTicket();
+    if (detailTicket != null) {
+      children.add(ChatIconBtn(
+        icon: Icons.confirmation_number_outlined,
+        tooltip: 'Ticket ${_fmtTicketNo(detailTicket.id)} details',
+        onPressed: () => _openTicketDetail(detailTicket.id),
+      ));
     }
 
     if (canCall) {
-      if (children.isNotEmpty) children.add(const SizedBox(width: 6));
+      final locked = gate.locked;
       children
-        ..add(StationAction(
-          icon: Icons.call,
-          tooltip: 'Voice call',
-          onPressed: () => _placeCall(CallMedia.voice),
+        ..add(ChatIconBtn(
+          icon: Icons.call_outlined,
+          tooltip: locked ? 'Available once the ticket is claimed' : 'Voice call',
+          onPressed: locked ? null : () => _placeCall(CallMedia.voice),
         ))
-        ..add(const SizedBox(width: 6))
-        ..add(StationAction(
+        ..add(ChatIconBtn(
           icon: Icons.videocam_outlined,
-          tooltip: 'Video call',
-          onPressed: () => _placeCall(CallMedia.video),
+          tooltip: locked ? 'Available once the ticket is claimed' : 'Video call',
+          onPressed: locked ? null : () => _placeCall(CallMedia.video),
         ));
     }
-    // Members icon — hidden while a ticket is active so the ticket controls
-    // have room in the header (the ticket-details sheet lists participants).
-    if (!isDm && ticket == null) {
-      if (children.isNotEmpty) children.add(const SizedBox(width: 6));
-      children.add(StationAction(
-        icon: Icons.group_outlined,
-        tooltip: 'Members',
-        onPressed: _openParticipants,
-      ));
-    }
-    if (children.isEmpty) return null;
-    return Row(mainAxisSize: MainAxisSize.min, children: children);
+    children.add(Builder(
+      builder: (bctx) => ChatIconBtn(
+        icon: Icons.more_horiz,
+        tooltip: 'More actions',
+        onPressed: () {
+          final box = bctx.findRenderObject() as RenderBox?;
+          final pos = box == null
+              ? Offset.zero
+              : box.localToGlobal(Offset(0, box.size.height + 6));
+          _showMoreMenu(pos, isDm: isDm);
+        },
+      ),
+    ));
+    return children;
   }
 
-  /// Long-press menu on a message: pin / unpin (staff action) + copy.
-  Future<void> _showMessageMenu(Message m) async {
+  bool _seenByOther(int id) =>
+      _thread.readCursors.values.any((c) => c >= id);
+
+  Future<void> _showMessageMenu(Message m, Offset position) async {
     final id = m.id;
     if (id == null) return;
-    final isPinned = _thread.isPinned(id);
-    final choice = await showModalBottomSheet<_MsgAction>(
-      context: context,
-      backgroundColor: Brand.surface,
-      builder: (_) => _MessageActionSheet(
-        isPinned: isPinned,
-        hasBody: m.body.trim().isNotEmpty,
-      ),
-    );
-    if (!mounted || choice == null) return;
-    switch (choice) {
-      case _MsgAction.pin:
-        final ok = await _thread.pin(id);
-        if (mounted && !ok) _toast('COULD NOT PIN MESSAGE');
+    final mine = m.senderId == widget.myUserId;
+    final pinned = _extras.pinned != null ? _extras.isPinned(id) : _thread.isPinned(id);
+    final canUnsend = mine && !_seenByOther(id);
+    final picked = await showChatMenu(context, position, [
+      const ChatMenuEntry('reply', 'Reply'),
+      const ChatMenuEntry('forward', 'Forward'),
+      const ChatMenuEntry('delete', 'Delete'),
+      ChatMenuEntry(pinned ? 'unpin' : 'pin', pinned ? 'Unpin' : 'Pin'),
+      if (canUnsend) const ChatMenuEntry('unsend', 'Unsend', danger: true),
+      if (m.body.trim().isNotEmpty) const ChatMenuEntry('copy', 'Copy text'),
+    ]);
+    if (!mounted || picked == null) return;
+    await _handleMsgAction(m, picked);
+  }
+
+  Future<void> _handleMsgAction(Message m, String act) async {
+    final id = m.id;
+    if (id == null) return;
+    switch (act) {
+      case 'reply':
+        setState(() => _replyTo = m);
+        _composerFocus.requestFocus();
         break;
-      case _MsgAction.unpin:
-        final ok = await _thread.unpin(id);
-        if (mounted && !ok) _toast('COULD NOT UNPIN MESSAGE');
+      case 'forward':
+        await _forward(id);
         break;
-      case _MsgAction.copy:
+      case 'delete':
+        final r = await _flow.hideMessageForMe(id);
+        if (!mounted) return;
+        if (r.ok) {
+          _extras.markRemoved(id);
+        } else {
+          _toast(r.message ?? 'Could not hide message');
+        }
+        break;
+      case 'unsend':
+        final ok = await _chatConfirm(
+          context,
+          title: 'Unsend this message?',
+          message: 'It will be removed from the conversation for everyone.',
+          confirmLabel: 'Unsend',
+          danger: true,
+        );
+        if (!ok || !mounted) return;
+        final r = await _flow.deleteMessage(id);
+        if (!mounted) return;
+        if (r.ok) {
+          _extras.markRemoved(id);
+        } else {
+          _toast(r.message ?? 'Could not unsend message');
+        }
+        break;
+      case 'pin':
+        final r = await _flow.pinMessage(id);
+        if (!mounted) return;
+        if (r.ok) {
+          await _extras.refresh();
+          _toast('Message pinned');
+        } else {
+          _toast(r.message ?? 'Could not pin message');
+        }
+        break;
+      case 'unpin':
+        await _unpin(id);
+        break;
+      case 'copy':
         await Clipboard.setData(ClipboardData(text: m.body));
-        if (mounted) _toast('COPIED');
+        if (mounted) _toast('Copied');
         break;
     }
   }
 
-  /// Bottom sheet listing every pinned message, with an unpin action on each.
-  Future<void> _showPinnedSheet() async {
-    final toUnpin = await showModalBottomSheet<int>(
+  Future<void> _unpin(int id) async {
+    final r = await _flow.unpinMessage(id);
+    if (!mounted) return;
+    if (r.ok) {
+      await _extras.refresh();
+    } else {
+      _toast(r.message ?? 'Could not unpin message');
+    }
+  }
+
+  Future<void> _forward(int messageId) async {
+    final convs = widget.conversations?.call() ?? const <Conversation>[];
+    final target = await showDialog<int>(
       context: context,
-      backgroundColor: Brand.surface,
-      isScrollControlled: true,
-      builder: (_) => _PinnedListSheet(pinned: _thread.pinned),
+      builder: (_) => _ForwardDialog(conversations: convs),
+    );
+    if (target == null || !mounted) return;
+    final r = await _flow.forward(messageId, target);
+    if (!mounted) return;
+    if (r.ok) {
+      _toast('Message forwarded');
+      widget.onInboxReload?.call();
+    } else {
+      _toast(r.message ?? 'Could not forward message');
+    }
+  }
+
+  Future<void> _showReactBar(Message m, Offset position) async {
+    final id = m.id;
+    if (id == null) return;
+    final mine = _extras.myReaction(id, widget.myUserId);
+    final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
+    final picked = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromRect(
+        position & const Size(1, 1),
+        Offset.zero & overlay.size,
+      ),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
+      items: [
+        PopupMenuItem<String>(
+          enabled: false,
+          height: 44,
+          child: Builder(
+            builder: (mctx) => Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                for (final e in kChatReactionEmojis)
+                  InkWell(
+                    borderRadius: BorderRadius.circular(999),
+                    onTap: () => Navigator.of(mctx).pop(e),
+                    child: Container(
+                      padding: const EdgeInsets.all(6),
+                      decoration: e == mine
+                          ? BoxDecoration(
+                              color: Brand.signalGlow(0.15),
+                              shape: BoxShape.circle,
+                            )
+                          : null,
+                      child: Text(e, style: const TextStyle(fontSize: 20)),
+                    ),
+                  ),
+                if (mine != null)
+                  Tooltip(
+                    message: 'Remove reaction',
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(999),
+                      onTap: () => Navigator.of(mctx).pop(''),
+                      child: const Padding(
+                        padding: EdgeInsets.all(8),
+                        child: Icon(Icons.close, size: 16),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+    if (picked == null || !mounted) return;
+    final r = await _flow.react(id, picked);
+    if (!mounted) return;
+    if (r.ok) {
+      final raw = r.data['reactions'];
+      _extras.applyReactions(id, [
+        if (raw is List)
+          for (final x in raw)
+            if (x is Map) ChatReaction.fromJson(Map<String, dynamic>.from(x)),
+      ]);
+    } else {
+      _toast(r.message ?? 'Could not react');
+    }
+  }
+
+  Future<void> _showPinnedList() async {
+    final pinned = _extras.pinned ?? _thread.pinned;
+    final toUnpin = await showWebModal<int>(
+      context,
+      title: 'Pinned messages',
+      subtitle: '${pinned.length} pinned in this conversation',
+      icon: Icons.push_pin_outlined,
+      width: 560,
+      bodyPadding: EdgeInsets.zero,
+      builder: (_) => _PinnedListBody(pinned: pinned),
+      actions: (ctx) => [
+        GhostButton(
+          label: 'Close',
+          onPressed: () => Navigator.of(ctx).pop(),
+        ),
+      ],
     );
     if (!mounted || toUnpin == null) return;
-    final ok = await _thread.unpin(toUnpin);
-    if (mounted && !ok) _toast('COULD NOT UNPIN MESSAGE');
-  }
-
-  Future<void> _showAttachmentSheet() async {
-    final picked = await showModalBottomSheet<_PickerChoice>(
-      context: context,
-      backgroundColor: Brand.surface,
-      builder: (_) => const _AttachmentPickerSheet(),
-    );
-    if (!mounted || picked == null) return;
-    switch (picked) {
-      case _PickerChoice.camera:
-        await _addFromImagePicker(ImageSource.camera);
-        break;
-      case _PickerChoice.gallery:
-        await _addFromImagePicker(ImageSource.gallery);
-        break;
-      case _PickerChoice.file:
-        await _addFromFilePicker();
-        break;
-    }
-  }
-
-  Future<void> _addFromImagePicker(ImageSource source) async {
-    try {
-      final x = await _picker.pickImage(source: source, imageQuality: 92);
-      if (x == null) return;
-      _enqueueUpload(File(x.path));
-    } on PlatformException catch (e) {
-      _toast('PICKER UNAVAILABLE: ${e.code}');
-    } catch (_) {
-      _toast('COULD NOT PICK IMAGE');
-    }
+    await _unpin(toUnpin);
   }
 
   Future<void> _addFromFilePicker() async {
+    if (_gate().locked) {
+      _toast('Accept the ticket before attaching.');
+      return;
+    }
     try {
       final result = await FilePicker.platform.pickFiles(
         type: FileType.any,
-        allowMultiple: false,
+        allowMultiple: true,
         withData: false,
       );
       if (result == null || result.files.isEmpty) return;
-      final path = result.files.first.path;
-      if (path == null) return;
-      _enqueueUpload(File(path));
+      for (final f in result.files) {
+        final path = f.path;
+        if (path != null) _enqueueUpload(File(path));
+      }
     } catch (_) {
-      _toast('COULD NOT PICK FILE');
+      _toast('Could not pick file');
     }
   }
 
   void _enqueueUpload(File file) {
-    const maxBytes = 25 * 1024 * 1024;
     final size = file.lengthSync();
-    if (size <= 0 || size > maxBytes) {
-      _toast('FILE TOO LARGE — MAX 25 MB');
+    if (size > ChatflowService.maxUploadBytes) {
+      _toast('File too large — max 1 GB');
       return;
     }
     final pending = _PendingAttachment(
@@ -564,10 +1259,7 @@ class _ChatThreadScreenState extends State<ChatThreadScreen> {
       pending.status = _UploadStatus.uploading;
       pending.error = null;
     });
-    final outcome = await widget.service.uploadAttachment(
-      file: pending.file,
-      conversationId: widget.conversationId,
-    );
+    final outcome = await _flow.upload(pending.file, widget.conversationId);
     if (!mounted) return;
     setState(() {
       if (outcome.attachment == null) {
@@ -578,10 +1270,8 @@ class _ChatThreadScreenState extends State<ChatThreadScreen> {
         pending.status = _UploadStatus.ready;
       }
     });
-    // Surface the server's reason so the user knows what to do next
-    // (file too large / type not allowed / storage problem / etc.).
-    if (outcome.error != null && mounted) {
-      _toast('UPLOAD FAILED · ${outcome.error!.toUpperCase()}');
+    if (outcome.attachment == null && mounted) {
+      _toast('Upload failed: ${outcome.error ?? 'unknown error'}');
     }
   }
 
@@ -595,21 +1285,164 @@ class _ChatThreadScreenState extends State<ChatThreadScreen> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
+  void _onReactionEvent(Map<String, dynamic> d) {
+    final cid = int.tryParse('${d['conversation_id'] ?? ''}') ?? 0;
+    final mid = int.tryParse('${d['message_id'] ?? ''}') ?? 0;
+    if (mid <= 0 || (cid > 0 && cid != widget.conversationId)) return;
+    final raw = d['reactions'];
+    final next = <ChatReaction>[
+      if (raw is List)
+        for (final x in raw)
+          if (x is Map) ChatReaction.fromJson(Map<String, dynamic>.from(x)),
+    ];
+    int others(List<ChatReaction> list) => list.fold(
+        0,
+        (n, r) => n + r.userIds.where((u) => u != widget.myUserId).length);
+    final before = others(_extras.reactions(mid));
+    final after = others(next);
+    final mine = _thread.messages
+        .any((m) => m.id == mid && m.senderId == widget.myUserId);
+    _extras.applyReactions(mid, next);
+    if (mine && after > before) SoundEngine.instance.reaction('$mid:$after');
+  }
+
   @override
   void dispose() {
-    // Clear the "currently viewed" signal first — if any FCM events are
-    // still in flight when we pop, they should not be suppressed.
+    _reactSub?.cancel();
+    _tickerMode?.removeListener(_onTickerModeChange);
     if (widget.realtime.currentlyViewedConv.value == widget.conversationId) {
       widget.realtime.currentlyViewedConv.value = null;
     }
     widget.realtime.onlineUsers.removeListener(_onPresenceChange);
     widget.chatPrefs.removeListener(_onPresenceChange);
+    _ui.removeListener(_onPresenceChange);
+    if (_ownsUi) _ui.dispose();
+    _extras.removeListener(_onPresenceChange);
+    _extras.dispose();
     _thread.removeListener(_onThreadChange);
     _thread.dispose();
     _composer.dispose();
     _composerFocus.dispose();
     _scroll.dispose();
     super.dispose();
+  }
+
+  String _replyPreview(Message m) {
+    final q = _parseQuoted(m.body);
+    final cleaned = q != null ? q.reply : m.body;
+    var preview = cleaned.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (preview.length > 140) preview = preview.substring(0, 140);
+    if (preview.isEmpty && m.attachments.isNotEmpty) {
+      final first = m.attachments.first;
+      preview = first.isImage ? '[image]' : '[file: ${first.originalName}]';
+      if (m.attachments.length > 1) preview += ' +${m.attachments.length - 1}';
+    }
+    return preview;
+  }
+
+  String _quoteTarget(_Quoted q) {
+    if (q.targetId > 0) {
+      for (final t in _thread.messages) {
+        if (t.id == q.targetId) {
+          return t.senderId == widget.myUserId ? 'You' : _senderName(t.senderId);
+        }
+      }
+    }
+    final me = (widget.api.username ?? '').trim().toLowerCase();
+    if (me.isNotEmpty && q.sender.toLowerCase() == me) return 'You';
+    return q.sender.isEmpty ? 'someone' : q.sender;
+  }
+
+  String _replyHead(bool mine, int senderId, _Quoted q) {
+    final author = mine ? 'You' : _senderName(senderId);
+    final target = _quoteTarget(q);
+    if (author == 'You' && target == 'You') return 'You replied to yourself';
+    if (author == 'You') return 'You replied to $target';
+    if (target == 'You') return '$author replied to you';
+    if (target == author) return '$author replied to themselves';
+    return '$author replied to $target';
+  }
+
+  Widget _gateNote(_Gate gate) {
+    final text = Theme.of(context).textTheme;
+    Widget box(IconData icon, String msg, {Widget? action}) => Container(
+          margin: const EdgeInsets.only(bottom: 10),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          decoration: BoxDecoration(
+            color: const Color(0xFFFFF7ED),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: const Color(0xFFFED7AA)),
+          ),
+          child: Row(
+            children: [
+              Icon(icon, size: 16, color: const Color(0xFFC2410C)),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(msg,
+                    style: text.bodySmall
+                        ?.copyWith(color: const Color(0xFFC2410C))),
+              ),
+              if (action != null) ...[const SizedBox(width: 10), action],
+            ],
+          ),
+        );
+    if (!gate.locked) {
+      if (gate.willReopen) {
+        return box(
+          Icons.restore,
+          'This ticket is ${gate.status ?? 'resolved'}. Replying reopens it'
+          '${gate.willEmail ? ' and emails the customer their ticket number, so they can open this chat again.' : ' and puts it back in your queue.'}',
+        );
+      }
+      return const SizedBox.shrink();
+    }
+    if (gate.aiOwned) {
+      if (_fbHandoverBlocked) {
+        return box(
+          Icons.smart_toy_outlined,
+          'The Page AI assistant is handling this conversation. Its replies appear here for reference. '
+          'Replying from here needs conversation control enabled for this Page on Facebook.',
+        );
+      }
+      final busy = _busy.contains('takeover');
+      return box(
+        Icons.smart_toy_outlined,
+        'The Page AI assistant is handling this conversation. Its replies appear here for reference. '
+        'Take over to answer this customer yourself.',
+        action: SignalButton(
+          label: busy ? 'Taking over…' : 'Take over',
+          icon: Icons.headset_mic_outlined,
+          busy: busy,
+          onPressed: busy ? null : _takeOver,
+        ),
+      );
+    }
+    if (gate.status == 'resolved' || gate.status == 'closed') {
+      return box(Icons.lock_outline,
+          'This ticket is ${gate.status}. Reopen it from the header to carry on here, or the customer can start a new one.');
+    }
+    if (gate.claimedByOther) {
+      final who = gate.agentName.isNotEmpty ? gate.agentName : 'another agent';
+      return box(Icons.lock_outline,
+          'This ticket is being handled by $who. Only they can reply or call.');
+    }
+    if (gate.status == 'new') {
+      final id = gate.ticketId;
+      final busy = id != null && _busy.contains('accept-$id');
+      return box(
+        Icons.pan_tool_outlined,
+        'Accept this ticket to start replying to the customer.',
+        action: id == null
+            ? null
+            : SignalButton(
+                label: busy ? 'Accepting…' : 'Accept ticket',
+                icon: Icons.check,
+                busy: busy,
+                onPressed: busy ? null : () => _acceptTicket(id),
+              ),
+      );
+    }
+    return box(Icons.lock_outline, 'Checking ticket status…');
   }
 
   @override
@@ -625,159 +1458,454 @@ class _ChatThreadScreenState extends State<ChatThreadScreen> {
     final peerLastSeen = peer == null
         ? null
         : formatLastSeen(online: peerOnline, lastSeenAt: peer.lastSeenAt);
-    // When the conversation has an active ticket, the header reads as a
-    // ticket workspace (TICKET #id · STATUS) rather than "GROUP · N MEMBERS",
-    // so the ticket is obvious at a glance and the members chrome steps aside.
-    final headerTicket = _activeTicket();
+    final headerTicket = _subTicket();
     final subLabel = headerTicket != null
-        ? 'TICKET #${headerTicket.id} · ${_ticketStatusLabel(headerTicket.status)}'
+        ? 'Ticket ${_fmtTicketNo(headerTicket.id)} · ${_ticketStatusLabel(headerTicket.status)}'
         : conv == null
-            ? 'DIRECT MESSAGE'
+            ? 'Direct message'
             : isDm
-                ? 'DM · ${peerLastSeen ?? (peerOnline ? 'ONLINE' : 'OFFLINE')}'
+                ? (peerOnline
+                    ? 'Online'
+                    : peerLastSeen == null
+                        ? 'Offline'
+                        : 'Last seen ${peerLastSeen.toLowerCase()}')
                 : isChannel
-                    ? 'CHANNEL · ${conv.visibility.toUpperCase()}'
-                    : 'GROUP · ${conv.participantCount} MEMBERS';
+                    ? '${conv.visibility == 'private' ? 'Private channel' : 'Public channel'} · ${conv.participantCount} members'
+                    : 'Group · ${conv.participantCount} members';
+    final dotColor = headerTicket != null
+        ? Brand.signal
+        : (isDm && peerOnline ? Brand.success : const Color(0xFFCBD5E1));
+    final gate = _gate();
+    final pinned = _extras.pinned ?? _thread.pinned;
 
-    return StationScaffold(
-      stationNumber: '05',
-      stationLabel: subLabel,
-      title: title,
-      showBottomBrand: false,
-      onBack: () => Navigator.of(context).pop(),
-      trailing: _buildHeaderActions(isDm: isDm, peerOnline: peerOnline),
-      child: Column(
-        children: [
-          if (_thread.pinned.isNotEmpty) ...[
-            _PinnedBanner(
-              pinned: _thread.pinned,
-              onTap: _showPinnedSheet,
+    final tk = ChatTokens.of(context);
+    return Scaffold(
+      backgroundColor: tk.bg,
+      body: CallbackShortcuts(
+        bindings: {
+          if (!widget.embedded)
+            const SingleActivator(LogicalKeyboardKey.escape): _close,
+        },
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _ThreadHeader(
+              title: title,
+              subLabel: _meta.isDesktopApp
+                  ? (subLabel.isEmpty ? 'POS App' : '$subLabel · POS App')
+                  : subLabel,
+              dotColor: dotColor,
+              onBack: widget.embedded ? null : _close,
+              compact: !widget.embedded,
+              actions: _buildHeaderActions(isDm: isDm),
             ),
-            const Hairline(),
+            if (pinned.isNotEmpty)
+              _PinnedBanner(
+                pinned: pinned,
+                onTap: _showPinnedList,
+              ),
+            Expanded(
+              child: Container(
+                color: tk.bg,
+                child: _messageList(),
+              ),
+            ),
+            if (_thread.typingNames.isNotEmpty)
+              Container(
+                color: tk.bg,
+                child: _TypingStrip(names: _thread.typingNames),
+              ),
+            if (_pending.isNotEmpty)
+              Container(
+                decoration: BoxDecoration(
+                  color: context.brand.surface,
+                  border: Border(top: BorderSide(color: context.brand.rule)),
+                ),
+                child: _PendingStrip(
+                  pending: _pending,
+                  onRetry: _retryUpload,
+                  onRemove: _removePending,
+                ),
+              ),
+            if (_replyTo != null)
+              _ReplyBar(
+                sender: _senderName(_replyTo!.senderId),
+                preview: _replyPreview(_replyTo!),
+                onClear: () => setState(() => _replyTo = null),
+              ),
+            _Composer(
+              controller: _composer,
+              focusNode: _composerFocus,
+              canSend: _canSend,
+              locked: gate.locked,
+              note: _gateNote(gate),
+              compact: !widget.embedded,
+              onSend: _handleSend,
+              onAttach: _addFromFilePicker,
+            ),
           ],
-          Expanded(
-            child: _thread.messages.isEmpty && _thread.loading
-                ? const Center(
-                    child: SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: Brand.signal,
-                      ),
+        ),
+      ),
+    );
+  }
+
+  Widget _messageList() {
+    final msgs = _visibleMessages.toList();
+    if (msgs.isEmpty && _thread.loading) {
+      return const Center(child: TpLoader());
+    }
+    if (msgs.isEmpty) {
+      return const EmptyState(
+        icon: Icons.chat_bubble_outline,
+        label: 'No messages yet',
+        hint: 'Say something to get started.',
+      );
+    }
+    return LayoutBuilder(
+      builder: (_, box) {
+        final maxBubble = (box.maxWidth * (widget.embedded ? 0.68 : 0.8))
+            .clamp(160.0, 680.0)
+            .toDouble();
+        final myNewestIndex =
+            msgs.indexWhere((m) => m.senderId == widget.myUserId);
+        final pinnedList = _extras.pinned;
+        return ListView.builder(
+          controller: _scroll,
+          reverse: true,
+          padding: EdgeInsets.fromLTRB(widget.embedded ? 24 : 12, 12,
+              widget.embedded ? 24 : 12, 12),
+          itemCount: msgs.length + (_thread.hasMore ? 1 : 0),
+          itemBuilder: (_, i) {
+            if (i == msgs.length) {
+              return const Padding(
+                padding: EdgeInsets.symmetric(vertical: 16),
+                child: Center(
+                  child: SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: TpLoader(
+                      strokeWidth: 2,
+                      color: Brand.signal,
                     ),
-                  )
-                : _thread.messages.isEmpty
-                    ? Center(
-                        child: Text(
-                          'Say something to get started.',
-                          style: Theme.of(context).textTheme.bodySmall,
-                        ),
-                      )
-                    : Builder(
-                    builder: (_) {
-                      final msgs = _thread.messages; // DESC by id
-                      // Index of my most recent (newest-first) message. The
-                      // "Seen by" indicator is rendered only under that one
-                      // bubble, matching iMessage / Messenger conventions.
-                      final myNewestIndex = msgs
-                          .indexWhere((m) => m.senderId == widget.myUserId);
-                      return ListView.builder(
-                        controller: _scroll,
-                        reverse: true,
-                        padding: const EdgeInsets.only(bottom: 12),
-                        itemCount: msgs.length + (_thread.hasMore ? 1 : 0),
-                        itemBuilder: (_, i) {
-                          if (i == msgs.length) {
-                            return const Padding(
-                              padding: EdgeInsets.symmetric(vertical: 16),
-                              child: Center(
-                                child: SizedBox(
-                                  width: 14,
-                                  height: 14,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                    color: Brand.signal,
-                                  ),
-                                ),
-                              ),
-                            );
-                          }
-                          final m = msgs[i];
-                          final mine = m.senderId == widget.myUserId;
-                          final isNewestMine = mine && i == myNewestIndex;
+                  ),
+                ),
+              );
+            }
+            final m = msgs[i];
+            final mine = m.senderId == widget.myUserId;
+            final isNewestMine = mine && i == myNewestIndex;
+            final groupedBelow = i > 0 && _isGrouped(msgs[i], msgs[i - 1]);
+            final isOldestOfDay = i == msgs.length - 1 ||
+                !_sameDay(m.createdAt, msgs[i + 1].createdAt);
+            final quoted = _parseQuoted(m.body);
+            final canAct = m.id != null && m.status == MessageStatus.sent;
 
-                          // Grouping vs the visually-next bubble below (i-1,
-                          // which is newer). Suppress our meta line if that
-                          // bubble is from the same sender within 2 min —
-                          // it carries the timestamp for the whole group.
-                          final groupedBelow = i > 0 &&
-                              _isGrouped(msgs[i], msgs[i - 1]);
+            Widget bubble = _MessageBubble(
+              message: m,
+              mine: mine,
+              maxWidth: maxBubble,
+              isNewestMine: isNewestMine,
+              suppressMeta: groupedBelow && !isNewestMine,
+              grouped: groupedBelow,
+              pinned: pinnedList != null
+                  ? _extras.isPinned(m.id)
+                  : _thread.isPinned(m.id),
+              readCursors: _thread.readCursors,
+              otherParticipantCount:
+                  (_thread.totalParticipants - 1).clamp(0, 1000),
+              theme: widget.chatPrefs.theme,
+              api: widget.api,
+              service: widget.service,
+              quoted: quoted,
+              replyHead: quoted == null ? null : _replyHead(mine, m.senderId, quoted),
+              reactions: _extras.reactions(m.id),
+              myUserId: widget.myUserId,
+              reactorName: _senderName,
+              onReact: canAct ? (pos) => _showReactBar(m, pos) : null,
+              onMenu: canAct ? (pos) => _showMessageMenu(m, pos) : null,
+              onRetry: m.status == MessageStatus.failed
+                  ? () => _thread.retry(m)
+                  : null,
+            );
 
-                          // Date separator goes ABOVE the oldest message of a
-                          // day (in reversed ListView, that's higher on screen).
-                          final isOldestOfDay = i == msgs.length - 1 ||
-                              !_sameDay(m.createdAt, msgs[i + 1].createdAt);
+            if (canAct) {
+              bubble = GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onLongPressStart: (d) =>
+                    _showMessageMenu(m, d.globalPosition),
+                onSecondaryTapUp: (d) =>
+                    _showMessageMenu(m, d.globalPosition),
+                child: bubble,
+              );
+            }
 
-                          Widget bubble = _MessageBubble(
-                            message: m,
-                            mine: mine,
-                            isNewestMine: isNewestMine,
-                            suppressMeta: groupedBelow && !isNewestMine,
-                            grouped: groupedBelow,
-                            pinned: _thread.isPinned(m.id),
-                            readCursors: _thread.readCursors,
-                            otherParticipantCount:
-                                (_thread.totalParticipants - 1).clamp(0, 1000),
-                            theme: widget.chatPrefs.theme,
-                            api: widget.api,
-                            service: widget.service,
-                            onRetry: m.status == MessageStatus.failed
-                                ? () => _thread.retry(m)
-                                : null,
-                          );
+            if (!isOldestOfDay) return bubble;
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _DateSeparator(iso: m.createdAt),
+                bubble,
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+}
 
-                          // Long-press a persisted message to pin/unpin it.
-                          // Optimistic (id == null) messages can't be pinned.
-                          if (m.id != null) {
-                            bubble = GestureDetector(
-                              behavior: HitTestBehavior.opaque,
-                              onLongPress: () => _showMessageMenu(m),
-                              child: bubble,
-                            );
-                          }
+class _AcceptChoice {
+  const _AcceptChoice(this.alias, this.saveDefault, this.greetingMessage);
+  final String alias;
+  final bool saveDefault;
+  final String? greetingMessage;
+}
 
-                          if (!isOldestOfDay) return bubble;
-                          return Column(
-                            crossAxisAlignment: CrossAxisAlignment.stretch,
-                            children: [
-                              _DateSeparator(iso: m.createdAt),
-                              bubble,
-                            ],
-                          );
-                        },
+class _AcceptTicketDialog extends StatefulWidget {
+  const _AcceptTicketDialog({
+    required this.flow,
+    required this.ticketId,
+    required this.conversationId,
+  });
+  final ChatflowService flow;
+  final int ticketId;
+  final int conversationId;
+
+  @override
+  State<_AcceptTicketDialog> createState() => _AcceptTicketDialogState();
+}
+
+class _AcceptTicketDialogState extends State<_AcceptTicketDialog> {
+  final _alias = TextEditingController();
+  final _custom = TextEditingController();
+  bool _saveDefault = false;
+  bool _touched = false;
+  String _value = '__auto__';
+  List<GreetingTemplate> _templates = const [];
+  String _ticketNo = '';
+  Timer? _debounce;
+  bool _submitting = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _ticketNo = _fmtTicketNo(widget.ticketId);
+    _loadTemplates();
+    widget.flow.myAlias(widget.conversationId).then((r) {
+      if (!mounted || !r.ok || _touched || _alias.text.isNotEmpty) return;
+      final a = r.data['alias'] ?? r.data['default_alias'] ?? '';
+      _alias.text = '$a';
+      _alias.selection =
+          TextSelection(baseOffset: 0, extentOffset: _alias.text.length);
+      _loadTemplates();
+    });
+  }
+
+  @override
+  void dispose() {
+    _debounce?.cancel();
+    _alias.dispose();
+    _custom.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadTemplates() async {
+    final r = await widget.flow.acceptGreetings(widget.ticketId, _alias.text.trim());
+    if (!mounted) return;
+    setState(() {
+      if (r.templates.isNotEmpty) _templates = r.templates;
+      _ticketNo = r.ticketNo;
+    });
+  }
+
+  void _onAlias(String _) {
+    _touched = true;
+    _debounce?.cancel();
+    _debounce = Timer(const Duration(milliseconds: 250), _loadTemplates);
+  }
+
+  GreetingTemplate? get _selected {
+    for (final t in _templates) {
+      if (t.value == _value) return t;
+    }
+    return null;
+  }
+
+  Future<void> _submit() async {
+    if (_submitting) return;
+    setState(() => _submitting = true);
+    String? greeting;
+    if (_value == '__custom__') {
+      final t = _custom.text.trim();
+      greeting = t.isEmpty ? null : t;
+    } else if (_value != '__auto__') {
+      final fresh = await widget.flow.acceptGreetings(widget.ticketId, _alias.text.trim());
+      for (final t in fresh.templates) {
+        if (t.value == _value) greeting = t.text;
+      }
+    }
+    if (!mounted) return;
+    Navigator.of(context).pop(_AcceptChoice(_alias.text.trim(), _saveDefault, greeting));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final text = Theme.of(context).textTheme;
+    final sel = _selected;
+    return WebModal(
+      title: 'Accept ticket',
+      icon: Icons.check_circle_outline,
+      width: 480,
+      actions: [
+        GhostButton(label: 'Cancel', onPressed: () => Navigator.of(context).pop()),
+        SignalButton(
+          label: 'Accept ticket',
+          icon: Icons.check,
+          busy: _submitting,
+          onPressed: _submitting ? null : _submit,
+        ),
+      ],
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text.rich(
+            TextSpan(children: [
+              const TextSpan(text: 'Choose the name the customer sees on this ticket ('),
+              TextSpan(text: _ticketNo, style: const TextStyle(fontWeight: FontWeight.w700)),
+              const TextSpan(text: '). Your real name stays visible to the team.'),
+            ]),
+            style: text.bodySmall,
+          ),
+          const SizedBox(height: 12),
+          Text('ALIAS FOR THIS TICKET', style: text.labelSmall?.copyWith(fontWeight: FontWeight.w700)),
+          const SizedBox(height: 5),
+          TextField(
+            controller: _alias,
+            autofocus: true,
+            maxLength: 60,
+            decoration: const InputDecoration(hintText: 'e.g. Maya', counterText: ''),
+            onChanged: _onAlias,
+            onSubmitted: (_) => _submit(),
+          ),
+          const SizedBox(height: 6),
+          Row(
+            children: [
+              Checkbox(
+                value: _saveDefault,
+                onChanged: (v) => setState(() => _saveDefault = v ?? false),
+              ),
+              Text('Save as my default alias', style: text.bodySmall),
+            ],
+          ),
+          Text('Leave blank to appear as “Support agent”.', style: text.bodySmall),
+          const Divider(height: 28),
+          Text('GREETING MESSAGE', style: text.labelSmall?.copyWith(fontWeight: FontWeight.w700)),
+          const SizedBox(height: 6),
+          DropdownButtonFormField<String>(
+            initialValue: _templates.any((t) => t.value == _value) ? _value : null,
+            isExpanded: true,
+            items: [
+              for (final t in _templates)
+                DropdownMenuItem(value: t.value, child: Text(t.label, overflow: TextOverflow.ellipsis)),
+            ],
+            onChanged: (v) => setState(() => _value = v ?? '__auto__'),
+          ),
+          if (_value == '__custom__') ...[
+            const SizedBox(height: 8),
+            TextField(
+              controller: _custom,
+              maxLines: 3,
+              maxLength: 500,
+              decoration: const InputDecoration(hintText: 'Type your greeting message…'),
+            ),
+          ] else if (sel != null && sel.text != null) ...[
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              decoration: BoxDecoration(
+                color: context.brand.surfaceHi,
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(color: context.brand.rule),
+              ),
+              child: Text(sel.text!, style: text.bodySmall),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _ForwardDialog extends StatefulWidget {
+  const _ForwardDialog({required this.conversations});
+  final List<Conversation> conversations;
+
+  @override
+  State<_ForwardDialog> createState() => _ForwardDialogState();
+}
+
+class _ForwardDialogState extends State<_ForwardDialog> {
+  String _filter = '';
+
+  @override
+  Widget build(BuildContext context) {
+    final text = Theme.of(context).textTheme;
+    final f = _filter.toLowerCase();
+    final rows = widget.conversations
+        .where((c) => f.isEmpty || c.name.toLowerCase().contains(f))
+        .toList();
+    return WebModal(
+      title: 'Forward to…',
+      icon: Icons.forward_outlined,
+      width: 480,
+      height: 560,
+      scrollable: false,
+      bodyPadding: EdgeInsets.zero,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 14, 20, 12),
+            child: SearchField(
+              hint: 'Search conversations…',
+              width: null,
+              autofocus: true,
+              onChanged: (v) => setState(() => _filter = v),
+            ),
+          ),
+          Divider(height: 1, color: context.brand.rule),
+          Expanded(
+            child: rows.isEmpty
+                ? const EmptyState(icon: Icons.forum_outlined, label: 'No conversations', hint: '')
+                : ListView.builder(
+                    itemCount: rows.length,
+                    itemBuilder: (_, i) {
+                      final c = rows[i];
+                      final name = c.name.isEmpty ? '—' : c.name;
+                      final initials = name
+                          .split(RegExp(r'\s+'))
+                          .where((s) => s.isNotEmpty)
+                          .map((s) => s[0])
+                          .join()
+                          .toUpperCase();
+                      return WebTableRow(
+                        onTap: () => Navigator.of(context).pop(c.id),
+                        cells: [
+                          CircleAvatar(
+                            radius: 16,
+                            backgroundColor: Brand.signal,
+                            child: Text(
+                              initials.length > 2 ? initials.substring(0, 2) : initials,
+                              style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w700),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(child: Text(name, style: text.bodyMedium)),
+                        ],
                       );
                     },
                   ),
-          ),
-          if (_thread.typingNames.isNotEmpty)
-            _TypingStrip(names: _thread.typingNames),
-          if (_pending.isNotEmpty) ...[
-            const Hairline(),
-            _PendingStrip(
-              pending: _pending,
-              onRetry: _retryUpload,
-              onRemove: _removePending,
-            ),
-          ],
-          const Hairline(),
-          _Composer(
-            controller: _composer,
-            focusNode: _composerFocus,
-            canSend: _canSend,
-            locked: _chatLocked,
-            onSend: _handleSend,
-            onAttach: _showAttachmentSheet,
           ),
         ],
       ),
@@ -785,7 +1913,112 @@ class _ChatThreadScreenState extends State<ChatThreadScreen> {
   }
 }
 
-// ─────────────────────────────────────────── pending state ──────────────────
+class _ReplyBar extends StatelessWidget {
+  const _ReplyBar({required this.sender, required this.preview, required this.onClear});
+  final String sender;
+  final String preview;
+  final VoidCallback onClear;
+
+  @override
+  Widget build(BuildContext context) {
+    final tk = ChatTokens.of(context);
+    return Container(
+      padding: const EdgeInsets.fromLTRB(20, 8, 12, 8),
+      decoration: BoxDecoration(
+        color: tk.surfaceSoft,
+        border: Border(top: BorderSide(color: tk.borderSoft)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.reply, size: 16, color: Color(0xFFFF7D00)),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text.rich(
+              TextSpan(children: [
+                TextSpan(text: '$sender ', style: const TextStyle(fontWeight: FontWeight.w700)),
+                TextSpan(text: preview),
+              ]),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 13, color: tk.text),
+            ),
+          ),
+          IconButton(
+            tooltip: 'Clear reply',
+            icon: const Icon(Icons.close, size: 16),
+            onPressed: onClear,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ThreadHeader extends StatelessWidget {
+  const _ThreadHeader({
+    required this.title,
+    required this.subLabel,
+    required this.dotColor,
+    required this.actions,
+    this.onBack,
+    this.compact = false,
+  });
+
+  final String title;
+  final String subLabel;
+  final Color dotColor;
+  final List<Widget> actions;
+  final VoidCallback? onBack;
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = ChatTokens.of(context);
+    final online = dotColor == Brand.success;
+    return Container(
+      height: compact ? 60 : 76,
+      padding: EdgeInsets.symmetric(horizontal: compact ? 10 : 24),
+      decoration: BoxDecoration(
+        color: t.surface.withValues(alpha: 0.85),
+        border: Border(bottom: BorderSide(color: t.borderSoft)),
+      ),
+      child: Row(
+        children: [
+          if (onBack != null) ...[
+            ChatIconBtn(
+              icon: Icons.arrow_back,
+              tooltip: 'Back',
+              size: compact ? 32 : 38,
+              onPressed: onBack,
+            ),
+            const SizedBox(width: 10),
+          ],
+          Expanded(
+            child: ChatHeaderTitle(
+              title: title,
+              subtitle: subLabel,
+              dotColor: online ? null : dotColor,
+              online: online,
+              compact: compact,
+            ),
+          ),
+          for (final a in actions) ...[
+            SizedBox(width: compact ? 4 : 8),
+            compact && a is ChatIconBtn
+                ? ChatIconBtn(
+                    icon: a.icon,
+                    tooltip: a.tooltip,
+                    onPressed: a.onPressed,
+                    size: 32,
+                    iconSize: 13,
+                  )
+                : a,
+          ],
+        ],
+      ),
+    );
+  }
+}
 
 enum _UploadStatus { uploading, ready, failed }
 
@@ -798,7 +2031,7 @@ class _PendingAttachment {
   _UploadStatus status = _UploadStatus.uploading;
 
   String get displayName {
-    final s = file.path;
+    final s = file.path.replaceAll('\\', '/');
     final i = s.lastIndexOf('/');
     return i < 0 ? s : s.substring(i + 1);
   }
@@ -814,8 +2047,6 @@ class _PendingAttachment {
   }
 }
 
-// ─────────────────────────────────────────── pending strip ──────────────────
-
 class _PendingStrip extends StatelessWidget {
   const _PendingStrip({
     required this.pending,
@@ -829,13 +2060,13 @@ class _PendingStrip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      height: 88,
-      padding: const EdgeInsets.symmetric(vertical: 10),
+    return SizedBox(
+      height: 92,
       child: ListView.separated(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 10),
         scrollDirection: Axis.horizontal,
         itemCount: pending.length,
-        separatorBuilder: (_, __) => const SizedBox(width: 8),
+        separatorBuilder: (_, _) => const SizedBox(width: 10),
         itemBuilder: (_, i) {
           final p = pending[i];
           return _PendingChip(
@@ -863,28 +2094,38 @@ class _PendingChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
-    final size = 68.0;
+    const size = 68.0;
     return Stack(
       clipBehavior: Clip.none,
       children: [
         Container(
           width: size,
           height: size,
+          clipBehavior: Clip.antiAlias,
           decoration: BoxDecoration(
-            color: Brand.surfaceHi,
-            border: Border.all(color: Brand.rule, width: 1),
+            color: context.brand.surfaceHi,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: context.brand.rule, width: 1),
           ),
           child: pending.isImage
               ? Image.file(pending.file, fit: BoxFit.cover)
               : Center(
                   child: Padding(
                     padding: const EdgeInsets.all(6),
-                    child: Text(
-                      pending.displayName,
-                      style: text.labelMedium,
-                      textAlign: TextAlign.center,
-                      maxLines: 3,
-                      overflow: TextOverflow.ellipsis,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(Icons.insert_drive_file_outlined,
+                            size: 18, color: Brand.signal),
+                        const SizedBox(height: 2),
+                        Text(
+                          pending.displayName,
+                          style: text.labelSmall,
+                          textAlign: TextAlign.center,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
                     ),
                   ),
                 ),
@@ -892,44 +2133,51 @@ class _PendingChip extends StatelessWidget {
         if (pending.status == _UploadStatus.uploading)
           Positioned.fill(
             child: Container(
-              color: Brand.canvas.withValues(alpha: 0.55),
-              child: const Center(
-                child: SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    color: Brand.signal,
+              decoration: BoxDecoration(
+                color: Colors.white.withValues(alpha: 0.6),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: const Center(child: TpLoader()),
+            ),
+          ),
+        if (pending.status == _UploadStatus.failed)
+          Positioned.fill(
+            child: MouseRegion(
+              cursor: SystemMouseCursors.click,
+              child: GestureDetector(
+                onTap: onRetry,
+                child: Tooltip(
+                  message: 'Retry upload',
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.7),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Brand.danger),
+                    ),
+                    child: const Center(
+                      child: Icon(Icons.refresh, color: Brand.danger, size: 22),
+                    ),
                   ),
                 ),
               ),
             ),
           ),
-        if (pending.status == _UploadStatus.failed)
-          Positioned.fill(
-            child: GestureDetector(
-              onTap: onRetry,
-              child: Container(
-                color: Brand.canvas.withValues(alpha: 0.65),
-                child: const Center(
-                  child: Icon(Icons.refresh, color: Brand.signal, size: 22),
-                ),
-              ),
-            ),
-          ),
         Positioned(
-          top: -6,
-          right: -6,
-          child: GestureDetector(
-            onTap: onRemove,
-            child: Container(
-              width: 20,
-              height: 20,
-              decoration: const BoxDecoration(
-                color: Brand.canvas,
-                shape: BoxShape.circle,
+          top: -7,
+          right: -7,
+          child: MouseRegion(
+            cursor: SystemMouseCursors.click,
+            child: GestureDetector(
+              onTap: onRemove,
+              child: Container(
+                width: 20,
+                height: 20,
+                decoration: const BoxDecoration(
+                  color: Brand.navy,
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(Icons.close, size: 13, color: Colors.white),
               ),
-              child: const Icon(Icons.close, size: 14, color: Brand.paper),
             ),
           ),
         ),
@@ -938,14 +2186,6 @@ class _PendingChip extends StatelessWidget {
   }
 }
 
-// ─────────────────────────────────────────── picker sheet ───────────────────
-
-enum _PickerChoice { camera, gallery, file }
-
-enum _MsgAction { pin, unpin, copy }
-
-/// Compact banner pinned above the message list. Shows the most recent pin
-/// (single-line) plus a "+N more" hint; tapping opens the full list.
 class _PinnedBanner extends StatelessWidget {
   const _PinnedBanner({required this.pinned, required this.onTap});
 
@@ -956,44 +2196,41 @@ class _PinnedBanner extends StatelessWidget {
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
     final latest = pinned.first;
-    final extra = pinned.length - 1;
     final preview = latest.body.trim().isEmpty
-        ? '[attachment]'
+        ? 'Attachment'
         : latest.body.trim().replaceAll('\n', ' ');
     return Material(
-      color: Brand.surface,
+      color: const Color(0xFFFFF7ED),
       child: InkWell(
         onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(20, 8, 16, 8),
+          decoration: const BoxDecoration(
+            border: Border(bottom: BorderSide(color: Color(0xFFFED7AA))),
+          ),
           child: Row(
             children: [
-              const Icon(Icons.push_pin, size: 16, color: Brand.signal),
+              const Icon(Icons.push_pin, size: 15, color: Brand.signal),
+              const SizedBox(width: 10),
+              Text(
+                pinned.length > 1 ? 'Pinned (${pinned.length})' : 'Pinned',
+                style: text.bodySmall?.copyWith(
+                    color: Brand.signal, fontWeight: FontWeight.w700),
+              ),
               const SizedBox(width: 10),
               Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      extra > 0
-                          ? 'PINNED · ${pinned.length}'
-                          : 'PINNED',
-                      style: text.labelSmall
-                          ?.copyWith(color: Brand.signal, letterSpacing: 0.5),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      preview,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: text.bodySmall,
-                    ),
-                  ],
+                child: Text(
+                  preview,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: text.bodySmall?.copyWith(color: context.brand.paper),
                 ),
               ),
               const SizedBox(width: 8),
-              const Icon(Icons.chevron_right,
-                  size: 18, color: Brand.paperDim),
+              Text('View all',
+                  style: text.bodySmall?.copyWith(
+                      color: Brand.signal, fontWeight: FontWeight.w600)),
+              const Icon(Icons.chevron_right, size: 16, color: Brand.signal),
             ],
           ),
         ),
@@ -1002,173 +2239,71 @@ class _PinnedBanner extends StatelessWidget {
   }
 }
 
-/// Long-press action sheet for a single message.
-class _MessageActionSheet extends StatelessWidget {
-  const _MessageActionSheet({required this.isPinned, required this.hasBody});
-
-  final bool isPinned;
-  final bool hasBody;
-
-  @override
-  Widget build(BuildContext context) {
-    final text = Theme.of(context).textTheme;
-    return SafeArea(
-      child: Container(
-        decoration: const BoxDecoration(
-          color: Brand.surface,
-          border: Border(top: BorderSide(color: Brand.signal, width: 2)),
-        ),
-        padding: const EdgeInsets.symmetric(vertical: 12),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text('MESSAGE', style: text.labelLarge),
-            const SizedBox(height: 8),
-            const Hairline(),
-            if (isPinned)
-              ListTile(
-                leading: const Icon(Icons.push_pin_outlined,
-                    color: Brand.paper, size: 20),
-                title: const Text('Unpin message'),
-                onTap: () => Navigator.of(context).pop(_MsgAction.unpin),
-              )
-            else
-              ListTile(
-                leading:
-                    const Icon(Icons.push_pin, color: Brand.paper, size: 20),
-                title: const Text('Pin message'),
-                onTap: () => Navigator.of(context).pop(_MsgAction.pin),
-              ),
-            if (hasBody)
-              ListTile(
-                leading: const Icon(Icons.copy_outlined,
-                    color: Brand.paper, size: 20),
-                title: const Text('Copy text'),
-                onTap: () => Navigator.of(context).pop(_MsgAction.copy),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-/// Full list of pinned messages. Returns the message id to unpin (or null).
-class _PinnedListSheet extends StatelessWidget {
-  const _PinnedListSheet({required this.pinned});
+class _PinnedListBody extends StatelessWidget {
+  const _PinnedListBody({required this.pinned});
 
   final List<PinnedMessage> pinned;
 
   @override
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
-    return SafeArea(
-      child: Container(
-        constraints: BoxConstraints(
-          maxHeight: MediaQuery.of(context).size.height * 0.6,
-        ),
-        decoration: const BoxDecoration(
-          color: Brand.surface,
-          border: Border(top: BorderSide(color: Brand.signal, width: 2)),
-        ),
-        padding: const EdgeInsets.symmetric(vertical: 12),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
+    if (pinned.isEmpty) {
+      return const EmptyState(
+        icon: Icons.push_pin_outlined,
+        label: 'Nothing pinned',
+        hint: 'Right-click a message to pin it.',
+      );
+    }
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        for (final p in pinned)
+          Container(
+            padding: const EdgeInsets.fromLTRB(20, 12, 12, 12),
+            decoration: BoxDecoration(
+              border: Border(bottom: BorderSide(color: context.brand.rule)),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Icon(Icons.push_pin, size: 14, color: Brand.signal),
-                const SizedBox(width: 6),
-                Text('PINNED MESSAGES', style: text.labelLarge),
+                const Padding(
+                  padding: EdgeInsets.only(top: 2),
+                  child: Icon(Icons.push_pin, size: 16, color: Brand.signal),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        p.senderName.isEmpty ? '—' : p.senderName,
+                        style: text.bodySmall
+                            ?.copyWith(fontWeight: FontWeight.w700),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        p.body.trim().isEmpty ? 'Attachment' : p.body.trim(),
+                        maxLines: 4,
+                        overflow: TextOverflow.ellipsis,
+                        style: text.bodyMedium,
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                TextButton.icon(
+                  onPressed: () => Navigator.of(context).pop(p.messageId),
+                  icon: const Icon(Icons.push_pin_outlined, size: 16),
+                  label: const Text('Unpin'),
+                ),
               ],
             ),
-            const SizedBox(height: 8),
-            const Hairline(),
-            Flexible(
-              child: ListView.separated(
-                shrinkWrap: true,
-                padding: EdgeInsets.zero,
-                itemCount: pinned.length,
-                separatorBuilder: (_, __) => const Hairline(),
-                itemBuilder: (_, i) {
-                  final p = pinned[i];
-                  final body = p.body.trim().isEmpty
-                      ? '[attachment]'
-                      : p.body.trim();
-                  return ListTile(
-                    title: Text(
-                      body,
-                      maxLines: 3,
-                      overflow: TextOverflow.ellipsis,
-                      style: text.bodyMedium,
-                    ),
-                    subtitle: Text(
-                      p.senderName.isEmpty ? '—' : p.senderName,
-                      style: text.labelSmall?.copyWith(color: Brand.paperDim),
-                    ),
-                    trailing: IconButton(
-                      tooltip: 'Unpin',
-                      icon: const Icon(Icons.push_pin_outlined,
-                          color: Brand.signal, size: 20),
-                      onPressed: () => Navigator.of(context).pop(p.messageId),
-                    ),
-                  );
-                },
-              ),
-            ),
-          ],
-        ),
-      ),
+          ),
+      ],
     );
   }
 }
-
-class _AttachmentPickerSheet extends StatelessWidget {
-  const _AttachmentPickerSheet();
-
-  @override
-  Widget build(BuildContext context) {
-    final text = Theme.of(context).textTheme;
-    return SafeArea(
-      child: Container(
-        decoration: const BoxDecoration(
-          color: Brand.surface,
-          border: Border(top: BorderSide(color: Brand.signal, width: 2)),
-        ),
-        padding: const EdgeInsets.symmetric(vertical: 12),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text('ATTACH', style: text.labelLarge),
-            const SizedBox(height: 8),
-            const Hairline(),
-            ListTile(
-              leading: const Icon(Icons.camera_alt_outlined,
-                  color: Brand.paper, size: 20),
-              title: const Text('Camera'),
-              onTap: () => Navigator.of(context).pop(_PickerChoice.camera),
-            ),
-            ListTile(
-              leading: const Icon(Icons.image_outlined,
-                  color: Brand.paper, size: 20),
-              title: const Text('Gallery'),
-              onTap: () => Navigator.of(context).pop(_PickerChoice.gallery),
-            ),
-            ListTile(
-              leading: const Icon(Icons.attach_file_outlined,
-                  color: Brand.paper, size: 20),
-              title: const Text('File'),
-              onTap: () => Navigator.of(context).pop(_PickerChoice.file),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-// ─────────────────────────────────────────── composer ───────────────────────
 
 class _Composer extends StatelessWidget {
   const _Composer({
@@ -1176,82 +2311,129 @@ class _Composer extends StatelessWidget {
     required this.focusNode,
     required this.canSend,
     required this.locked,
+    required this.note,
     required this.onSend,
     required this.onAttach,
+    this.compact = false,
   });
 
   final TextEditingController controller;
   final FocusNode focusNode;
   final bool canSend;
-
-  /// When true the customer hasn't filed (an open) ticket yet, so the whole
-  /// composer — input, attach, and send — is disabled and a hint is shown.
   final bool locked;
+  final bool compact;
+  final Widget note;
   final VoidCallback onSend;
   final VoidCallback onAttach;
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: EdgeInsets.only(
-        top: 8,
-        bottom: MediaQuery.of(context).viewInsets.bottom > 0 ? 8 : 12,
+    final text = Theme.of(context).textTheme;
+    final tk = ChatTokens.of(context);
+    final pill = BorderRadius.circular(22);
+    final hPad = compact ? 10.0 : 20.0;
+    return Container(
+      decoration: BoxDecoration(
+        color: tk.surface,
+        border: Border(top: BorderSide(color: tk.borderSoft)),
       ),
+      padding: EdgeInsets.fromLTRB(hPad, 14, hPad, 14),
       child: Column(
         mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          if (locked)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-              child: Row(
-                children: [
-                  const Icon(Icons.lock_outline,
-                      size: 14, color: Brand.paperDim),
-                  const SizedBox(width: 6),
-                  Expanded(
-                    child: Text(
-                      'WAITING FOR A TICKET — MESSAGING UNLOCKS ONCE THE '
-                      'CUSTOMER FILES ONE',
-                      style: Theme.of(context)
-                          .textTheme
-                          .labelSmall
-                          ?.copyWith(color: Brand.paperDim, letterSpacing: 0.5),
-                    ),
-                  ),
-                ],
-              ),
-            ),
+          note,
           Row(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
-              IconButton(
-                tooltip: 'Attach',
-                onPressed: locked ? null : onAttach,
-                icon: Icon(Icons.add,
-                    color: locked ? Brand.paperDim : Brand.paper),
+              Tooltip(
+                message: 'Attach',
+                child: MouseRegion(
+                  cursor: locked ? SystemMouseCursors.basic : SystemMouseCursors.click,
+                  child: GestureDetector(
+                    onTap: locked ? null : onAttach,
+                    child: _RoundIcon(
+                      icon: Icons.attach_file,
+                      enabled: !locked,
+                    ),
+                  ),
+                ),
               ),
+              const SizedBox(width: 8),
               Expanded(
                 child: TextField(
                   controller: controller,
                   focusNode: focusNode,
                   enabled: !locked,
-                  maxLines: 4,
+                  maxLines: 5,
                   minLines: 1,
                   textInputAction: TextInputAction.newline,
+                  style: text.bodyMedium,
                   decoration: InputDecoration(
-                    labelText: locked ? 'MESSAGING LOCKED' : 'MESSAGE',
+                    isDense: true,
+                    hintText: locked
+                        ? 'Messaging locked'
+                        : 'Type a message…  (Enter to send, Shift+Enter for new line)',
+                    filled: true,
+                    fillColor: tk.surfaceSoft,
+                    hintStyle: TextStyle(fontSize: 14, color: tk.subtle),
+                    contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 18, vertical: 13),
+                    border: OutlineInputBorder(
+                      borderRadius: pill,
+                      borderSide: BorderSide(color: tk.border),
+                    ),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: pill,
+                      borderSide: BorderSide(color: tk.border),
+                    ),
+                    disabledBorder: OutlineInputBorder(
+                      borderRadius: pill,
+                      borderSide: BorderSide(color: tk.border),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: pill,
+                      borderSide:
+                          const BorderSide(color: ChatTokens.primary),
+                    ),
                   ),
-                  style: Theme.of(context).textTheme.bodyMedium,
                 ),
               ),
-              const SizedBox(width: 12),
-              IconButton(
-                tooltip: 'Send',
-                onPressed: canSend ? onSend : null,
-                icon: Icon(
-                  Icons.arrow_upward,
-                  color: canSend ? Brand.signal : Brand.paperDim,
+              const SizedBox(width: 8),
+              Tooltip(
+                message: 'Send',
+                child: MouseRegion(
+                  cursor: canSend
+                      ? SystemMouseCursors.click
+                      : SystemMouseCursors.basic,
+                  child: GestureDetector(
+                    onTap: canSend ? onSend : null,
+                    child: Container(
+                      width: 44,
+                      height: 44,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        gradient: canSend ? ChatTokens.gradient : null,
+                        color: canSend ? null : const Color(0xFFE5E7EB),
+                        boxShadow: canSend
+                            ? [
+                                BoxShadow(
+                                  color: ChatTokens.primary
+                                      .withValues(alpha: 0.32),
+                                  blurRadius: 16,
+                                  offset: const Offset(0, 6),
+                                ),
+                              ]
+                            : null,
+                      ),
+                      child: Icon(
+                        Icons.send_rounded,
+                        size: 18,
+                        color:
+                            canSend ? Colors.white : const Color(0xFF94A3B8),
+                      ),
+                    ),
+                  ),
                 ),
               ),
             ],
@@ -1262,7 +2444,29 @@ class _Composer extends StatelessWidget {
   }
 }
 
-// ─────────────────────────────────────────── message bubble ────────────────
+class _RoundIcon extends StatelessWidget {
+  const _RoundIcon({required this.icon, required this.enabled});
+  final IconData icon;
+  final bool enabled;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 44,
+      height: 44,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: ChatTokens.of(context).surfaceSoft,
+        border: Border.all(color: ChatTokens.of(context).border),
+      ),
+      child: Icon(icon,
+          size: 18,
+          color: enabled
+              ? ChatTokens.of(context).muted
+              : ChatTokens.of(context).muted.withValues(alpha: 0.4)),
+    );
+  }
+}
 
 class _MessageBubble extends StatelessWidget {
   const _MessageBubble({
@@ -1271,6 +2475,7 @@ class _MessageBubble extends StatelessWidget {
     required this.api,
     required this.service,
     required this.theme,
+    required this.maxWidth,
     this.isNewestMine = false,
     this.suppressMeta = false,
     this.grouped = false,
@@ -1278,40 +2483,36 @@ class _MessageBubble extends StatelessWidget {
     this.readCursors = const {},
     this.otherParticipantCount = 0,
     this.onRetry,
+    this.quoted,
+    this.replyHead,
+    this.reactions = const [],
+    this.myUserId = 0,
+    this.reactorName,
+    this.onReact,
+    this.onMenu,
   });
 
   final Message message;
   final bool mine;
   final ChatTheme theme;
+  final double maxWidth;
   final bool isNewestMine;
-
-  /// Whether this message is currently pinned in the conversation. Drives a
-  /// small pin marker in the meta line.
   final bool pinned;
-
-  /// Suppress the timestamp / seen-by line under this bubble. Used when
-  /// the bubble below is from the same sender within 2 min — that newer
-  /// bubble carries the meta for the whole group.
   final bool suppressMeta;
-
-  /// Reduced vertical padding when grouped with the bubble below, so a
-  /// run of messages from one person reads as a block, not discrete lines.
   final bool grouped;
-
-  /// Other participants' read cursors (user_id → last_read_message_id).
-  /// Only consulted on the newest mine bubble.
   final Map<int, int> readCursors;
-
-  /// Number of other participants in the conversation (excluding self).
-  /// For DMs this is 1; for groups/channels, the rest of the room.
   final int otherParticipantCount;
-
   final ApiClient api;
   final ChatService service;
   final VoidCallback? onRetry;
+  final _Quoted? quoted;
+  final String? replyHead;
+  final List<ChatReaction> reactions;
+  final int myUserId;
+  final String Function(int)? reactorName;
+  final void Function(Offset)? onReact;
+  final void Function(Offset)? onMenu;
 
-  /// "Seen" / "Seen by N" / null. Only computed when this is the newest
-  /// message I sent and the server has assigned it an id.
   String? get _seenLabel {
     if (!isNewestMine) return null;
     final mid = message.id;
@@ -1320,16 +2521,94 @@ class _MessageBubble extends StatelessWidget {
     final seenCount =
         readCursors.values.where((cursor) => cursor >= mid).length;
     if (seenCount <= 0) return null;
-    if (otherParticipantCount == 1) return 'SEEN';
-    return 'SEEN BY $seenCount';
+    if (otherParticipantCount == 1) return 'Seen';
+    return 'Seen by $seenCount';
+  }
+
+  Color get _mineColor {
+    if (theme.key == 'signal' || theme.key == 'mono') {
+      return const Color(0xFF0C0A09);
+    }
+    return theme.accent;
+  }
+
+  Color get _accent =>
+      theme.key == 'mono' ? Brand.signal : theme.accent;
+
+  String _reactors(ChatReaction r) {
+    final names = <String>[];
+    if (r.userIds.contains(myUserId)) names.add('You');
+    for (final u in r.userIds) {
+      if (u != myUserId) names.add(reactorName?.call(u) ?? 'User $u');
+    }
+    return names.join(', ');
+  }
+
+  Widget _quoteBlock(BuildContext context, ChatTokens tk) {
+    final q = quoted!;
+    return ConstrainedBox(
+      constraints: BoxConstraints(maxWidth: maxWidth),
+      child: Column(
+        crossAxisAlignment: mine ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.reply, size: 12, color: tk.subtle),
+              const SizedBox(width: 4),
+              Flexible(
+                child: Text(replyHead ?? '',
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 11, color: tk.subtle)),
+              ),
+            ],
+          ),
+          const SizedBox(height: 3),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+            margin: const EdgeInsets.only(bottom: 2),
+            decoration: BoxDecoration(
+              color: tk.surfaceSoft,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: tk.borderSoft),
+            ),
+            child: Text(
+              q.preview,
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 12.5, color: tk.muted),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    final text = Theme.of(context).textTheme;
+    final content = _content(context);
+    if (onReact == null && onMenu == null) return content;
+    return _HoverActions(
+      mine: mine,
+      onReact: onReact,
+      onMenu: onMenu,
+      child: content,
+    );
+  }
+
+  Widget _content(BuildContext context) {
     final align = mine ? CrossAxisAlignment.end : CrossAxisAlignment.start;
-    final hasBody = message.body.trim().isNotEmpty;
+    final bodyText = quoted != null ? quoted!.reply : message.body;
+    final hasBody = bodyText.trim().isNotEmpty;
     final seen = _seenLabel;
+    final tk = ChatTokens.of(context);
+    final meta = TextStyle(
+      fontSize: 10.5,
+      color: tk.subtle,
+      fontWeight: FontWeight.w500,
+    );
+    const r = Radius.circular(18);
+    const tail = Radius.circular(6);
 
     return Padding(
       padding: EdgeInsets.only(
@@ -1339,70 +2618,130 @@ class _MessageBubble extends StatelessWidget {
       child: Column(
         crossAxisAlignment: align,
         children: [
+          if (quoted != null && !hasBody) _quoteBlock(context, tk),
           if (message.attachments.isNotEmpty) ...[
             _AttachmentList(
               message: message,
               mine: mine,
+              maxWidth: maxWidth,
               api: api,
               service: service,
             ),
-            if (hasBody) const SizedBox(height: 6),
+            if (hasBody) const SizedBox(height: 4),
           ],
+          if (quoted != null && hasBody) _quoteBlock(context, tk),
           if (hasBody)
             ConstrainedBox(
-              constraints: BoxConstraints(
-                maxWidth: MediaQuery.of(context).size.width * 0.78,
-              ),
+              constraints: BoxConstraints(maxWidth: maxWidth),
               child: Container(
                 padding:
-                    const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 11),
                 decoration: BoxDecoration(
-                  color: mine ? theme.mineBg : theme.theirBg,
-                  border: Border.all(
-                    color: mine ? theme.mineBorder : theme.theirBorder,
-                    width: 1,
+                  color: mine ? _mineColor : tk.surface,
+                  borderRadius: BorderRadius.only(
+                    topLeft: r,
+                    topRight: r,
+                    bottomLeft: mine ? r : tail,
+                    bottomRight: mine ? tail : r,
+                  ),
+                  border: mine
+                      ? null
+                      : Border.all(color: tk.borderSoft, width: 1),
+                  boxShadow: mine
+                      ? [
+                          BoxShadow(
+                            color: const Color(0xFF0C0A09)
+                                .withValues(alpha: 0.18),
+                            blurRadius: 18,
+                            offset: const Offset(0, 6),
+                          ),
+                        ]
+                      : [
+                          BoxShadow(
+                            color: const Color(0xFF0C0A09)
+                                .withValues(alpha: 0.04),
+                            blurRadius: 2,
+                            offset: const Offset(0, 1),
+                          ),
+                        ],
+                ),
+                child: Text(
+                  bodyText,
+                  style: TextStyle(
+                    fontSize: 14,
+                    color: mine ? Colors.white : tk.text,
+                    height: 1.5,
                   ),
                 ),
-                child: Text(message.body, style: text.bodyMedium),
+              ),
+            ),
+          if (reactions.any((r) => r.count > 0))
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Wrap(
+                spacing: 4,
+                runSpacing: 4,
+                children: [
+                  for (final r in reactions.where((r) => r.count > 0))
+                    Tooltip(
+                      message: _reactors(r),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: r.userIds.contains(myUserId)
+                              ? Brand.signalGlow(0.12)
+                              : tk.surface,
+                          borderRadius: BorderRadius.circular(999),
+                          border: Border.all(
+                            color: r.userIds.contains(myUserId)
+                                ? Brand.signal
+                                : tk.borderSoft,
+                          ),
+                        ),
+                        child: Text('${r.emoji} ${r.count}',
+                            style: TextStyle(fontSize: 12, color: tk.text)),
+                      ),
+                    ),
+                ],
               ),
             ),
           if (pinned)
             Padding(
               padding: const EdgeInsets.only(top: 3),
               child: Row(
-                mainAxisAlignment:
-                    mine ? MainAxisAlignment.end : MainAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  Icon(Icons.push_pin, size: 11, color: theme.accent),
+                  Icon(Icons.push_pin, size: 11, color: _accent),
                   const SizedBox(width: 3),
-                  Text('PINNED',
-                      style: text.labelSmall?.copyWith(color: theme.accent)),
+                  Text('Pinned', style: meta.copyWith(color: _accent)),
                 ],
               ),
             ),
           if (!suppressMeta) ...[
             const SizedBox(height: 4),
             Row(
-              mainAxisAlignment:
-                  mine ? MainAxisAlignment.end : MainAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
               children: [
                 if (message.status == MessageStatus.sending)
-                  Text('SENDING…', style: text.labelMedium)
+                  Text('Sending…', style: meta)
                 else if (message.status == MessageStatus.failed)
                   InkWell(
                     onTap: onRetry,
                     child: Text(
-                      'FAILED · TAP TO RETRY',
-                      style: text.labelMedium?.copyWith(color: Brand.signal),
+                      'Failed · click to retry',
+                      style: meta.copyWith(
+                          color: Brand.danger, fontWeight: FontWeight.w700),
                     ),
                   )
                 else ...[
-                  Text(_shortTime(message.createdAt), style: text.labelMedium),
+                  Text(_shortTime(message.createdAt), style: meta),
                   if (seen != null) ...[
-                    const SizedBox(width: 8),
+                    const SizedBox(width: 6),
+                    Icon(Icons.done_all, size: 13, color: _accent),
+                    const SizedBox(width: 3),
                     Text(seen,
-                        style:
-                            text.labelMedium?.copyWith(color: theme.accent)),
+                        style: meta.copyWith(
+                            color: _accent, fontWeight: FontWeight.w600)),
                   ],
                 ],
               ],
@@ -1414,38 +2753,123 @@ class _MessageBubble extends StatelessWidget {
   }
 }
 
-/// Prominent orange circular header button for the primary ticket action
-/// (Claim / Resolve). Sits in the chat header's trailing row beside the
-/// members icon so the ticket is impossible to miss. Footprint (32×32)
-/// matches [StationAction] so they line up. [onTap] null → disabled look.
+class _HoverActions extends StatefulWidget {
+  const _HoverActions({
+    required this.mine,
+    required this.child,
+    this.onReact,
+    this.onMenu,
+  });
+  final bool mine;
+  final Widget child;
+  final void Function(Offset)? onReact;
+  final void Function(Offset)? onMenu;
+
+  @override
+  State<_HoverActions> createState() => _HoverActionsState();
+}
+
+class _HoverActionsState extends State<_HoverActions> {
+  bool _hover = false;
+
+  Widget _btn(IconData icon, String tip, void Function(Offset)? cb) {
+    return Builder(
+      builder: (bctx) => Tooltip(
+        message: tip,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(999),
+          onTap: cb == null
+              ? null
+              : () {
+                  final box = bctx.findRenderObject() as RenderBox?;
+                  final pos = box == null
+                      ? Offset.zero
+                      : box.localToGlobal(Offset(0, box.size.height + 4));
+                  cb(pos);
+                },
+          child: Padding(
+            padding: const EdgeInsets.all(5),
+            child: Icon(icon, size: 16, color: ChatTokens.of(bctx).muted),
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final actions = AnimatedOpacity(
+      opacity: _hover ? 1 : 0,
+      duration: const Duration(milliseconds: 120),
+      child: IgnorePointer(
+        ignoring: !_hover,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _btn(Icons.sentiment_satisfied_alt_outlined, 'React', widget.onReact),
+            _btn(Icons.more_horiz, 'More', widget.onMenu),
+          ],
+        ),
+      ),
+    );
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: Row(
+        mainAxisAlignment: widget.mine ? MainAxisAlignment.end : MainAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: widget.mine
+            ? [actions, Flexible(child: widget.child)]
+            : [Flexible(child: widget.child), actions],
+      ),
+    );
+  }
+}
+
 class _HeaderTicketButton extends StatelessWidget {
   const _HeaderTicketButton({
     required this.icon,
-    required this.tooltip,
+    required this.label,
+    this.tooltip,
     this.onTap,
   });
 
   final IconData icon;
-  final String tooltip;
+  final String label;
+  final String? tooltip;
   final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
+    final enabled = onTap != null;
     return Tooltip(
-      message: tooltip,
+      message: tooltip ?? label,
       child: Material(
-        color: onTap == null ? Brand.surfaceHi : Brand.signal,
-        shape: const CircleBorder(),
-        clipBehavior: Clip.antiAlias,
+        color: enabled ? Brand.signal : context.brand.surfaceHi,
+        borderRadius: BorderRadius.circular(6),
         child: InkWell(
+          borderRadius: BorderRadius.circular(6),
           onTap: onTap,
-          child: SizedBox(
-            width: 32,
-            height: 32,
-            child: Icon(
-              icon,
-              size: 18,
-              color: onTap == null ? Brand.paperDim : Brand.canvas,
+          child: Container(
+            height: 36,
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(icon,
+                    size: 16,
+                    color: enabled ? Colors.white : context.brand.paperDim),
+                const SizedBox(width: 6),
+                Text(
+                  label.toUpperCase(),
+                  style: TextStyle(
+                    color: enabled ? Colors.white : context.brand.paperDim,
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.4,
+                  ),
+                ),
+              ],
             ),
           ),
         ),
@@ -1454,8 +2878,6 @@ class _HeaderTicketButton extends StatelessWidget {
   }
 }
 
-/// Status pill: NEW · IN PROGRESS (· agent) · RESOLVED · CLOSED. Falls back
-/// to a neutral "Ticket #" chip while the live status is still loading.
 class _TicketPill extends StatelessWidget {
   const _TicketPill({required this.status});
   final TicketStatusInfo? status;
@@ -1463,139 +2885,73 @@ class _TicketPill extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final st = status;
-    late final String label;
-    late final Color bg;
-    late final Color fg;
-    Color? border;
-
-    if (st == null) {
-      label = 'TICKET';
-      bg = Brand.surfaceHi;
-      fg = Brand.paperDim;
-    } else if (st.isNew) {
-      label = 'NEW';
-      bg = Brand.signal;
-      fg = Brand.canvas;
-    } else if (st.isInProgress) {
-      label = st.agentName != null && st.agentName!.isNotEmpty
-          ? 'IN PROGRESS · ${st.agentName!.toUpperCase()}'
-          : 'IN PROGRESS';
-      bg = Colors.transparent;
-      fg = Brand.signal;
-      border = Brand.signal;
-    } else if (st.isResolved) {
-      label = 'RESOLVED';
-      bg = Brand.surfaceHi;
-      fg = Brand.paperDim;
-    } else {
-      label = 'CLOSED';
-      bg = Brand.surfaceHi;
-      fg = Brand.paperDim;
+    if (st == null) return const StatusPill(label: 'Ticket');
+    if (st.isNew) return const StatusPill(label: 'New', color: Brand.signal);
+    if (st.isInProgress) {
+      return StatusPill(
+        label: st.agentName != null && st.agentName!.isNotEmpty
+            ? 'In progress · ${st.agentName!}'
+            : 'In progress',
+        color: Brand.info,
+      );
     }
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
-      decoration: BoxDecoration(
-        color: bg,
-        borderRadius: BorderRadius.circular(999),
-        border: border == null ? null : Border.all(color: border, width: 1),
-      ),
-      child: Text(
-        label,
-        style: TextStyle(
-          color: fg,
-          fontSize: 9,
-          fontWeight: FontWeight.w700,
-          letterSpacing: 1.2,
-        ),
-      ),
-    );
+    if (st.isResolved) {
+      return const StatusPill(label: 'Resolved', color: Brand.success);
+    }
+    return const StatusPill(label: 'Closed');
   }
 }
 
-/// Bottom sheet showing the full ticket row (chat.getTicketDetail).
-class _TicketDetailSheet extends StatelessWidget {
-  const _TicketDetailSheet({required this.detail});
+class _TicketDetailBody extends StatelessWidget {
+  const _TicketDetailBody({required this.detail});
   final TicketDetail detail;
 
-  String _fmtNo() {
-    final n = detail.ticketNumber ?? detail.id;
-    return '#$n';
-  }
-
   @override
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
-    return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
+    final p = detail.priority.trim();
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
           children: [
-            Row(
-              children: [
-                const Icon(Icons.confirmation_number_outlined,
-                    size: 18, color: Brand.signal),
-                const SizedBox(width: 8),
-                Text('TICKET ${_fmtNo()}', style: text.labelLarge),
-                const Spacer(),
-                _TicketPill(
-                  status: TicketStatusInfo(
-                    status: detail.status,
-                    agentName: detail.agentName,
-                  ),
-                ),
-              ],
+            Text('Status', style: text.bodySmall),
+            const SizedBox(width: 10),
+            _TicketPill(
+              status: TicketStatusInfo(
+                status: detail.status,
+                agentName: detail.agentName,
+              ),
             ),
-            const SizedBox(height: 10),
-            const Hairline(),
-            const SizedBox(height: 16),
-            if (detail.subject.isNotEmpty) ...[
-              Text(detail.subject,
-                  style: text.titleMedium ?? text.bodyLarge),
-              const SizedBox(height: 8),
-            ],
-            if (detail.description.isNotEmpty)
-              Text(detail.description, style: text.bodyMedium),
-            const SizedBox(height: 16),
-            _DetailRow(label: 'PRIORITY', value: detail.priority.toUpperCase()),
-            if (detail.businessName != null)
-              _DetailRow(label: 'BUSINESS', value: detail.businessName!),
-            if (detail.customerName != null)
-              _DetailRow(label: 'CUSTOMER', value: detail.customerName!),
-            if (detail.agentName != null)
-              _DetailRow(label: 'AGENT', value: detail.agentName!),
-            if (detail.createdAt != null)
-              _DetailRow(label: 'CREATED', value: detail.createdAt!),
           ],
         ),
-      ),
-    );
-  }
-}
-
-class _DetailRow extends StatelessWidget {
-  const _DetailRow({required this.label, required this.value});
-  final String label;
-  final String value;
-
-  @override
-  Widget build(BuildContext context) {
-    final text = Theme.of(context).textTheme;
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 10),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          SizedBox(
-            width: 90,
-            child: Text(label, style: text.labelMedium),
+        if (detail.description.isNotEmpty) ...[
+          const SizedBox(height: 16),
+          Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: context.brand.surfaceHi,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: context.brand.rule),
+            ),
+            child: SelectableText(detail.description, style: text.bodyMedium),
           ),
-          const SizedBox(width: 12),
-          Expanded(child: Text(value, style: text.bodyMedium)),
         ],
-      ),
+        const SizedBox(height: 12),
+        StationDataRow(
+          label: 'Priority',
+          value: p.isEmpty ? '—' : '${p[0].toUpperCase()}${p.substring(1)}',
+        ),
+        if (detail.businessName != null)
+          StationDataRow(label: 'Business', value: detail.businessName!),
+        if (detail.customerName != null)
+          StationDataRow(label: 'Customer', value: detail.customerName!),
+        if (detail.agentName != null)
+          StationDataRow(label: 'Agent', value: detail.agentName!),
+        if (detail.createdAt != null)
+          StationDataRow(label: 'Created', value: detail.createdAt!),
+      ],
     );
   }
 }
@@ -1607,28 +2963,40 @@ class _DateSeparator extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final label = _formatDaySeparator(iso);
+    if (label.isEmpty) return const SizedBox(height: 8);
+    final t = ChatTokens.of(context);
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 14),
-      child: Row(
-        children: [
-          const Expanded(child: Hairline()),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12),
-            child: Text(
-              label,
-              style: Theme.of(context).textTheme.labelMedium,
+      padding: const EdgeInsets.only(top: 20, bottom: 12),
+      child: Center(
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+          decoration: BoxDecoration(
+            color: t.surface,
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(color: t.borderSoft),
+            boxShadow: [
+              BoxShadow(
+                color: const Color(0xFF0C0A09).withValues(alpha: 0.04),
+                blurRadius: 2,
+                offset: const Offset(0, 1),
+              ),
+            ],
+          ),
+          child: Text(
+            label,
+            style: TextStyle(
+              fontSize: 11,
+              color: t.muted,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.6,
             ),
           ),
-          const Expanded(child: Hairline()),
-        ],
+        ),
       ),
     );
   }
 }
 
-/// Two messages are "grouped" if they're from the same sender and
-/// created ≤ 2 min apart. Failed / sending optimistic messages never
-/// count as grouped (they need their own status meta).
 bool _isGrouped(Message older, Message newer) {
   if (older.senderId != newer.senderId) return false;
   if (older.status != MessageStatus.sent ||
@@ -1650,11 +3018,10 @@ bool _sameDay(String a, String b) {
     final y = DateTime.parse(b.replaceAll(' ', 'T'));
     return x.year == y.year && x.month == y.month && x.day == y.day;
   } catch (_) {
-    return true; // on parse failure, don't insert a separator
+    return true;
   }
 }
 
-/// "TODAY" / "YESTERDAY" / "MONDAY" / "05 APR" / "05 APR 2024".
 String _formatDaySeparator(String iso) {
   try {
     final dt = DateTime.parse(iso.replaceAll(' ', 'T'));
@@ -1687,20 +3054,21 @@ class _AttachmentList extends StatelessWidget {
   const _AttachmentList({
     required this.message,
     required this.mine,
+    required this.maxWidth,
     required this.api,
     required this.service,
   });
 
   final Message message;
   final bool mine;
+  final double maxWidth;
   final ApiClient api;
   final ChatService service;
 
   @override
   Widget build(BuildContext context) {
-    final maxWidth = MediaQuery.of(context).size.width * 0.78;
     return ConstrainedBox(
-      constraints: BoxConstraints(maxWidth: maxWidth),
+      constraints: BoxConstraints(maxWidth: maxWidth.clamp(160.0, 420.0)),
       child: Column(
         crossAxisAlignment:
             mine ? CrossAxisAlignment.end : CrossAxisAlignment.start,
@@ -1710,7 +3078,7 @@ class _AttachmentList extends StatelessWidget {
               _ImageAttachment(attachment: a, api: api, service: service)
             else
               _FileAttachment(attachment: a, api: api, service: service),
-            const SizedBox(height: 6),
+            const SizedBox(height: 4),
           ],
         ],
       ),
@@ -1737,34 +3105,30 @@ class _ImageAttachment extends StatelessWidget {
         ? attachment.width! / attachment.height!
         : 1.5;
 
-    return GestureDetector(
-      onTap: () => _openImageViewer(context, url, api),
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxHeight: 280),
-        child: AspectRatio(
-          aspectRatio: aspect.clamp(0.6, 2.5),
-          child: Container(
-            decoration: BoxDecoration(
-              color: Brand.surfaceHi,
-              border: Border.all(color: Brand.rule, width: 1),
-            ),
-            child: CachedNetworkImage(
-              imageUrl: url,
-              httpHeaders: api.authHeaders(),
-              fit: BoxFit.cover,
-              placeholder: (_, __) => const Center(
-                child: SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    color: Brand.signal,
-                  ),
-                ),
+    return MouseRegion(
+      cursor: SystemMouseCursors.zoomIn,
+      child: GestureDetector(
+        onTap: () => _openImageViewer(context, url, api, attachment),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxHeight: 280),
+          child: AspectRatio(
+            aspectRatio: aspect.clamp(0.6, 2.5),
+            child: Container(
+              clipBehavior: Clip.antiAlias,
+              decoration: BoxDecoration(
+                color: context.brand.surfaceHi,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: context.brand.rule, width: 1),
               ),
-              errorWidget: (_, __, ___) => const Center(
-                child: Icon(Icons.broken_image_outlined,
-                    color: Brand.paperDim, size: 24),
+              child: CachedNetworkImage(
+                imageUrl: url,
+                httpHeaders: api.authHeaders(),
+                fit: BoxFit.cover,
+                placeholder: (_, _) => const Center(child: TpLoader()),
+                errorWidget: (_, _, _) => Center(
+                  child: Icon(Icons.broken_image_outlined,
+                      color: context.brand.paperDim, size: 24),
+                ),
               ),
             ),
           ),
@@ -1774,45 +3138,87 @@ class _ImageAttachment extends StatelessWidget {
   }
 }
 
-void _openImageViewer(BuildContext context, String url, ApiClient api) {
-  Navigator.of(context).push(
-    MaterialPageRoute(
-      fullscreenDialog: true,
-      builder: (_) => _ImageViewerScreen(url: url, api: api),
-    ),
+void _openImageViewer(
+    BuildContext context, String url, ApiClient api, Attachment attachment) {
+  showDialog<void>(
+    context: context,
+    barrierColor: Colors.black.withValues(alpha: 0.85),
+    builder: (_) => _ImageViewer(url: url, api: api, name: attachment.originalName),
   );
 }
 
-class _ImageViewerScreen extends StatelessWidget {
-  const _ImageViewerScreen({required this.url, required this.api});
+class _ImageViewer extends StatelessWidget {
+  const _ImageViewer({required this.url, required this.api, required this.name});
   final String url;
   final ApiClient api;
+  final String name;
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Brand.canvas,
-      appBar: AppBar(
-        backgroundColor: Brand.canvas,
-        elevation: 0,
-        iconTheme: const IconThemeData(color: Brand.paper),
-      ),
-      body: Center(
-        child: InteractiveViewer(
-          minScale: 0.8,
-          maxScale: 4,
-          child: CachedNetworkImage(
-            imageUrl: url,
-            httpHeaders: api.authHeaders(),
-            placeholder: (_, __) => const SizedBox(
-              width: 20,
-              height: 20,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                color: Brand.signal,
+    void close() => Navigator.of(context).pop();
+    return CallbackShortcuts(
+      bindings: {const SingleActivator(LogicalKeyboardKey.escape): close},
+      child: Focus(
+        autofocus: true,
+        child: Stack(
+          children: [
+            Positioned.fill(
+              child: GestureDetector(onTap: close),
+            ),
+            Center(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(48, 72, 48, 48),
+                child: InteractiveViewer(
+                  minScale: 0.8,
+                  maxScale: 4,
+                  child: CachedNetworkImage(
+                    imageUrl: url,
+                    httpHeaders: api.authHeaders(),
+                    fit: BoxFit.contain,
+                    placeholder: (_, _) => const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: TpLoader(
+                        strokeWidth: 2,
+                        color: Brand.signal,
+                      ),
+                    ),
+                  ),
+                ),
               ),
             ),
-          ),
+            Positioned(
+              top: 16,
+              left: 24,
+              right: 16,
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        decoration: TextDecoration.none,
+                      ),
+                    ),
+                  ),
+                  Material(
+                    color: Colors.white.withValues(alpha: 0.12),
+                    shape: const CircleBorder(),
+                    child: IconButton(
+                      tooltip: 'Close',
+                      onPressed: close,
+                      icon: const Icon(Icons.close, color: Colors.white),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -1854,15 +3260,13 @@ class _FileAttachmentState extends State<_FileAttachment> {
     if (_busy) return;
     setState(() => _busy = true);
     try {
-      // Download to a temp file with the session cookie, then hand to the
-      // OS default handler. Open succeeds even if the browser isn't logged in.
       final url = widget.service.attachmentUrl(widget.attachment.id);
       final response = await http.get(
         Uri.parse(url),
         headers: widget.api.authHeaders(),
       );
       if (response.statusCode < 200 || response.statusCode >= 300) {
-        if (mounted) _toast('DOWNLOAD FAILED');
+        if (mounted) _toast('Download failed');
         return;
       }
       final dir = await getTemporaryDirectory();
@@ -1872,10 +3276,10 @@ class _FileAttachmentState extends State<_FileAttachment> {
       await f.writeAsBytes(response.bodyBytes, flush: true);
       final result = await OpenFilex.open(path);
       if (result.type != ResultType.done && mounted) {
-        _toast('NO APP TO OPEN ${widget.attachment.mimeType}');
+        _toast('No app to open ${widget.attachment.mimeType}');
       }
     } catch (_) {
-      if (mounted) _toast('DOWNLOAD FAILED');
+      if (mounted) _toast('Download failed');
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -1888,59 +3292,62 @@ class _FileAttachmentState extends State<_FileAttachment> {
   @override
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
-    return InkWell(
-      onTap: _open,
-      child: Container(
-        constraints: const BoxConstraints(minWidth: 200),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        decoration: BoxDecoration(
-          color: Brand.surface,
-          border: Border.all(color: Brand.rule, width: 1),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(_icon, size: 22, color: Brand.signal),
-            const SizedBox(width: 12),
-            Flexible(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    widget.attachment.originalName,
-                    style: text.titleSmall,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  const SizedBox(height: 2),
-                  Text(widget.attachment.formattedSize(),
-                      style: text.labelMedium),
-                ],
-              ),
-            ),
-            const SizedBox(width: 8),
-            _busy
-                ? const SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      color: Brand.signal,
+    return Material(
+      color: context.brand.surface,
+      borderRadius: BorderRadius.circular(10),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(10),
+        onTap: _open,
+        child: Container(
+          constraints: const BoxConstraints(minWidth: 220),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: context.brand.rule, width: 1),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              IconTile(icon: _icon, size: 36),
+              const SizedBox(width: 12),
+              Flexible(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      widget.attachment.originalName,
+                      style: text.bodyMedium
+                          ?.copyWith(fontWeight: FontWeight.w600),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
                     ),
-                  )
-                : const Icon(Icons.download_outlined,
-                    size: 18, color: Brand.paperDim),
-          ],
+                    const SizedBox(height: 2),
+                    Text(widget.attachment.formattedSize(),
+                        style: text.bodySmall),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 10),
+              _busy
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: TpLoader(
+                        strokeWidth: 2,
+                        color: Brand.signal,
+                      ),
+                    )
+                  : Icon(Icons.download_outlined,
+                      size: 18, color: context.brand.paperDim),
+            ],
+          ),
         ),
       ),
     );
   }
 }
 
-/// Small "Alice is typing…" / "Alice and Bob are typing…" strip shown above
-/// the composer. Animated ellipsis keeps it from feeling static without
-/// pulling in a full animation framework.
 class _TypingStrip extends StatefulWidget {
   const _TypingStrip({required this.names});
   final List<String> names;
@@ -1977,31 +3384,32 @@ class _TypingStripState extends State<_TypingStrip>
 
   @override
   Widget build(BuildContext context) {
+    final style = Theme.of(context).textTheme.bodySmall;
     return Padding(
-      padding: const EdgeInsets.only(bottom: 2),
+      padding: const EdgeInsets.fromLTRB(24, 2, 24, 6),
       child: Row(
         children: [
-          const SizedBox(width: 16),
-          AnimatedBuilder(
-            animation: _ctrl,
-            builder: (_, __) {
-              final dots = (_ctrl.value * 3).floor() + 1;
-              return Text(
-                '·' * dots,
-                style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                      color: Brand.signal,
-                    ),
-              );
-            },
-          ),
-          const SizedBox(width: 8),
-          Expanded(
+          Flexible(
             child: Text(
-              _describe(widget.names).toUpperCase(),
-              style: Theme.of(context).textTheme.labelMedium,
+              _describe(widget.names),
+              style: style?.copyWith(fontStyle: FontStyle.italic),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),
+          ),
+          AnimatedBuilder(
+            animation: _ctrl,
+            builder: (_, _) {
+              final dots = (_ctrl.value * 3).floor() + 1;
+              return SizedBox(
+                width: 24,
+                child: Text(
+                  '.' * dots,
+                  style: style?.copyWith(
+                      color: Brand.signal, fontWeight: FontWeight.w700),
+                ),
+              );
+            },
           ),
         ],
       ),
@@ -2018,4 +3426,3 @@ String _shortTime(String iso) {
     return '';
   }
 }
-

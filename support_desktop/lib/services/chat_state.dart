@@ -5,13 +5,8 @@ import 'package:flutter/foundation.dart';
 import '../models/chat_models.dart';
 import 'chat_realtime.dart';
 import 'chat_service.dart';
-import 'ringtone_service.dart';
+import 'sound_engine.dart';
 
-/// Always-on inbox state. Seeded via REST on construction and kept in
-/// sync by `conversation.activity` events streamed from [ChatRealtimeService].
-///
-/// Widgets listen via [addListener]; the CHAT tab badge listens to
-/// [unreadTotal] to decide whether to render its red-dot overlay.
 class ChatInbox extends ChangeNotifier {
   ChatInbox(this._service, this._realtime) {
     _activitySub = _realtime.inboxEvents.listen(_applyActivity);
@@ -25,10 +20,6 @@ class ChatInbox extends ChangeNotifier {
   StreamSubscription<ConversationLifecycle>? _lifecycleSub;
   Timer? _pollTimer;
 
-  /// Polling fallback — keeps the inbox fresh even when the Pusher /
-  /// Soketi WebSocket is unreachable. `load()` is already idempotent and
-  /// no-ops when another load is in flight, so this is safe to fire on a
-  /// timer alongside realtime.
   static const Duration kPollInterval = Duration(seconds: 5);
   void _startPolling() {
     _pollTimer?.cancel();
@@ -38,15 +29,26 @@ class ChatInbox extends ChangeNotifier {
   List<Conversation> _conversations = const [];
   bool _loading = false;
 
+  final ValueNotifier<int?> openRequest = ValueNotifier<int?>(null);
+
+  void requestOpen(int conversationId) {
+    openRequest.value = null;
+    openRequest.value = conversationId;
+  }
+
+  Conversation? find(int conversationId) {
+    for (final c in _conversations) {
+      if (c.id == conversationId) return c;
+    }
+    return null;
+  }
+
   List<Conversation> get conversations => _conversations;
   bool get loading => _loading;
 
   int get unreadTotal =>
       _conversations.fold<int>(0, (sum, c) => sum + c.unreadCount);
 
-  /// Set whenever a chat REST call returned Unauthorized — surfaces the
-  /// stale-session state to whoever is listening (HomeShell consumes it
-  /// to bounce the user back to login).
   bool _authFailed = false;
   bool get authFailed => _authFailed;
 
@@ -67,9 +69,6 @@ class ChatInbox extends ChangeNotifier {
 
   Future<void> reload() => load();
 
-  /// The caller has just opened (or scrolled through) the conversation, so
-  /// locally zero its unread badge. Server-side cursor advancement is a
-  /// Phase 4 concern (`chat.markRead`).
   void markLocallyRead(int conversationId) {
     var changed = false;
     _conversations = _conversations.map((c) {
@@ -84,9 +83,6 @@ class ChatInbox extends ChangeNotifier {
 
   void _applyLifecycle(ConversationLifecycle event) {
     if (event.added) {
-      // We were just added to a conversation — REST-hydrate to get full
-      // metadata (peer/name/last_message). Cheap at this scale and avoids
-      // shipping full conv JSON over Pusher.
       final already =
           _conversations.any((c) => c.id == event.conversationId);
       if (!already) load();
@@ -100,10 +96,6 @@ class ChatInbox extends ChangeNotifier {
     }
   }
 
-  /// Remove a conversation from the local list without a REST round-trip.
-  /// Called immediately after chat.leaveConversation succeeds — the server
-  /// also broadcasts conversation.removed, which would trigger the same
-  /// path, but we apply it locally too for instant UI.
   void removeLocally(int conversationId) {
     final next =
         _conversations.where((c) => c.id != conversationId).toList();
@@ -117,9 +109,6 @@ class ChatInbox extends ChangeNotifier {
     final idx =
         _conversations.indexWhere((c) => c.id == activity.conversationId);
     if (idx == -1) {
-      // Unknown conversation — the server has added us to one we don't
-      // yet know about. Hydrate from REST to get full metadata.
-      // Fire-and-forget; the reload will re-sort naturally.
       load();
       return;
     }
@@ -138,7 +127,6 @@ class ChatInbox extends ChangeNotifier {
       lastActivityAt: activity.createdAt,
     );
 
-    // Re-sort: bump this conversation to the top (most-recent activity).
     final next = List<Conversation>.from(_conversations)..removeAt(idx);
     next.insert(0, updated);
     _conversations = next;
@@ -150,13 +138,11 @@ class ChatInbox extends ChangeNotifier {
     _activitySub?.cancel();
     _lifecycleSub?.cancel();
     _pollTimer?.cancel();
+    openRequest.dispose();
     super.dispose();
   }
 }
 
-/// Per-thread state. Created by ChatThreadScreen, disposed with it.
-/// Subscribes to the conversation channel on construction and filters
-/// `message.new` events to this conversation.
 class ChatThread extends ChangeNotifier {
   ChatThread({
     required this.conversationId,
@@ -180,11 +166,6 @@ class ChatThread extends ChangeNotifier {
     _startPolling();
   }
 
-  /// Polling fallback for incoming messages — runs alongside the realtime
-  /// subscription so the open thread stays fresh even when the WebSocket is
-  /// unreachable. Each fetched message is funnelled through [_applyIncoming]
-  /// which de-dupes by `clientNonce` / `id`, so this is idempotent against
-  /// realtime delivery.
   Timer? _pollTimer;
   bool _polling = false;
   static const Duration kPollInterval = Duration(milliseconds: 1500);
@@ -194,8 +175,15 @@ class ChatThread extends ChangeNotifier {
     _pollTimer = Timer.periodic(kPollInterval, (_) => _pollNew());
   }
 
+  DateTime _lastPoll = DateTime.fromMillisecondsSinceEpoch(0);
+
   Future<void> _pollNew() async {
     if (_polling || _loading) return;
+    final gap = _realtime.isConnected
+        ? const Duration(seconds: 10)
+        : kPollInterval;
+    if (DateTime.now().difference(_lastPoll) < gap) return;
+    _lastPoll = DateTime.now();
     _polling = true;
     try {
       final page = await _service.history(conversationId, limit: 30);
@@ -216,21 +204,13 @@ class ChatThread extends ChangeNotifier {
   StreamSubscription<TypingEvent>? _typingSub;
   StreamSubscription<PinUpdate>? _pinSub;
 
-  /// Other participants currently typing, keyed by user id. Value is an
-  /// (expiry timestamp, display name) pair — expired entries are swept
-  /// out on a short timer.
   final Map<int, _TypingInfo> _typing = {};
   Timer? _typingSweep;
 
-  /// Debounced outbound typing notification. We only hit the server at
-  /// most once per [kTypingNotifyInterval] while the user is actively
-  /// typing — any further calls during that window are silenced.
   DateTime? _lastTypingNotifySentAt;
   static const Duration kTypingNotifyInterval = Duration(seconds: 2);
   static const Duration kTypingExpireAfter = Duration(seconds: 4);
 
-  /// Snapshot of who is currently typing — names only, no ids. Used by
-  /// the thread UI to render "Alice is typing…" / "Alice and Bob…".
   List<String> get typingNames {
     final now = DateTime.now();
     return _typing.values
@@ -239,25 +219,16 @@ class ChatThread extends ChangeNotifier {
         .toList();
   }
 
-  /// Other participants' read cursors, keyed by user_id. Used to render
-  /// "Seen" / "Seen by N" indicators. Excludes our own user.
   final Map<int, int> _readCursors = <int, int>{};
 
-  /// Total participant count from chat.conversation (used to size the
-  /// "Seen by N of M" denominator if we ever want it). For now we only
-  /// surface counts in groups/channels.
   int _totalParticipants = 0;
 
   Map<int, int> get readCursors => Map.unmodifiable(_readCursors);
   int get totalParticipants => _totalParticipants;
 
-  /// The newest message id we've already reported as read to the server.
-  /// Used by the debouncer to ensure we never POST the same value twice.
   int _lastReportedReadId = 0;
   Timer? _markReadTimer;
 
-  /// Messages sorted NEWEST-FIRST (id DESC). The thread renders reversed
-  /// so the newest message appears at the bottom.
   List<Message> _messages = const [];
   bool _loading = false;
   bool _hasMore = true;
@@ -266,8 +237,6 @@ class ChatThread extends ChangeNotifier {
   bool get loading => _loading;
   bool get hasMore => _hasMore;
 
-  /// Pinned messages for this conversation, newest pin first. Hydrated by
-  /// [loadInitial] and kept live via `message.pinned` / `message.unpinned`.
   List<PinnedMessage> _pinned = const [];
   List<PinnedMessage> get pinned => _pinned;
 
@@ -292,8 +261,6 @@ class ChatThread extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Pin [messageId]. Updates locally on success; the realtime broadcast is
-  /// de-duped by [_applyPin] so a double-apply is harmless.
   Future<bool> pin(int messageId) async {
     final entry = await _service.pinMessage(messageId);
     if (entry == null) return false;
@@ -305,7 +272,6 @@ class ChatThread extends ChangeNotifier {
     return true;
   }
 
-  /// Unpin [messageId].
   Future<bool> unpin(int messageId) async {
     final ok = await _service.unpinMessage(messageId);
     if (!ok) return false;
@@ -343,9 +309,6 @@ class ChatThread extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Optimistic send. Prepends a sending-state message, fires the REST
-  /// call, then reconciles the optimistic row by `clientNonce`. Empty
-  /// [body] is allowed if at least one attachment id is supplied.
   Future<void> send(String body, {List<Attachment> attachments = const []}) async {
     final trimmed = body.trim();
     if (trimmed.isEmpty && attachments.isEmpty) return;
@@ -362,6 +325,7 @@ class ChatThread extends ChangeNotifier {
     );
     _messages = [optimistic, ..._messages];
     notifyListeners();
+    SoundEngine.instance.sent();
 
     final server = await _service.send(
       conversationId: conversationId,
@@ -384,7 +348,6 @@ class ChatThread extends ChangeNotifier {
 
   Future<void> retry(Message failed) async {
     if (failed.status != MessageStatus.failed) return;
-    // Flip back to sending and retry with the same nonce.
     _messages = _messages.map((m) {
       if (m.clientNonce == failed.clientNonce && m.id == null) {
         return m.copyWith(status: MessageStatus.sending);
@@ -412,12 +375,6 @@ class ChatThread extends ChangeNotifier {
     }
   }
 
-  /// One-shot hydrate of other participants' read cursors. Falls back to
-  /// an empty map if the call fails — the indicator just won't render.
-  /// `chat.conversation` returns participants but not their cursors today;
-  /// for MVP we treat the indicator as "live only" — it starts empty and
-  /// fills in as `message.read` events arrive. We still call
-  /// `chat.conversation` to count total participants for the "Seen by N" UI.
   Future<void> _hydrateReadCursors() async {
     final detail = await _service.conversation(conversationId);
     if (detail == null) return;
@@ -425,9 +382,6 @@ class ChatThread extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Schedule a debounced mark-read for the newest visible message id.
-  /// No-ops if the requested id is not greater than the last one we
-  /// already reported.
   void scheduleMarkRead(int newestVisibleId) {
     if (newestVisibleId <= _lastReportedReadId) return;
     _markReadTimer?.cancel();
@@ -439,13 +393,11 @@ class ChatThread extends ChangeNotifier {
   Future<void> _flushMarkRead(int targetId) async {
     if (targetId <= _lastReportedReadId) return;
     _lastReportedReadId = targetId;
-    // Optimistic — if the server rejects we just won't re-fire (server is
-    // monotonic anyway).
     await _service.markRead(conversationId, targetId);
   }
 
   void _applyRead(MessageRead event) {
-    if (event.userId == myUserId) return; // ignore my own cursor advances
+    if (event.userId == myUserId) return;
     final current = _readCursors[event.userId] ?? 0;
     if (event.messageId > current) {
       _readCursors[event.userId] = event.messageId;
@@ -454,7 +406,7 @@ class ChatThread extends ChangeNotifier {
   }
 
   void _applyTyping(TypingEvent event) {
-    if (event.userId == myUserId) return; // never show myself
+    if (event.userId == myUserId) return;
     _typing[event.userId] = _TypingInfo(
       username: event.username,
       expiresAt: DateTime.now().add(kTypingExpireAfter),
@@ -474,9 +426,6 @@ class ChatThread extends ChangeNotifier {
     });
   }
 
-  /// Called by the composer on every keystroke. Fires at most once per
-  /// [kTypingNotifyInterval] so the server sees ~30 req/min per user during
-  /// sustained typing — light enough to skip rate-limiting.
   void notifyTyping() {
     final now = DateTime.now();
     if (_lastTypingNotifySentAt != null &&
@@ -488,7 +437,6 @@ class ChatThread extends ChangeNotifier {
   }
 
   void _applyIncoming(Message m) {
-    // Dedup by client_nonce (our own send arrives here too) or by id.
     final byNonce = m.clientNonce.isNotEmpty &&
         _messages.any((x) => x.clientNonce == m.clientNonce);
     final byId = m.id != null && _messages.any((x) => x.id == m.id);
@@ -498,9 +446,6 @@ class ChatThread extends ChangeNotifier {
     }
     if (byId) return;
     _messages = [m, ..._messages];
-    if (m.senderId != myUserId) {
-      unawaited(RingtoneService.instance.ping());
-    }
     notifyListeners();
   }
 

@@ -1,10 +1,3 @@
-// Models for the admin/console pages ported from the web app
-// (POS Version, Release Notes, License Key, Users, Email, Help,
-// Credentials, Blog Posts, BIR Registration, Files, Activity Logs).
-//
-// Each model maps one row from its api.php endpoint. Parsing is defensive
-// (`_str` / `_int`) because the PHP layer returns loosely-typed JSON.
-
 String _str(dynamic v) => v == null ? '' : v.toString();
 
 int _int(dynamic v) {
@@ -13,8 +6,6 @@ int _int(dynamic v) {
   return int.tryParse(v?.toString() ?? '') ?? 0;
 }
 
-/// A page of rows plus the total count, the shape every paginated admin
-/// endpoint returns (`{data: [...], totalRecords|total: N}`).
 class Paged<T> {
   Paged({required this.items, required this.total});
   final List<T> items;
@@ -45,7 +36,7 @@ class EmailRecipient {
   final int id;
   final String email;
   final String businessType;
-  final String source; // 'emails' | 'leads'
+  final String source;
   final String createdAt;
 
   factory EmailRecipient.fromJson(Map<String, dynamic> j) => EmailRecipient(
@@ -150,7 +141,6 @@ class BlogPost {
   final bool isDraft;
   final String createdAt;
 
-  /// Plain-text preview — strips HTML tags from the stored rich content.
   String get preview =>
       content.replaceAll(RegExp(r'<[^>]*>'), ' ').replaceAll(RegExp(r'\s+'), ' ').trim();
 
@@ -174,7 +164,6 @@ class FileCollection {
     required this.totalSize,
     required this.createdAt,
   });
-  // Collection ids are server-generated UUID strings, not ints.
   final String id;
   final String name;
   final String email;
@@ -201,7 +190,6 @@ class FileItem {
     required this.size,
     required this.createdAt,
   });
-  // File ids are server-generated UUID strings, not ints.
   final String id;
   final String name;
   final int size;
@@ -292,8 +280,6 @@ class LicenseKey {
   final int id;
   final String licenseKey;
 
-  /// The `trial` column: '0' (or empty) reads as Permanent, anything else
-  /// as a trial/temporary key.
   final String type;
   final String dateExpired;
   final String storeName;

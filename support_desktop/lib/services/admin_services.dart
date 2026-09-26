@@ -1,6 +1,3 @@
-// Service layer for the admin/console pages. Each service wraps the
-// matching api.php actions with cookie-aware GET/POST via [ApiClient].
-
 import '../api_client.dart';
 import '../models/admin_models.dart';
 
@@ -63,7 +60,6 @@ class EmailService {
   EmailService(this.api);
   final ApiClient api;
 
-  /// getEmails reads `$_POST` (page/size/search/source).
   Future<Paged<EmailRecipient>> list({
     int page = 1,
     int limit = 50,
@@ -82,29 +78,167 @@ class EmailService {
     );
   }
 
-  Future<bool> delete({required int id, required String source}) async {
-    final res =
-        await api.post('deleteEmail', body: {'id': '$id', 'source': source});
-    return res['success'] == true;
+  Future<List<String>> allSubscriberEmails() async {
+    final res = await api.post('getEmails', body: {
+      'page': '1',
+      'limit': '1000000',
+    });
+    final raw = res['data'];
+    if (raw is! List) return <String>[];
+    return raw
+        .whereType<Map>()
+        .map((m) => (m['email'] ?? '').toString())
+        .toList();
   }
 
-  Future<bool> sendSingle({
+  Future<Map<String, dynamic>> internal({
+    int page = 1,
+    int limit = 100000,
+    String search = '',
+    String filter = 'all',
+  }) {
+    return api.post('getInternalRecipients', body: {
+      'page': '$page',
+      'limit': '$limit',
+      'search': search,
+      'filter': filter,
+    });
+  }
+
+  Future<Map<String, dynamic>> suggestions(String term) {
+    return api.post('getInternalSuggestions',
+        body: {'search': term, 'limit': '50'});
+  }
+
+  Future<List<String>> groupEmails(String filter) async {
+    final res =
+        await api.post('getInternalGroupEmails', body: {'filter': filter});
+    final raw = res['emails'];
+    return raw is List ? raw.map((e) => e.toString()).toList() : <String>[];
+  }
+
+  Future<({bool ok, String message})> saveContact({
+    required String id,
+    required String name,
+    required String email,
+    required String company,
+    required String label,
+    required String notes,
+  }) async {
+    final res = await api.post('saveContact', body: {
+      'id': id.isEmpty ? '0' : id,
+      'name': name,
+      'email': email,
+      'company': company,
+      'label': label,
+      'notes': notes,
+    });
+    return (
+      ok: res['success'] == true,
+      message: (res['message'] ?? '').toString(),
+    );
+  }
+
+  Future<({bool ok, String message})> deleteContact(String id) async {
+    final res = await api.post('deleteContact', body: {'id': id});
+    return (
+      ok: res['success'] == true,
+      message: (res['message'] ?? '').toString(),
+    );
+  }
+
+  Future<({bool ok, String message})> delete({
+    required int id,
+    required String source,
+  }) async {
+    final res =
+        await api.post('deleteEmail', body: {'id': '$id', 'source': source});
+    return (
+      ok: res['success'] == true,
+      message: (res['message'] ?? '').toString(),
+    );
+  }
+
+  Future<List<Map<String, dynamic>>> templates() async {
+    final res = await api.get('desktopEmailTemplates');
+    final raw = res['templates'];
+    return raw is List
+        ? raw.whereType<Map>().map((m) => Map<String, dynamic>.from(m)).toList()
+        : <Map<String, dynamic>>[];
+  }
+
+  Future<String> messageHtml(String text) async {
+    final res = await api.post('desktopEmailMessageHtml', body: {'message': text});
+    return (res['html'] ?? text).toString();
+  }
+
+  Future<Map<String, dynamic>> sendSingle({
     required String email,
     required String subject,
     required String message,
+    bool skipLogging = false,
+    List<String> cc = const [],
+    List<String> bcc = const [],
+    List<String> attachmentPaths = const [],
   }) async {
-    final res = await api.post('sendSingleEmail',
-        body: {'email': email, 'subject': subject, 'message': message});
-    return res['success'] == true;
+    final fields = <String, String>{
+      'subject': subject,
+      'message': message,
+      'email': email,
+      if (skipLogging) 'skipLogging': 'true',
+    };
+    for (var i = 0; i < cc.length; i++) {
+      fields['cc[$i]'] = cc[i];
+    }
+    for (var i = 0; i < bcc.length; i++) {
+      fields['bcc[$i]'] = bcc[i];
+    }
+    return api.uploadFiles(
+      'sendSingleEmail',
+      fields: fields,
+      filePaths: attachmentPaths,
+      fileField: 'attachments[]',
+    );
   }
 
-  Future<bool> sendAll({
+  Map<String, String> _list(String key, List<String> values) => {
+        for (var i = 0; i < values.length; i++) '$key[$i]': values[i],
+      };
+
+  Future<void> logBulkSend({
+    required List<String> emails,
     required String subject,
-    required String message,
+    required int attachmentCount,
   }) async {
-    final res = await api.post('sendEmailToAll',
-        body: {'subject': subject, 'message': message});
-    return res['success'] == true;
+    await api.post('logBulkSend', body: {
+      ..._list('emails', emails),
+      'subject': subject,
+      'attachmentCount': '$attachmentCount',
+    });
+  }
+
+  Future<void> logAllEmailSend({
+    required List<String> emails,
+    required String subject,
+    required int attachmentCount,
+  }) async {
+    await api.post('logAllEmailSend', body: {
+      ..._list('emails', emails),
+      'subject': subject,
+      'attachmentCount': '$attachmentCount',
+    });
+  }
+
+  Future<void> saveRecentTemplate({
+    required String html,
+    required String subject,
+  }) async {
+    await api.post('saveRecentTemplate',
+        body: {'template_html': html, 'template_subject': subject});
+  }
+
+  Future<Map<String, dynamic>> rememberContacts(List<String> emails) {
+    return api.post('rememberContacts', body: _list('emails', emails));
   }
 }
 
@@ -112,8 +246,6 @@ class UserService {
   UserService(this.api);
   final ApiClient api;
 
-  /// getUsers reads `$_GET` (search/page/limit) and excludes super_admin /
-  /// customer / guest roles.
   Future<Paged<AdminUser>> list({
     int page = 1,
     int limit = 100,
@@ -146,8 +278,6 @@ class CredentialsService {
   CredentialsService(this.api);
   final ApiClient api;
 
-  /// Sends a 6-digit OTP to the signed-in user's email. Required before
-  /// the credentials vault can be read or written this session.
   Future<({bool ok, String message})> requestOtp() async {
     final res = await api.post('requestCredentialsOTP');
     return (
@@ -156,10 +286,13 @@ class CredentialsService {
     );
   }
 
-  Future<bool> verifyOtp(String code) async {
+  Future<({bool ok, String message})> verifyOtp(String code) async {
     final res =
         await api.post('verifyCredentialsOTP', body: {'otp_code': code});
-    return res['success'] == true;
+    return (
+      ok: res['success'] == true,
+      message: (res['message'] ?? '').toString(),
+    );
   }
 
   Future<Paged<Credential>> list() async {
@@ -171,22 +304,28 @@ class CredentialsService {
     return Paged(items: items, total: items.length);
   }
 
-  Future<bool> save({
+  Future<({bool ok, String message})> save({
     int? id,
     required String clientName,
     required String credentialsText,
   }) async {
     final res = await api.post('saveCredential', body: {
-      if (id != null) 'id': '$id',
+      'id': id == null ? '' : '$id',
       'client_name': clientName,
       'credentials_text': credentialsText,
     });
-    return res['success'] == true;
+    return (
+      ok: res['success'] == true,
+      message: (res['message'] ?? '').toString(),
+    );
   }
 
-  Future<bool> delete(int id) async {
+  Future<({bool ok, String message})> delete(int id) async {
     final res = await api.post('deleteCredential', body: {'id': '$id'});
-    return res['success'] == true;
+    return (
+      ok: res['success'] == true,
+      message: (res['message'] ?? '').toString(),
+    );
   }
 }
 
@@ -231,8 +370,6 @@ class BlogService {
     );
   }
 
-  /// Creates a text post. [isDraft] saves it as a draft, otherwise it
-  /// publishes immediately. (Category/media attachment is web-only.)
   Future<bool> add({
     required String title,
     required String content,
@@ -256,8 +393,6 @@ class FilesService {
   FilesService(this.api);
   final ApiClient api;
 
-  /// The endpoint returns every collection; [search] filters client-side
-  /// by name or email.
   Future<Paged<FileCollection>> listCollections({String search = ''}) async {
     final res = await api.get('file_list_collections');
     var items = _rows(res['data'], FileCollection.fromJson);
@@ -277,7 +412,6 @@ class FilesService {
     return _rows(res['files'], FileItem.fromJson);
   }
 
-  /// Upload one or more files, creating a new collection named [collectionName].
   Future<({bool ok, String? message})> upload({
     required String collectionName,
     String email = '',
@@ -290,7 +424,6 @@ class FilesService {
     return (ok: res['success'] == true, message: res['message']?.toString());
   }
 
-  /// Existing share token for a collection (null if none issued yet).
   Future<({String? token, String? permanentToken})> getShareLink(
       String collectionId) async {
     final res = await api.get('get_share_link', {'id': collectionId});
@@ -301,14 +434,12 @@ class FilesService {
     );
   }
 
-  /// Issue (or rotate) a temporary share token; returns the token.
   Future<String?> generateShareLink(String collectionId) async {
     final res =
         await api.postJson('generate_share_link', body: {'id': collectionId});
     return res['success'] == true ? res['share_token']?.toString() : null;
   }
 
-  /// Issue (or rotate) a permanent share token; returns the token.
   Future<String?> generatePermanentShareLink(String collectionId) async {
     final res = await api
         .postJson('generate_permanent_share_link', body: {'id': collectionId});
@@ -317,10 +448,8 @@ class FilesService {
         : null;
   }
 
-  /// Public, shareable URL for a token (mirrors the web's file-share page).
   String shareUrl(String token) => '${api.baseUrl}/file-share.php#$token';
 
-  /// file_delete_collection / file_delete_item read a JSON body.
   Future<bool> deleteCollection(String id) async {
     final res = await api.postJson('file_delete_collection', body: {'id': id});
     return res['success'] == true;
@@ -331,7 +460,6 @@ class FilesService {
     return res['success'] == true;
   }
 
-  /// Authenticated download URL for a file (opened via the OS handler).
   String downloadUrl(String fileId) =>
       api.actionUrl('file_download', {'id': fileId});
 }
@@ -361,7 +489,6 @@ class ReleaseNotesService {
     return _rows(res['data'], ActionType.fromJson);
   }
 
-  /// Versions for the editor dropdown (id + label), sourced from posversion.
   Future<List<PosVersion>> versions() async {
     final res = await api.get('getposversion', {'page': '1', 'limit': '500'});
     return _rows(res['data'], PosVersion.fromJson);
@@ -417,14 +544,13 @@ class HelpService {
     required String icon,
     required String iconColor,
   }) async {
-    // addHelpTopic reads php://input JSON, not $_POST.
     final res = await api.postJson('addHelpTopic', body: {
       'title': title,
       'description': description,
       'icon': icon,
       'iconColor': iconColor,
     });
-    return res['success'] != false; // returns inserted id on success
+    return res['success'] != false;
   }
 
   Future<bool> update({
@@ -463,44 +589,36 @@ class LicenseService {
     );
   }
 
-  /// licenseType: '0' = permanent, '1' = trial. expirationDate ignored when
-  /// permanent.
-  Future<bool> add({
-    required String licenseKey,
-    required String licenseType,
-    String? expirationDate,
-  }) async {
-    final res = await api.post('add_license_key', body: {
-      'license_key': licenseKey,
-      'license_type': licenseType,
-      'expiration_date': licenseType == '0' ? '' : (expirationDate ?? ''),
-    });
-    return res['success'] == true;
+  Future<({String? key, String message})> generateKey() async {
+    final res = await api.get('desktopGenerateLicenseKey');
+    final key = res['license_key']?.toString() ?? '';
+    return (
+      key: res['success'] == true && key.isNotEmpty ? key : null,
+      message: (res['message'] ?? '').toString(),
+    );
   }
 
-  Future<bool> update({
-    required int id,
-    required String licenseKey,
-    required String licenseType,
-    String? expirationDate,
-    String storeName = '',
-    String storeAddress = '',
-    String storeEmail = '',
-  }) async {
-    final res = await api.post('update_license_key', body: {
-      'license_id': '$id',
-      'license_key': licenseKey,
-      'license_type': licenseType,
-      'expiration_date': licenseType == '0' ? '' : (expirationDate ?? ''),
-      'store_name': storeName,
-      'store_address': storeAddress,
-      'store_email': storeEmail,
-    });
-    return res['success'] == true;
+  Future<Map<String, dynamic>?> getById(int id) async {
+    final res = await api.get('GetLicenseKeyByID', {'id': '$id'});
+    return res.isEmpty || res['id'] == null ? null : res;
   }
 
-  Future<bool> delete(int id) async {
+  Future<({bool ok, String message})> save(Map<String, String> form) async {
+    final action = (form['license_id'] ?? '').isNotEmpty
+        ? 'update_license_key'
+        : 'add_license_key';
+    final res = await api.post(action, body: form);
+    return (
+      ok: res['success'] == true,
+      message: (res['message'] ?? '').toString(),
+    );
+  }
+
+  Future<({bool ok, String message})> delete(int id) async {
     final res = await api.post('delete_license_key', body: {'id': '$id'});
-    return res['success'] == true;
+    return (
+      ok: res['success'] == true,
+      message: (res['message'] ?? '').toString(),
+    );
   }
 }

@@ -1,24 +1,17 @@
-/// Phase 1 — read-only Task tab. Renders the To do / Doing / Done
-/// sections matching the admin PHP layout. Tap-through, edits, and
-/// subtask drawers land in subsequent phases.
-///
-/// Backend dependency: needs an `api.php?action=getTasks` action that
-/// mirrors the SELECT in `utils/models/task-facade.php` and returns JSON
-/// `{success, tasks: [...]}`. Until that ships the screen shows a
-/// recoverable error state with retry.
-library;
-
-import 'dart:async';
-
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../models/task_models.dart';
+import '../services/live_sync.dart';
+import '../services/ops_data_service.dart';
 import '../services/task_service.dart';
 import '../theme.dart';
 import '../widgets/premium.dart';
 import 'add_task_screen.dart';
+import 'ops_task_roster.dart';
 import 'project_list_screen.dart';
 import 'task_detail_screen.dart';
+import '../widgets/tp_loader.dart';
 
 class TaskListScreen extends StatefulWidget {
   const TaskListScreen({super.key, required this.service});
@@ -29,218 +22,270 @@ class TaskListScreen extends StatefulWidget {
   State<TaskListScreen> createState() => _TaskListScreenState();
 }
 
-/// Top-of-screen section switcher — mirrors the web admin's
-/// "Projects / Tasks / Reporting" tab nav (reporting deferred).
 enum _Section { tasks, projects }
 
 class _TaskListScreenState extends State<TaskListScreen>
-    with WidgetsBindingObserver {
+    with LiveRefresh<TaskListScreen> {
   late Future<List<TaskItem>> _future;
-  /// Signature of the most recently rendered list. Used to skip
-  /// rebuilds when the periodic poll returns identical data — which
-  /// is what was yanking the user's scroll position back to the top
-  /// every 10 seconds.
-  String? _lastSig;
-  Timer? _pollTimer;
-  static const Duration _pollInterval = Duration(seconds: 10);
+  bool _silentSwap = false;
 
+  final _search = TextEditingController();
   _Section _section = _Section.tasks;
-  /// Active project filter — when set, [listTasks] is called with this
-  /// id so only that project's tasks show. Cleared by tapping the
-  /// "Clear filter" pill in the Tasks header.
   int? _projectFilter;
   String? _projectFilterName;
+  int _projectsNonce = 0;
+  final Set<TaskBucket> _collapsed = {};
+  OpsDataService? _ops;
+  Json? _roster;
+
+  bool get _isRoster => _roster?['is_super_admin'] == true;
+
+  Future<void> _loadRoster() async {
+    _ops ??= await OpsDataService.load();
+    final r = await _ops!.taskRoster();
+    if (mounted) setState(() => _roster = r);
+  }
 
   @override
   void initState() {
     super.initState();
+    _loadRoster();
     _future = widget.service.listTasks(projectId: _projectFilter);
-    WidgetsBinding.instance.addObserver(this);
-    _startPolling();
   }
 
   @override
   void dispose() {
-    _pollTimer?.cancel();
-    WidgetsBinding.instance.removeObserver(this);
+    _search.dispose();
     super.dispose();
   }
 
-  /// Pause/resume polling on app lifecycle changes so a backgrounded
-  /// app doesn't burn network or wake the device on a 10s cadence.
   @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
-      // Resuming after a stretch of background time is the most likely
-      // moment something changed server-side, so reload immediately
-      // rather than waiting up to 10s for the next poll tick.
-      _silentReload();
-      _startPolling();
-    } else {
-      _pollTimer?.cancel();
+  List<String> get liveKeys => const ['task'];
+
+  @override
+  void onLiveChange() {
+    if (_roster != null && _isRoster) {
+      _liveRoster();
+      if (_projectFilter == null) return;
     }
+    _silentReload();
   }
 
-  void _startPolling() {
-    _pollTimer?.cancel();
-    _pollTimer = Timer.periodic(_pollInterval, (_) => _silentReload());
-  }
-
-  /// Hash the bits of each task that change the rendered output, so we
-  /// can short-circuit identical poll responses. Order matters here —
-  /// reordering counts as a change because the server sorts by
-  /// sort_order / priority / due_date.
-  String _signatureOf(List<TaskItem> tasks) {
-    final b = StringBuffer();
-    for (final t in tasks) {
-      b.write(t.id);
-      b.write('|');
-      b.write(t.status.wire);
-      b.write('|');
-      b.write(t.priority.wire);
-      b.write('|');
-      b.write(t.dueDate?.toIso8601String() ?? '');
-      b.write('|');
-      b.write(t.title);
-      b.write(';');
+  Future<void> _liveRoster() async {
+    final ops = _ops;
+    if (ops == null) return;
+    final r = await ops.taskRoster();
+    if (!mounted || r['success'] == false || r['is_super_admin'] != true) {
+      return;
     }
-    return b.toString();
+    setState(() => _roster = r);
   }
 
-  /// Re-fetch without flashing the spinner. Compares the new list to
-  /// what's already on screen via a cheap string signature and only
-  /// triggers a setState when something actually changed — that way a
-  /// quiet 10s poll while the user is scrolling doesn't rebuild the
-  /// ListView and reset the scroll offset.
+  bool _silentBusy = false;
+
   Future<void> _silentReload() async {
-    if (!mounted) return;
+    if (!mounted || _silentBusy) return;
+    _silentBusy = true;
+    final filter = _projectFilter;
     try {
-      final fresh = await widget.service.listTasks(projectId: _projectFilter);
-      if (!mounted) return;
-      final sig = _signatureOf(fresh);
-      if (sig == _lastSig) return; // no-op, scroll stays put
-      _lastSig = sig;
+      final fresh = await widget.service.listTasks(projectId: filter);
+      if (!mounted || filter != _projectFilter) return;
       setState(() {
+        _silentSwap = true;
         _future = Future.value(fresh);
       });
     } catch (_) {
-      // Swallow — periodic poll shouldn't surface error toasts.
-      // The user-initiated pull-to-refresh path still shows errors.
+    } finally {
+      _silentBusy = false;
     }
   }
 
   Future<void> _reload() async {
     setState(() {
       _future = widget.service.listTasks(projectId: _projectFilter);
-      // Force the next silent-poll comparison to treat whatever lands
-      // next as fresh, so the user's explicit pull-to-refresh always
-      // surfaces in the UI even if the server hasn't changed anything.
-      _lastSig = null;
+      _silentSwap = false;
     });
-    await _future;
+    try {
+      await _future;
+    } catch (_) {}
   }
 
-  /// Called from the Projects view when the user taps a project card.
-  /// Filters the task list to that project and switches the active
-  /// section back to Tasks.
+  void _refresh() {
+    if (_isRoster && _section == _Section.tasks) {
+      _loadRoster();
+    } else if (_section == _Section.projects) {
+      setState(() => _projectsNonce++);
+    } else {
+      _reload();
+    }
+  }
+
   void _onOpenProject(Project p) {
     setState(() {
       _projectFilter = p.id;
       _projectFilterName = p.name;
       _section = _Section.tasks;
-      _lastSig = null;
+    });
+    _reload();
+  }
+
+  void _clearFilter() {
+    setState(() {
+      _projectFilter = null;
+      _projectFilterName = null;
     });
     _reload();
   }
 
   Future<void> _openAddTask() async {
-    final added = await Navigator.of(context).push<bool>(
-      MaterialPageRoute(
-        fullscreenDialog: true,
-        builder: (_) => AddTaskScreen(
-          service: widget.service,
-          currentUserId: widget.service.currentUserId,
-        ),
-      ),
+    final added = await AddTaskScreen.show(
+      context,
+      service: widget.service,
+      currentUserId: widget.service.currentUserId,
+      projectId: _projectFilter,
     );
     if (added == true) _reload();
   }
 
+  Future<void> _openTask(TaskItem task) async {
+    final changed = await TaskDetailScreen.show(
+      context,
+      task: task,
+      service: widget.service,
+    );
+    if (changed == true) _reload();
+  }
+
+  Future<void> _toggleTask(TaskItem task) async {
+    final next = task.isDone ? TaskStatus.pending : TaskStatus.completed;
+    try {
+      await widget.service.toggleStatus(task.id, next);
+      _reload();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Toggle failed: $e')));
+    }
+  }
+
+  Widget _rosterPage(BuildContext context) {
+    return Container(
+      color: context.brand.canvas,
+      padding: const EdgeInsets.fromLTRB(70, 10, 70, 0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _SectionTabs(
+            active: _section,
+            admin: true,
+            onChanged: (s) => setState(() => _section = s),
+            onReporting: () => launchUrl(Uri.parse(_ops!.url('reporting.php'))),
+            onExport: () => opsOpenTaskExport(context, _ops!),
+          ),
+          const SizedBox(height: 8),
+          Expanded(
+            child: _section == _Section.tasks
+                ? OpsTaskRoster(
+                    svc: _ops!,
+                    data: _roster!,
+                    onReload: _loadRoster,
+                  )
+                : ProjectListScreen(
+                    key: ValueKey(_projectsNonce),
+                    service: widget.service,
+                    onOpenProject: _onOpenProject,
+                    readOnly: true,
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final text = Theme.of(context).textTheme;
+    if (_roster == null) {
+      return Container(
+        color: context.brand.canvas,
+        alignment: Alignment.center,
+        child: const SizedBox(
+          width: 20,
+          height: 20,
+          child: TpLoader(strokeWidth: 2, color: Brand.signal),
+        ),
+      );
+    }
+    if (_isRoster && _projectFilter == null) return _rosterPage(context);
     final inTasks = _section == _Section.tasks;
-    final eyebrow = inTasks ? 'MY TASKS' : 'PROJECTS';
-    return Scaffold(
-      backgroundColor: context.brand.canvas,
-      floatingActionButton: inTasks
-          ? FloatingActionButton.extended(
+    return StationScaffold(
+      stationNumber: '09',
+      stationLabel: 'TASKS',
+      title: 'Task',
+      leading: _SectionTabs(
+        active: _section,
+        onChanged: (s) => setState(() => _section = s),
+      ),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (inTasks && _projectFilter != null) ...[
+            _FilterChip(
+              label: _projectFilterName ?? 'Project',
+              onClear: _clearFilter,
+            ),
+            const SizedBox(width: 10),
+          ],
+          if (inTasks) ...[
+            SearchField(
+              controller: _search,
+              hint: 'Search tasks…',
+              width: 260,
+              onChanged: (_) => setState(() {}),
+            ),
+            const SizedBox(width: 10),
+          ],
+          StationAction(
+            icon: Icons.refresh,
+            tooltip: 'Refresh',
+            onPressed: _refresh,
+          ),
+          if (inTasks) ...[
+            const SizedBox(width: 10),
+            SignalButton(
+              label: 'Add task',
+              icon: Icons.add,
               onPressed: _openAddTask,
-              backgroundColor: context.brand.signal,
-              foregroundColor: context.brand.canvas,
-              icon: const Icon(Icons.add),
-              label: const Text('ADD TASK',
-                  style: TextStyle(
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 1.5,
-                  )),
-            )
-          : null,
-      body: SafeArea(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            // Section tabs — Projects / Tasks toggle, matches the web
-            // admin's nav. Reporting parity comes in a later phase.
-            _SectionTabs(
-              active: _section,
-              onChanged: (s) => setState(() => _section = s),
             ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(20, 18, 20, 12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(eyebrow,
-                      style: text.labelLarge?.copyWith(
-                          letterSpacing: 2.4, color: context.brand.paperDim)),
-                  const SizedBox(height: 6),
-                  Text(
-                    inTasks ? 'Get things done' : 'Browse and pin work',
-                    style: text.headlineMedium
-                        ?.copyWith(color: context.brand.paper),
-                  ),
-                  if (inTasks && _projectFilter != null)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 10),
-                      child: _FilterChip(
-                        label: 'Filtered by ${_projectFilterName ?? "project"}',
-                        onClear: () {
-                          setState(() {
-                            _projectFilter = null;
-                            _projectFilterName = null;
-                            _lastSig = null;
-                          });
-                          _reload();
-                        },
-                      ),
+          ],
+        ],
+      ),
+      child: inTasks
+          ? WebCard(
+              padding: EdgeInsets.zero,
+              expandChild: true,
+              child: ColumnResizeScope(
+                tableId: 'tasks',
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    const WebTableHeader(
+                      cells: [
+                        SizedBox(width: 40),
+                        Expanded(child: Text('NAME')),
+                        SizedBox(width: 200, child: Text('ASSIGNEE')),
+                        SizedBox(width: 130, child: Text('DUE DATE')),
+                        SizedBox(width: 110, child: Text('PRIORITY')),
+                        SizedBox(width: 110, child: Text('STATUS')),
+                      ],
                     ),
-                ],
-              ),
-            ),
-            const Hairline(),
-            Expanded(
-              child: inTasks
-                  ? RefreshIndicator(
-                      color: context.brand.signal,
-                      backgroundColor: context.brand.surface,
-                      onRefresh: _reload,
+                    Expanded(
                       child: FutureBuilder<List<TaskItem>>(
                         future: _future,
                         builder: (context, snap) {
-                          if (snap.connectionState ==
-                              ConnectionState.waiting) {
-                            return const _CenteredSpinner();
+                          if (snap.connectionState == ConnectionState.waiting &&
+                              !(_silentSwap && snap.hasData)) {
+                            return const Center(child: TpLoader());
                           }
                           if (snap.hasError) {
                             return _ErrorState(
@@ -248,198 +293,208 @@ class _TaskListScreenState extends State<TaskListScreen>
                               onRetry: _reload,
                             );
                           }
-                          final tasks = snap.data ?? const <TaskItem>[];
-                          if (tasks.isEmpty) {
-                            return _EmptyState(onRetry: _reload);
+                          final all = snap.data ?? const <TaskItem>[];
+                          if (all.isEmpty) {
+                            return const EmptyState(
+                              icon: Icons.task_alt_outlined,
+                              label: 'No tasks yet',
+                              hint: 'Tasks delegated to you will appear here.',
+                            );
                           }
+                          final q = _search.text.trim().toLowerCase();
+                          final tasks = q.isEmpty
+                              ? all
+                              : all
+                                    .where(
+                                      (t) =>
+                                          t.title.toLowerCase().contains(q) ||
+                                          (t.projectName ?? '')
+                                              .toLowerCase()
+                                              .contains(q) ||
+                                          (t.primaryAssigneeName ?? '')
+                                              .toLowerCase()
+                                              .contains(q),
+                                    )
+                                    .toList();
                           return _TaskSections(
                             tasks: tasks,
+                            collapsed: _collapsed,
+                            onToggleGroup: (b) => setState(() {
+                              if (!_collapsed.remove(b)) _collapsed.add(b);
+                            }),
                             onOpen: _openTask,
                             onToggle: _toggleTask,
                           );
                         },
                       ),
-                    )
-                  : ProjectListScreen(
-                      service: widget.service,
-                      onOpenProject: _onOpenProject,
                     ),
+                  ],
+                ),
+              ),
+            )
+          : ProjectListScreen(
+              key: ValueKey(_projectsNonce),
+              service: widget.service,
+              onOpenProject: _onOpenProject,
             ),
-          ],
-        ),
-      ),
     );
-  }
-
-  Future<void> _openTask(TaskItem task) async {
-    // Phase 2 detail screen — opens the full-screen drawer-style view.
-    // After it returns, refresh in case the user edited anything.
-    final changed = await Navigator.of(context).push<bool>(
-      MaterialPageRoute(
-        builder: (_) => TaskDetailScreen(
-          taskId: task.id,
-          initial: task,
-          service: widget.service,
-        ),
-      ),
-    );
-    if (changed == true) _reload();
-  }
-
-  Future<void> _toggleTask(TaskItem task) async {
-    final next =
-        task.isDone ? TaskStatus.pending : TaskStatus.completed;
-    // Optimistic: update the in-flight future's cached list so the
-    // checkbox flips immediately. The next reload reconciles with the
-    // server's truth.
-    try {
-      await widget.service.toggleStatus(task.id, next);
-      _reload();
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Toggle failed: $e')),
-      );
-    }
   }
 }
 
-/// Splits the loaded tasks into the three buckets the admin uses
-/// (todo / doing / done) and renders them as collapsible-feeling
-/// sections. Phase 2: rows are tap-into and the round checkbox toggles
-/// status via the parent screen's callbacks.
+Color _bucketTone(BuildContext context, TaskBucket b) {
+  switch (b) {
+    case TaskBucket.todo:
+      return context.brand.paperDim;
+    case TaskBucket.doing:
+      return Brand.danger;
+    case TaskBucket.done:
+      return Brand.success;
+  }
+}
+
+String _bucketLabel(TaskBucket b) {
+  switch (b) {
+    case TaskBucket.todo:
+      return 'To do';
+    case TaskBucket.doing:
+      return 'Doing';
+    case TaskBucket.done:
+      return 'Done';
+  }
+}
+
+Color _priorityTone(TaskPriority p) {
+  switch (p) {
+    case TaskPriority.high:
+      return Brand.danger;
+    case TaskPriority.low:
+      return Brand.info;
+    case TaskPriority.medium:
+      return Brand.warning;
+  }
+}
+
 class _TaskSections extends StatelessWidget {
   const _TaskSections({
     required this.tasks,
+    required this.collapsed,
+    required this.onToggleGroup,
     required this.onOpen,
     required this.onToggle,
   });
 
   final List<TaskItem> tasks;
+  final Set<TaskBucket> collapsed;
+  final ValueChanged<TaskBucket> onToggleGroup;
   final void Function(TaskItem) onOpen;
   final void Function(TaskItem) onToggle;
 
   @override
   Widget build(BuildContext context) {
-    final todo = <TaskItem>[];
-    final doing = <TaskItem>[];
-    final done = <TaskItem>[];
+    final groups = <TaskBucket, List<TaskItem>>{
+      TaskBucket.todo: [],
+      TaskBucket.doing: [],
+      TaskBucket.done: [],
+    };
     for (final t in tasks) {
-      switch (t.bucket) {
-        case TaskBucket.todo:
-          todo.add(t);
-          break;
-        case TaskBucket.doing:
-          doing.add(t);
-          break;
-        case TaskBucket.done:
-          done.add(t);
-          break;
-      }
+      groups[t.bucket]!.add(t);
     }
-    Widget row(TaskItem t) => _TaskRow(
-          task: t,
-          onTap: () => onOpen(t),
-          onToggle: () => onToggle(t),
-        );
+    const empties = {
+      TaskBucket.todo: 'No tasks here — hit Add task above.',
+      TaskBucket.doing: 'Nothing overdue. Nice.',
+      TaskBucket.done: 'Nothing completed yet.',
+    };
     return ListView(
-      // PageStorageKey persists the scroll offset across rebuilds —
-      // when a real server-side change triggers a FutureBuilder
-      // rebuild, the ListView keeps the user where they were instead
-      // of snapping to the top.
       key: const PageStorageKey<String>('tk-task-list'),
-      padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
-      physics: const AlwaysScrollableScrollPhysics(),
       children: [
-        _SectionHeader(title: 'TO DO', count: todo.length, tone: context.brand.paperDim),
-        ...todo.map(row),
-        if (todo.isEmpty) _SectionEmpty(label: 'Nothing on the runway.'),
-        const SizedBox(height: 24),
-        _SectionHeader(
-          title: 'DOING',
-          count: doing.length,
-          tone: const Color(0xFFE05A2A), // amber-rose, matches PHP --tk-overdue
-        ),
-        ...doing.map(row),
-        if (doing.isEmpty) _SectionEmpty(label: 'Nothing overdue. Nice.'),
-        const SizedBox(height: 24),
-        _SectionHeader(
-          title: 'DONE',
-          count: done.length,
-          tone: const Color(0xFF35A776),
-        ),
-        ...done.map(row),
-        if (done.isEmpty) _SectionEmpty(label: 'Nothing completed yet.'),
+        for (final entry in groups.entries) ...[
+          _GroupHeader(
+            title: _bucketLabel(entry.key),
+            count: entry.value.length,
+            tone: _bucketTone(context, entry.key),
+            expanded: !collapsed.contains(entry.key),
+            onTap: () => onToggleGroup(entry.key),
+          ),
+          if (!collapsed.contains(entry.key)) ...[
+            for (final t in entry.value)
+              _TaskRow(
+                task: t,
+                onTap: () => onOpen(t),
+                onToggle: () => onToggle(t),
+              ),
+            if (entry.value.isEmpty)
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 72,
+                  vertical: 12,
+                ),
+                decoration: BoxDecoration(
+                  border: Border(bottom: BorderSide(color: context.brand.rule)),
+                ),
+                child: Text(
+                  empties[entry.key]!,
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ),
+          ],
+        ],
       ],
     );
   }
 }
 
-class _SectionHeader extends StatelessWidget {
-  const _SectionHeader({
+class _GroupHeader extends StatelessWidget {
+  const _GroupHeader({
     required this.title,
     required this.count,
     required this.tone,
+    required this.expanded,
+    required this.onTap,
   });
 
   final String title;
   final int count;
   final Color tone;
+  final bool expanded;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: Row(
-        children: [
-          Text(title,
-              style: text.labelLarge
-                  ?.copyWith(letterSpacing: 2.0, color: tone)),
-          const SizedBox(width: 8),
-          Container(
-            padding:
-                const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-            decoration: BoxDecoration(
-              color: context.brand.surfaceHi,
-              borderRadius: BorderRadius.circular(999),
-              border: Border.all(color: context.brand.rule),
-            ),
-            child: Text(
-              count.toString(),
-              style: text.labelSmall?.copyWith(
-                color: context.brand.paperDim,
-                fontFeatures: const [],
-              ),
+    return Material(
+      color: context.brand.surface,
+      child: InkWell(
+        onTap: onTap,
+        mouseCursor: SystemMouseCursors.click,
+        child: Container(
+          height: 44,
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          decoration: BoxDecoration(
+            border: Border(
+              bottom: BorderSide(color: context.brand.rule),
+              left: BorderSide(color: tone, width: 3),
             ),
           ),
-        ],
-      ),
-    );
-  }
-}
-
-class _SectionEmpty extends StatelessWidget {
-  const _SectionEmpty({required this.label});
-
-  final String label;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 4),
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-      decoration: BoxDecoration(
-        color: context.brand.surface,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: context.brand.rule),
-      ),
-      child: Text(
-        label,
-        style: Theme.of(context)
-            .textTheme
-            .bodySmall
-            ?.copyWith(color: context.brand.paperDim),
+          child: Row(
+            children: [
+              Icon(
+                expanded ? Icons.expand_more : Icons.chevron_right,
+                size: 20,
+                color: context.brand.paperDim,
+              ),
+              const SizedBox(width: 8),
+              Text(
+                title,
+                style: text.titleSmall?.copyWith(
+                  fontWeight: FontWeight.w700,
+                  color: context.brand.paper,
+                ),
+              ),
+              const SizedBox(width: 8),
+              StatusPill(label: '$count', color: tone),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -460,173 +515,178 @@ class _TaskRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
     final done = task.isDone;
-    return Container(
-      margin: const EdgeInsets.only(bottom: 8),
-      decoration: BoxDecoration(
-        color: context.brand.surface,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: context.brand.rule),
-      ),
-      child: Material(
-        color: Colors.transparent,
-        borderRadius: BorderRadius.circular(10),
-        child: InkWell(
-          onTap: onTap,
-          borderRadius: BorderRadius.circular(10),
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                GestureDetector(
-                  // Independent hit target — toggles the task without
-                  // opening the detail drawer when the user taps the
-                  // round circle on the leading edge.
-                  behavior: HitTestBehavior.opaque,
-                  onTap: onToggle,
-                  child: Container(
-                    width: 22,
-                    height: 22,
-                    margin: const EdgeInsets.only(top: 1, right: 10),
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: done ? const Color(0xFF35A776) : Colors.transparent,
-                      border: Border.all(
-                        color: done ? const Color(0xFF35A776) : context.brand.rule,
-                        width: 1.5,
-                      ),
-                    ),
-                    child: done
-                        ? const Icon(Icons.check, size: 12, color: Colors.white)
-                        : null,
-                  ),
-                ),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  task.title,
-                  style: text.titleSmall?.copyWith(
-                    color: done ? context.brand.paperDim : context.brand.paper,
-                    decoration:
-                        done ? TextDecoration.lineThrough : TextDecoration.none,
-                    decorationColor: context.brand.paperDim,
-                  ),
-                ),
-                if (task.projectName != null && task.projectName!.isNotEmpty ||
-                    task.parentTitle != null && task.parentTitle!.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 4),
-                    child: Wrap(
-                      spacing: 6,
-                      runSpacing: 4,
-                      children: [
-                        if (task.projectName?.isNotEmpty == true)
-                          _MetaChip(
-                            icon: Icons.folder_open_outlined,
-                            label: task.projectName!,
-                          ),
-                        if (task.parentTitle?.isNotEmpty == true)
-                          _MetaChip(
-                            icon: Icons.subdirectory_arrow_right,
-                            label: 'Subtask of ${task.parentTitle}',
-                          ),
-                      ],
+    final hasProject = task.projectName?.isNotEmpty == true;
+    final hasParent = task.parentTitle?.isNotEmpty == true;
+    final assignee = task.primaryAssigneeName ?? '';
+    return WebTableRow(
+      onTap: onTap,
+      cells: [
+        SizedBox(
+          width: 40,
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: Tooltip(
+              message: done ? 'Mark as not done' : 'Mark complete',
+              child: InkWell(
+                onTap: onToggle,
+                mouseCursor: SystemMouseCursors.click,
+                customBorder: const CircleBorder(),
+                child: Container(
+                  width: 20,
+                  height: 20,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: done ? Brand.success : Colors.transparent,
+                    border: Border.all(
+                      color: done ? Brand.success : Brand.inputBorder,
+                      width: 1.5,
                     ),
                   ),
-                Padding(
-                  padding: const EdgeInsets.only(top: 6),
-                  child: Row(
-                    children: [
-                      if (task.dueDate != null) ...[
-                        Icon(Icons.event,
-                            size: 12,
-                            color: task.isOverdue
-                                ? const Color(0xFFE05A2A)
-                                : context.brand.paperDim),
-                        const SizedBox(width: 4),
-                        Text(
-                          _shortDate(task.dueDate!),
-                          style: text.labelSmall?.copyWith(
-                              color: task.isOverdue
-                                  ? const Color(0xFFE05A2A)
-                                  : context.brand.paperDim),
-                        ),
-                        const SizedBox(width: 10),
-                      ],
-                      _PriorityDot(priority: task.priority),
-                      const SizedBox(width: 4),
-                      Text(
-                        task.priority.wire.toUpperCase(),
-                        style: text.labelSmall?.copyWith(
-                            color: context.brand.paperDim, letterSpacing: 1.5),
-                      ),
-                      const Spacer(),
-                      if ((task.primaryAssigneeName ?? '').isNotEmpty)
-                        Container(
-                          width: 22,
-                          height: 22,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: context.brand.signal,
-                          ),
-                          alignment: Alignment.center,
-                          child: Text(
-                            task.primaryAssigneeName![0].toUpperCase(),
-                            style: TextStyle(
-                              color: context.brand.canvas,
-                              fontSize: 10,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                        ),
-                    ],
-                  ),
+                  child: done
+                      ? const Icon(Icons.check, size: 12, color: Colors.white)
+                      : null,
                 ),
-              ],
+              ),
             ),
           ),
+        ),
+        Expanded(
+          child: Padding(
+            padding: const EdgeInsets.only(right: 12),
+            child: Row(
+              children: [
+                Flexible(
+                  child: Text(
+                    task.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: text.bodyMedium?.copyWith(
+                      fontWeight: FontWeight.w600,
+                      color: done
+                          ? context.brand.paperDim
+                          : context.brand.paper,
+                      decoration: done
+                          ? TextDecoration.lineThrough
+                          : TextDecoration.none,
+                      decorationColor: context.brand.paperDim,
+                    ),
+                  ),
+                ),
+                if (hasProject) ...[
+                  const SizedBox(width: 8),
+                  _MetaChip(
+                    icon: Icons.folder_open_outlined,
+                    label: task.projectName!,
+                  ),
+                ],
+                if (hasParent) ...[
+                  const SizedBox(width: 6),
+                  _MetaChip(
+                    icon: Icons.subdirectory_arrow_right,
+                    label: 'Subtask of ${task.parentTitle}',
+                  ),
+                ],
               ],
             ),
           ),
         ),
-      ),
+        SizedBox(
+          width: 200,
+          child: assignee.isEmpty
+              ? Text('—', style: text.bodySmall)
+              : Row(
+                  children: [
+                    CircleAvatar(
+                      radius: 11,
+                      backgroundColor: Brand.signal,
+                      child: Text(
+                        assignee[0].toUpperCase(),
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 10.5,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        assignee,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: text.bodyMedium,
+                      ),
+                    ),
+                  ],
+                ),
+        ),
+        SizedBox(
+          width: 130,
+          child: task.dueDate == null
+              ? Text('—', style: text.bodySmall)
+              : Row(
+                  children: [
+                    Icon(
+                      Icons.event,
+                      size: 14,
+                      color: task.isOverdue
+                          ? Brand.danger
+                          : context.brand.paperDim,
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      _shortDate(task.dueDate!),
+                      style: text.bodyMedium?.copyWith(
+                        color: task.isOverdue ? Brand.danger : null,
+                      ),
+                    ),
+                  ],
+                ),
+        ),
+        SizedBox(
+          width: 110,
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: StatusPill(
+              label: task.priority.wire.toUpperCase(),
+              color: _priorityTone(task.priority),
+            ),
+          ),
+        ),
+        SizedBox(
+          width: 110,
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: StatusPill(
+              label:
+                  (task.statusLabel.isEmpty
+                          ? _bucketLabel(task.bucket)
+                          : task.statusLabel)
+                      .toUpperCase(),
+              color: _bucketTone(context, task.bucket),
+            ),
+          ),
+        ),
+      ],
     );
   }
 
   static String _shortDate(DateTime d) {
     const months = [
-      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
     ];
-    return '${months[d.month - 1]} ${d.day}';
-  }
-}
-
-class _PriorityDot extends StatelessWidget {
-  const _PriorityDot({required this.priority});
-  final TaskPriority priority;
-
-  @override
-  Widget build(BuildContext context) {
-    Color c;
-    switch (priority) {
-      case TaskPriority.high:
-        c = const Color(0xFFE05A2A);
-        break;
-      case TaskPriority.low:
-        c = const Color(0xFF7AA3E0);
-        break;
-      case TaskPriority.medium:
-        c = const Color(0xFFE0B14C);
-        break;
-    }
-    return Container(
-      width: 8,
-      height: 8,
-      decoration: BoxDecoration(color: c, shape: BoxShape.circle),
-    );
+    return '${months[d.month - 1]} ${d.day}, ${d.year}';
   }
 }
 
@@ -638,76 +698,32 @@ class _MetaChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-      decoration: BoxDecoration(
-        color: context.brand.surfaceHi,
-        borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: context.brand.rule),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 11, color: context.brand.paperDim),
-          const SizedBox(width: 4),
-          Text(
-            label,
-            overflow: TextOverflow.ellipsis,
-            style: Theme.of(context)
-                .textTheme
-                .labelSmall
-                ?.copyWith(color: context.brand.paperDim, letterSpacing: 0.5),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _CenteredSpinner extends StatelessWidget {
-  const _CenteredSpinner();
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: SizedBox(
-        width: 20,
-        height: 20,
-        child:
-            CircularProgressIndicator(strokeWidth: 2, color: context.brand.signal),
-      ),
-    );
-  }
-}
-
-class _EmptyState extends StatelessWidget {
-  const _EmptyState({required this.onRetry});
-  final Future<void> Function() onRetry;
-
-  @override
-  Widget build(BuildContext context) {
-    final text = Theme.of(context).textTheme;
-    return ListView(
-      physics: const AlwaysScrollableScrollPhysics(),
-      padding: const EdgeInsets.fromLTRB(20, 40, 20, 20),
-      children: [
-        Center(
-          child: Column(
-            children: [
-              Icon(Icons.task_alt_outlined,
-                  size: 36, color: context.brand.paperDim),
-              const SizedBox(height: 12),
-              Text('No tasks yet',
-                  style: text.titleMedium?.copyWith(color: context.brand.paper)),
-              const SizedBox(height: 6),
-              Text(
-                'Tasks delegated to you will appear here.',
-                textAlign: TextAlign.center,
-                style: text.bodySmall?.copyWith(color: context.brand.paperDim),
-              ),
-            ],
-          ),
+    return Flexible(
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+        decoration: BoxDecoration(
+          color: context.brand.surfaceHi,
+          borderRadius: BorderRadius.circular(999),
+          border: Border.all(color: context.brand.rule),
         ),
-      ],
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 12, color: context.brand.paperDim),
+            const SizedBox(width: 4),
+            Flexible(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(
+                  context,
+                ).textTheme.bodySmall?.copyWith(color: context.brand.paperDim),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -720,108 +736,144 @@ class _ErrorState extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
-    return ListView(
-      physics: const AlwaysScrollableScrollPhysics(),
-      padding: const EdgeInsets.fromLTRB(20, 40, 20, 20),
-      children: [
-        Center(
-          child: Column(
-            children: [
-              Icon(Icons.error_outline,
-                  size: 36, color: context.brand.paperDim),
-              const SizedBox(height: 12),
-              Text('Could not load tasks',
-                  style: text.titleMedium?.copyWith(color: context.brand.paper)),
-              const SizedBox(height: 6),
-              Text(
-                error,
-                textAlign: TextAlign.center,
-                style: text.bodySmall?.copyWith(color: context.brand.paperDim),
-              ),
-              const SizedBox(height: 16),
-              OutlinedButton(
-                onPressed: onRetry,
-                style: OutlinedButton.styleFrom(
-                  side: BorderSide(color: context.brand.signal),
-                  foregroundColor: context.brand.signal,
-                ),
-                child: const Text('RETRY'),
-              ),
-            ],
-          ),
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const IconTile(
+              icon: Icons.error_outline,
+              size: 52,
+              color: Brand.danger,
+            ),
+            const SizedBox(height: 14),
+            Text('Could not load tasks', style: text.titleMedium),
+            const SizedBox(height: 4),
+            Text(error, textAlign: TextAlign.center, style: text.bodySmall),
+            const SizedBox(height: 16),
+            GhostButton(
+              label: 'Retry',
+              icon: Icons.refresh,
+              onPressed: onRetry,
+            ),
+          ],
         ),
-      ],
+      ),
     );
   }
 }
 
-
-/// Top section tabs — PROJECTS / TASKS toggle. Matches the web admin
-/// shell so users get the same hierarchy on mobile.
 class _SectionTabs extends StatelessWidget {
-  const _SectionTabs({required this.active, required this.onChanged});
+  const _SectionTabs({
+    required this.active,
+    required this.onChanged,
+    this.admin = false,
+    this.onReporting,
+    this.onExport,
+  });
 
   final _Section active;
   final ValueChanged<_Section> onChanged;
+  final bool admin;
+  final VoidCallback? onReporting;
+  final VoidCallback? onExport;
 
   @override
   Widget build(BuildContext context) {
-    Widget tab(_Section s, String label, IconData icon) {
-      final isActive = s == active;
-      return Expanded(
-        child: Material(
-          color: Colors.transparent,
-          child: InkWell(
-            onTap: () => onChanged(s),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(vertical: 14),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(icon,
-                      size: 16,
-                      color: isActive
-                          ? context.brand.signal
-                          : context.brand.paperDim),
-                  const SizedBox(width: 8),
-                  Text(
-                    label,
-                    style: TextStyle(
-                      color: isActive
-                          ? context.brand.signal
-                          : context.brand.paperDim,
-                      fontWeight:
-                          isActive ? FontWeight.w700 : FontWeight.w500,
-                      letterSpacing: 2.0,
-                      fontSize: 11,
+    Widget tab(
+      String label,
+      IconData icon,
+      bool isActive,
+      VoidCallback onTap, {
+      bool boxed = false,
+    }) {
+      final c = isActive ? const Color(0xFFD86700) : context.brand.paperDim;
+      return InkWell(
+        onTap: onTap,
+        mouseCursor: SystemMouseCursors.click,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(6)),
+        child: Container(
+          height: admin ? 46 : 56,
+          padding: const EdgeInsets.symmetric(horizontal: 14),
+          decoration: BoxDecoration(
+            color: boxed ? context.brand.surfaceHi : null,
+            borderRadius: boxed ? BorderRadius.circular(4) : null,
+            border: boxed
+                ? Border.all(color: context.brand.paperDim, width: 1.5)
+                : Border(
+                    bottom: BorderSide(
+                      color: isActive ? Brand.signal : Colors.transparent,
+                      width: 2,
                     ),
                   ),
-                ],
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 16, color: c),
+              const SizedBox(width: 8),
+              Text(
+                label,
+                style: TextStyle(
+                  color: isActive
+                      ? c
+                      : context.brand.paper.withValues(alpha: 0.85),
+                  fontWeight: isActive ? FontWeight.w600 : FontWeight.w500,
+                  fontSize: 14.5,
+                ),
               ),
-            ),
+            ],
           ),
         ),
       );
     }
 
+    final row = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        tab(
+          'Projects',
+          Icons.folder_open_outlined,
+          active == _Section.projects,
+          () => onChanged(_Section.projects),
+        ),
+        const SizedBox(width: 4),
+        tab(
+          'Tasks',
+          Icons.check_circle_outline,
+          active == _Section.tasks,
+          () => onChanged(_Section.tasks),
+        ),
+        if (admin) ...[
+          const SizedBox(width: 4),
+          tab('Reporting', Icons.bar_chart, false, onReporting ?? () {}),
+          const SizedBox(width: 4),
+          tab(
+            'Export',
+            Icons.description_outlined,
+            false,
+            onExport ?? () {},
+            boxed: true,
+          ),
+        ],
+      ],
+    );
+    final scroller = SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: row,
+    );
+    if (!admin) return scroller;
     return Container(
       decoration: BoxDecoration(
-        border: Border(
-          bottom: BorderSide(color: context.brand.rule, width: 1),
-        ),
+        border: Border(bottom: BorderSide(color: context.brand.rule)),
       ),
-      child: Row(
-        children: [
-          tab(_Section.projects, "PROJECTS", Icons.folder_open_outlined),
-          tab(_Section.tasks, "TASKS", Icons.check_circle_outline),
-        ],
-      ),
+      alignment: Alignment.centerLeft,
+      child: scroller,
     );
   }
 }
 
-/// Small dismissible pill shown under the Tasks header when a project
-/// filter is active. Tapping the × clears the filter and reloads.
 class _FilterChip extends StatelessWidget {
   const _FilterChip({required this.label, required this.onClear});
 
@@ -831,32 +883,38 @@ class _FilterChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.fromLTRB(10, 4, 4, 4),
+      height: 32,
+      padding: const EdgeInsets.fromLTRB(10, 0, 2, 0),
       decoration: BoxDecoration(
-        color: context.brand.signalGlow(0.12),
+        color: Brand.signalGlow(0.10),
         borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: context.brand.signal),
+        border: Border.all(color: Brand.signalGlow(0.5)),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(Icons.filter_alt_outlined,
-              size: 12, color: context.brand.signal),
+          const Icon(Icons.filter_alt_outlined, size: 14, color: Brand.signal),
           const SizedBox(width: 6),
-          Text(
-            label,
-            style: TextStyle(
-              color: context.brand.signal,
-              fontWeight: FontWeight.w600,
-              fontSize: 12,
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 180),
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: Brand.signal,
+                fontWeight: FontWeight.w600,
+                fontSize: 13,
+              ),
             ),
           ),
           IconButton(
+            tooltip: 'Clear project filter',
             onPressed: onClear,
             iconSize: 14,
             padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
-            icon: Icon(Icons.close, color: context.brand.signal),
+            constraints: const BoxConstraints(minWidth: 26, minHeight: 26),
+            icon: const Icon(Icons.close, color: Brand.signal),
           ),
         ],
       ),

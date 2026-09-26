@@ -7,17 +7,6 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import '../api_client.dart';
 import '../models/chat_models.dart';
 
-/// Soketi connection config. By default the host is derived from the API
-/// base URL so a single `--dart-define=TPS_BASE_URL=https://support.tinkerpro.io`
-/// configures both HTTP and WebSocket. Override only the bits that genuinely
-/// differ from the API host:
-///
-///   --dart-define=CHAT_SOKETI_PORT=6001       # default 6001 (use 443 on live)
-///   --dart-define=CHAT_SOKETI_KEY=…           # default tinkerpro-chat-key
-///   --dart-define=CHAT_SOKETI_TLS=true        # default: matches API scheme
-///   --dart-define=CHAT_SOKETI_PATH=/soketi    # nginx proxy prefix on live
-///   --dart-define=CHAT_SOKETI_HOST=…          # only if Soketi runs on a
-///                                             # different host than the API
 class ChatRealtimeConfig {
   const ChatRealtimeConfig({
     required this.apiKey,
@@ -32,14 +21,8 @@ class ChatRealtimeConfig {
   final int port;
   final bool useTls;
 
-  /// Optional URL path prefix Soketi is proxied under (e.g. `/soketi` when
-  /// nginx fronts it on the main 443 vhost). Empty when Soketi is reached
-  /// at the host root (direct port, or a dedicated subdomain).
   final String path;
 
-  /// Build a config given the API base URL the rest of the app already uses.
-  /// If [CHAT_SOKETI_HOST] is set, that wins — useful when Soketi runs on a
-  /// different host than PHP.
   factory ChatRealtimeConfig.fromBaseUrl(String baseUrl) {
     const apiKey = String.fromEnvironment(
       'CHAT_SOKETI_KEY',
@@ -75,12 +58,8 @@ class ChatRealtimeConfig {
     );
   }
 
-  /// Wire URL per the Pusher protocol v7:
-  ///   ws(s)://host:port[/prefix]/app/{key}?protocol=7&client=tinkerpro&version=1.0
   Uri wsUri() {
     final scheme = useTls ? 'wss' : 'ws';
-    // Normalise the optional proxy prefix: '' → none; 'soketi' or '/soketi/'
-    // → '/soketi'. The '/app/...' Pusher path is appended after it.
     final prefix =
         path.isEmpty ? '' : '/${path.replaceAll(RegExp(r'^/+|/+$'), '')}';
     return Uri.parse(
@@ -89,18 +68,6 @@ class ChatRealtimeConfig {
   }
 }
 
-/// Hand-rolled minimal Pusher-protocol client. Intentionally implements
-/// only what Phase 1 needs:
-///
-///   * subscribe to `private-user-{me}` and `private-conv-{id}`
-///   * subscribe to `presence-global-staff` with presence payload
-///   * receive `message.new` / `conversation.activity` events
-///   * maintain `onlineUsers` from presence events
-///   * pause/resume/disconnect over the app lifecycle
-///   * auto-reconnect on drop with exponential backoff
-///
-/// Delivery is best-effort. Any drop is recovered by the REST hydrate
-/// that runs on [resume] — see ChatInbox.reload and ChatThread.loadInitial.
 class ChatRealtimeService {
   ChatRealtimeService(this.api, {ChatRealtimeConfig? config})
       : _config = config ?? ChatRealtimeConfig.fromBaseUrl(api.baseUrl);
@@ -128,40 +95,35 @@ class ChatRealtimeService {
   final _typingEvents = StreamController<TypingEvent>.broadcast();
   final _callSignalEvents = StreamController<CallSignal>.broadcast();
   final _pinEvents = StreamController<PinUpdate>.broadcast();
+  final _appNotificationEvents =
+      StreamController<Map<String, dynamic>>.broadcast();
+  final _activityRawEvents =
+      StreamController<Map<String, dynamic>>.broadcast();
+  final _reactionEvents = StreamController<Map<String, dynamic>>.broadcast();
+
+  Stream<Map<String, dynamic>> get activityRawEvents =>
+      _activityRawEvents.stream;
+
+  Stream<Map<String, dynamic>> get reactionEvents => _reactionEvents.stream;
 
   Stream<ConversationActivity> get inboxEvents => _inboxEvents.stream;
   Stream<Message> get messageEvents => _messageEvents.stream;
 
-  /// Inbound WebRTC signaling: offer/answer/ICE/control frames forwarded by
-  /// the server on the per-user channel. CallService is the sole consumer.
+  Stream<Map<String, dynamic>> get appNotificationEvents =>
+      _appNotificationEvents.stream;
+
   Stream<CallSignal> get callSignalEvents => _callSignalEvents.stream;
 
-  /// Fires on every `typing` event from any subscribed conversation. Carries
-  /// the conversation id so a single listener (the open thread) can filter.
   Stream<TypingEvent> get typingEvents => _typingEvents.stream;
 
-  /// Fires when the current user is added to a conversation
-  /// (`conversation.created`) or removed from one (`conversation.removed`).
-  /// Drives ChatInbox to re-hydrate from REST.
   Stream<ConversationLifecycle> get lifecycleEvents => _lifecycleEvents.stream;
 
-  /// Fires whenever a participant's read cursor advances. Drives the
-  /// "Seen by N" UI re-render in open threads.
   Stream<MessageRead> get readEvents => _readEvents.stream;
 
-  /// Fires when a message is pinned (`pinned` non-null) or unpinned
-  /// (`pinned` null) in a subscribed conversation. The open thread filters
-  /// by conversation id.
   Stream<PinUpdate> get pinEvents => _pinEvents.stream;
 
-  /// Conversation id the user currently has on screen. PushService consults
-  /// this to decide whether to suppress an FCM notification for a chat
-  /// message that just arrived for the same conversation. Set/cleared by
-  /// ChatThreadScreen on init/dispose.
   final ValueNotifier<int?> currentlyViewedConv = ValueNotifier<int?>(null);
 
-  /// Live set of user ids currently on `presence-global-staff`. Widgets
-  /// that care about presence listen to this notifier.
   final ValueNotifier<Set<int>> onlineUsers = ValueNotifier<Set<int>>(<int>{});
 
   bool get isConnected => _connected;
@@ -228,10 +190,11 @@ class ChatRealtimeService {
     await _typingEvents.close();
     await _callSignalEvents.close();
     await _pinEvents.close();
+    await _appNotificationEvents.close();
+    await _activityRawEvents.close();
+    await _reactionEvents.close();
     currentlyViewedConv.dispose();
   }
-
-  // ─────────────────────────────────── internals ─────────────────────────────
 
   Future<void> _openSocket() async {
     if (_disposed) return;
@@ -240,11 +203,6 @@ class ChatRealtimeService {
     WebSocketChannel? channel;
     try {
       channel = WebSocketChannel.connect(_config.wsUri());
-      // Awaiting the handshake here is important — without it, a failed
-      // connection (e.g. Soketi not running) surfaces as an UNHANDLED
-      // future error from `channel.ready`, which the stream's onError
-      // doesn't catch. The try/catch below would also miss it. So we
-      // await explicitly so the error funnels into _scheduleReconnect.
       await channel.ready;
       if (_disposed) {
         await channel.sink.close();
@@ -258,8 +216,6 @@ class ChatRealtimeService {
         cancelOnError: true,
       );
     } catch (_) {
-      // Soketi unreachable / handshake failed / TLS mismatch / etc.
-      // All of these reduce to "try again later".
       try {
         await channel?.sink.close();
       } catch (_) {}
@@ -294,7 +250,7 @@ class ChatRealtimeService {
   void _scheduleReconnect() {
     if (_disposed || !_wantConnected) return;
     _reconnectAttempts = (_reconnectAttempts + 1).clamp(1, 6);
-    final delayMs = 500 * (1 << (_reconnectAttempts - 1)); // 500, 1s, 2s, 4s, 8s, 16s
+    final delayMs = 500 * (1 << (_reconnectAttempts - 1));
     _reconnectTimer?.cancel();
     _reconnectTimer = Timer(Duration(milliseconds: delayMs), _openSocket);
   }
@@ -367,6 +323,16 @@ class ChatRealtimeService {
       case 'call.signal':
         _forwardCallSignal(data);
         break;
+      case 'message.reaction':
+        if (data != null && !_reactionEvents.isClosed) {
+          _reactionEvents.add(data);
+        }
+        break;
+      case 'app.notification':
+        if (data != null && !_appNotificationEvents.isClosed) {
+          _appNotificationEvents.add(data);
+        }
+        break;
     }
   }
 
@@ -388,7 +354,6 @@ class ChatRealtimeService {
     _connected = true;
     _reconnectAttempts = 0;
 
-    // Re-subscribe to every channel we want.
     for (final ch in _pendingSubscribes.toList()) {
       await _sendSubscribe(ch);
     }
@@ -454,6 +419,7 @@ class ChatRealtimeService {
   void _forwardActivity(Map<String, dynamic>? data) {
     if (data == null || _inboxEvents.isClosed) return;
     _inboxEvents.add(ConversationActivity.fromJson(data));
+    if (!_activityRawEvents.isClosed) _activityRawEvents.add(data);
   }
 
   void _forwardLifecycle(Map<String, dynamic>? data, {required bool added}) {

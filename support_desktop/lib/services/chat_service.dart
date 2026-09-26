@@ -243,6 +243,22 @@ class ChatService {
         'chat.downloadAttachment', {'id': attachmentId.toString()});
   }
 
+  /// WebRTC ICE configuration (STUN + ephemeral TURN credentials) minted by
+  /// `chat.iceServers`. Fetched per call rather than hardcoded so TURN
+  /// credentials stay short-lived and the relay can be changed server-side
+  /// without shipping a new build. Returns null on any failure so the caller
+  /// keeps whatever config it already had.
+  Future<Map<String, dynamic>?> iceServers() async {
+    try {
+      final res = await api.post('chat.iceServers', body: {});
+      if (res['success'] == true && res['iceServers'] is List) {
+        return Map<String, dynamic>.from(res);
+      }
+    } catch (_) {}
+    return null;
+  }
+
+
   /// Forward a WebRTC signaling frame to [peerId]. Stateless from the
   /// server's perspective — the call lifecycle lives on the two clients.
   /// [kind] is one of: offer | answer | ice | ringing | accept | decline | end | busy.
