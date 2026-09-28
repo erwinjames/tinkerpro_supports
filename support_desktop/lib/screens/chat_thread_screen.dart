@@ -281,6 +281,25 @@ class _ChatThreadScreenState extends State<ChatThreadScreen> {
     return 'User $senderId';
   }
 
+  static const _agentTints = [
+    Color(0xFF2563EB), Color(0xFF7C3AED), Color(0xFF0F766E), Color(0xFFC2410C),
+    Color(0xFFBE123C), Color(0xFF0891B2), Color(0xFFA21CAF), Color(0xFF4F46E5),
+    Color(0xFF4D7C0F), Color(0xFFB45309), Color(0xFF1D4ED8), Color(0xFF9333EA),
+  ];
+
+  Color? _senderTint(int senderId) {
+    for (final p in _participants) {
+      if (int.tryParse('${p['id']}') != senderId) continue;
+      if ('${p['username'] ?? ''}'.startsWith('fb_ai_')) {
+        return const Color(0xFF475569);
+      }
+      final role = '${p['role'] ?? ''}'.toLowerCase();
+      if (role == 'customer' || role == 'guest') return null;
+      return _agentTints[((senderId * 7) + 3) % _agentTints.length];
+    }
+    return null;
+  }
+
   ChatConvMeta get _meta => _ui.meta(widget.conversationId);
 
   Future<void> _refreshTicketStatuses() async {
@@ -1599,10 +1618,17 @@ class _ChatThreadScreenState extends State<ChatThreadScreen> {
                 !_sameDay(m.createdAt, msgs[i + 1].createdAt);
             final quoted = _parseQuoted(m.body);
             final canAct = m.id != null && m.status == MessageStatus.sent;
+            final isFb = _meta.isFacebook;
+            final tint = mine ? null : _senderTint(m.senderId);
+            final groupedAbove = i < msgs.length - 1 &&
+                _isGrouped(msgs[i + 1], m);
+            final showSender = !groupedAbove && (!mine || isFb);
 
             Widget bubble = _MessageBubble(
               message: m,
               mine: mine,
+              tint: tint,
+              senderLabel: showSender ? _senderName(m.senderId) : null,
               maxWidth: maxBubble,
               isNewestMine: isNewestMine,
               suppressMeta: groupedBelow && !isNewestMine,
@@ -2476,6 +2502,8 @@ class _MessageBubble extends StatelessWidget {
     required this.service,
     required this.theme,
     required this.maxWidth,
+    this.tint,
+    this.senderLabel,
     this.isNewestMine = false,
     this.suppressMeta = false,
     this.grouped = false,
@@ -2494,6 +2522,8 @@ class _MessageBubble extends StatelessWidget {
 
   final Message message;
   final bool mine;
+  final Color? tint;
+  final String? senderLabel;
   final ChatTheme theme;
   final double maxWidth;
   final bool isNewestMine;
@@ -2618,6 +2648,19 @@ class _MessageBubble extends StatelessWidget {
       child: Column(
         crossAxisAlignment: align,
         children: [
+          if (senderLabel != null)
+            Padding(
+              padding: const EdgeInsets.only(left: 4, right: 4, bottom: 3),
+              child: Text(
+                senderLabel!,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                  color: tint ?? tk.muted,
+                ),
+              ),
+            ),
           if (quoted != null && !hasBody) _quoteBlock(context, tk),
           if (message.attachments.isNotEmpty) ...[
             _AttachmentList(
@@ -2637,7 +2680,13 @@ class _MessageBubble extends StatelessWidget {
                 padding:
                     const EdgeInsets.symmetric(horizontal: 16, vertical: 11),
                 decoration: BoxDecoration(
-                  color: mine ? _mineColor : tk.surface,
+                  color: mine
+                      ? _mineColor
+                      : tint != null
+                          ? Color.alphaBlend(
+                              tint!.withValues(alpha: tk.dark ? 0.22 : 0.10),
+                              tk.surface)
+                          : tk.surface,
                   borderRadius: BorderRadius.only(
                     topLeft: r,
                     topRight: r,
@@ -2646,7 +2695,10 @@ class _MessageBubble extends StatelessWidget {
                   ),
                   border: mine
                       ? null
-                      : Border.all(color: tk.borderSoft, width: 1),
+                      : tint != null
+                          ? Border.all(
+                              color: tint!.withValues(alpha: 0.45), width: 1)
+                          : Border.all(color: tk.borderSoft, width: 1),
                   boxShadow: mine
                       ? [
                           BoxShadow(
