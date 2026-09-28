@@ -287,6 +287,15 @@ class _ChatThreadScreenState extends State<ChatThreadScreen> {
     Color(0xFF4D7C0F), Color(0xFFB45309), Color(0xFF1D4ED8), Color(0xFF9333EA),
   ];
 
+  bool _isFbPageSender(int senderId) {
+    for (final p in _participants) {
+      if (int.tryParse('${p['id']}') == senderId) {
+        return '${p['username'] ?? ''}'.startsWith('fb_ai_');
+      }
+    }
+    return false;
+  }
+
   Color? _senderTint(int senderId) {
     for (final p in _participants) {
       if (int.tryParse('${p['id']}') != senderId) continue;
@@ -1628,6 +1637,7 @@ class _ChatThreadScreenState extends State<ChatThreadScreen> {
               message: m,
               mine: mine,
               tint: tint,
+              fbPage: !mine && isFb && _isFbPageSender(m.senderId),
               senderLabel: showSender ? _senderName(m.senderId) : null,
               maxWidth: maxBubble,
               isNewestMine: isNewestMine,
@@ -2503,6 +2513,7 @@ class _MessageBubble extends StatelessWidget {
     required this.theme,
     required this.maxWidth,
     this.tint,
+    this.fbPage = false,
     this.senderLabel,
     this.isNewestMine = false,
     this.suppressMeta = false,
@@ -2523,6 +2534,7 @@ class _MessageBubble extends StatelessWidget {
   final Message message;
   final bool mine;
   final Color? tint;
+  final bool fbPage;
   final String? senderLabel;
   final ChatTheme theme;
   final double maxWidth;
@@ -2682,6 +2694,13 @@ class _MessageBubble extends StatelessWidget {
                 decoration: BoxDecoration(
                   color: mine
                       ? _mineColor
+                      : fbPage
+                          ? (tk.dark
+                              ? Color.alphaBlend(
+                                  const Color(0xFF22C55E)
+                                      .withValues(alpha: 0.18),
+                                  tk.surface)
+                              : const Color(0xFFE8F8EC))
                       : tint != null
                           ? Color.alphaBlend(
                               tint!.withValues(alpha: tk.dark ? 0.22 : 0.10),
@@ -2695,6 +2714,13 @@ class _MessageBubble extends StatelessWidget {
                   ),
                   border: mine
                       ? null
+                      : fbPage
+                          ? Border.all(
+                              color: tk.dark
+                                  ? const Color(0xFF22C55E)
+                                      .withValues(alpha: 0.45)
+                                  : const Color(0xFFBBE5C6),
+                              width: 1)
                       : tint != null
                           ? Border.all(
                               color: tint!.withValues(alpha: 0.45), width: 1)
