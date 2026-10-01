@@ -14,11 +14,11 @@ on:
       base_url:
         description: 'TPS_BASE_URL (chat backend)'
         required: true
-        default: 'https://support.tinkerpro.io'
+        default: 'https://support.tinkerpro.com'
       soketi_host:
         description: 'CHAT_SOKETI_HOST (WebSocket host — usually same as base_url host)'
         required: true
-        default: 'support.tinkerpro.io'
+        default: 'support.tinkerpro.com'
   push:
     tags:
       - 'android-v*'
@@ -35,8 +35,8 @@ jobs:
       # realtime chat + calls hit the same Soketi endpoint (TLS on 443, /soketi
       # reverse-proxy prefix).
       DART_DEFINES: >-
-        --dart-define=TPS_BASE_URL=${{ github.event.inputs.base_url || 'https://support.tinkerpro.io' }}
-        --dart-define=CHAT_SOKETI_HOST=${{ github.event.inputs.soketi_host || 'support.tinkerpro.io' }}
+        --dart-define=TPS_BASE_URL=${{ github.event.inputs.base_url || 'https://support.tinkerpro.com' }}
+        --dart-define=CHAT_SOKETI_HOST=${{ github.event.inputs.soketi_host || 'support.tinkerpro.com' }}
         --dart-define=CHAT_SOKETI_PORT=443
         --dart-define=CHAT_SOKETI_TLS=true
         --dart-define=CHAT_SOKETI_PATH=/soketi

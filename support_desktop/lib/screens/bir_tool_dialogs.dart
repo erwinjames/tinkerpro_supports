@@ -26,7 +26,7 @@ class BirQrDialog extends StatefulWidget {
 
 class _BirQrDialogState extends State<BirQrDialog> {
   static const _prodRegisterUrl =
-      'https://support.tinkerpro.io/client-register?register=1';
+      'https://support.tinkerpro.com/client-register?register=1';
   static const _fbAppId = '787214717774513';
 
   late final BirMiscService _svc = BirMiscService(widget.bir.api);

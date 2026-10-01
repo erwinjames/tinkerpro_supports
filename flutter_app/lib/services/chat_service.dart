@@ -90,12 +90,14 @@ class ChatService {
     return const [];
   }
 
-  Future<List<ChatUser>> directory({String? search}) async {
+  Future<List<ChatUser>> directory({String? search, int? conversationId}) async {
     try {
-      final query = (search != null && search.isNotEmpty)
-          ? <String, String>{'search': search}
-          : null;
-      final res = await api.get('chat.directory', query);
+      final query = <String, String>{
+        if (search != null && search.isNotEmpty) 'search': search,
+        if (conversationId != null && conversationId > 0)
+          'conversation_id': conversationId.toString(),
+      };
+      final res = await api.get('chat.directory', query.isEmpty ? null : query);
       if (_looksUnauthorized(res)) {
         throw ChatAuthException((res['message'] ?? '').toString());
       }
@@ -355,6 +357,25 @@ class ChatService {
       return res['success'] == true;
     } catch (_) {
       return false;
+    }
+  }
+
+  Future<({bool ok, String? error})> removeParticipant(
+    int conversationId,
+    int userId,
+  ) async {
+    try {
+      final res = await api.post(
+        'chat.removeParticipant',
+        body: {
+          'conversation_id': conversationId.toString(),
+          'user_id': userId.toString(),
+        },
+      );
+      if (res['success'] == true) return (ok: true, error: null);
+      return (ok: false, error: (res['message'] ?? '').toString());
+    } catch (e) {
+      return (ok: false, error: e.toString());
     }
   }
 

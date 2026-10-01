@@ -6,7 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 const String _kDefaultBaseUrl = String.fromEnvironment(
   'TPS_BASE_URL',
-  defaultValue: 'https://support.tinkerpro.io',
+  defaultValue: 'https://support.tinkerpro.com',
 );
 
 class ApiClient {
@@ -81,6 +81,14 @@ class ApiClient {
       } catch (_) {}
     }
     var base = prefs.getString(_kBaseUrlKey) ?? _kDefaultBaseUrl;
+    final moved = base.replaceFirst(
+      '://support.tinkerpro.io',
+      '://support.tinkerpro.com',
+    );
+    if (moved != base) {
+      base = moved;
+      await prefs.setString(_kBaseUrlKey, base);
+    }
     if (kReleaseMode && _isLoopback(base) && !_isLoopback(_kDefaultBaseUrl)) {
       base = _kDefaultBaseUrl;
       perms = const {};

@@ -13,7 +13,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 const String _kDefaultBaseUrl = String.fromEnvironment(
   'TPS_BASE_URL',
-  defaultValue: 'https://support.tinkerpro.io',
+  defaultValue: 'https://support.tinkerpro.com',
 );
 const String _kAvatarCacheKey = 'call_avatar_cache';
 

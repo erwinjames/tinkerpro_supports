@@ -73,6 +73,70 @@ class _ChatParticipantsScreenState extends State<ChatParticipantsScreen> {
     return d.type != 'dm';
   }
 
+  bool get _canRemove {
+    final d = _detail;
+    if (d == null || d.type == 'dm') return false;
+    return d.participants.any(
+      (p) => p.id == widget.myUserId && p.role.trim() == 'super_admin',
+    );
+  }
+
+  Future<void> _remove(ConversationMember member) async {
+    if (_busy) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: context.brand.surface,
+        title: Text(
+          'Remove member',
+          style: Theme.of(context).textTheme.labelLarge,
+        ),
+        content: Text(
+          '${member.displayName} will be removed from this conversation '
+          'and stop receiving its messages.',
+          style: Theme.of(context).textTheme.bodyMedium,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: Text(
+              'CANCEL',
+              style: Theme.of(context).textTheme.labelMedium,
+            ),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: Text(
+              'REMOVE',
+              style: Theme.of(
+                context,
+              ).textTheme.labelMedium?.copyWith(color: Brand.signal),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _busy = true);
+    final result = await widget.service.removeParticipant(
+      widget.conversationId,
+      member.id,
+    );
+    if (!mounted) return;
+    setState(() => _busy = false);
+    if (result.ok) {
+      await _load();
+    } else {
+      final err = (result.error ?? '').trim();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(err.isEmpty ? 'Could not remove member' : err),
+        ),
+      );
+    }
+  }
+
   bool get _canDelete {
     final d = _detail;
     if (d == null) return false;
@@ -88,8 +152,11 @@ class _ChatParticipantsScreenState extends State<ChatParticipantsScreen> {
 
     final picked = await Navigator.of(context).push<List<int>>(
       MaterialPageRoute(
-        builder: (_) =>
-            _AddMembersScreen(service: widget.service, excludeIds: existingIds),
+        builder: (_) => _AddMembersScreen(
+          service: widget.service,
+          excludeIds: existingIds,
+          conversationId: widget.conversationId,
+        ),
       ),
     );
     if (!mounted || picked == null || picked.isEmpty) return;
@@ -313,6 +380,9 @@ class _ChatParticipantsScreenState extends State<ChatParticipantsScreen> {
                         liveOnline: widget.realtime.onlineUsers.value.contains(
                           p.id,
                         ),
+                        onRemove: _canRemove && p.id != widget.myUserId
+                            ? (_busy ? () {} : () => _remove(p))
+                            : null,
                       );
                     },
                   ),
@@ -363,11 +433,13 @@ class _MemberRow extends StatelessWidget {
     required this.isMe,
     required this.liveOnline,
     this.avatarUrl,
+    this.onRemove,
   });
   final ConversationMember member;
   final bool isMe;
   final bool liveOnline;
   final String? avatarUrl;
+  final VoidCallback? onRemove;
 
   @override
   Widget build(BuildContext context) {
@@ -412,6 +484,17 @@ class _MemberRow extends StatelessWidget {
           if (isMe) ...[
             const SizedBox(width: 8),
             const StatusPill(label: 'You', color: Brand.orange),
+          ],
+          if (onRemove != null) ...[
+            const SizedBox(width: 4),
+            IconButton(
+              tooltip: 'Remove from group',
+              icon: const Icon(
+                Icons.person_remove_alt_1_rounded,
+                color: Brand.danger,
+              ),
+              onPressed: onRemove,
+            ),
           ],
         ],
       ),
@@ -458,9 +541,14 @@ class _PresenceAvatar extends StatelessWidget {
 }
 
 class _AddMembersScreen extends StatefulWidget {
-  const _AddMembersScreen({required this.service, required this.excludeIds});
+  const _AddMembersScreen({
+    required this.service,
+    required this.excludeIds,
+    required this.conversationId,
+  });
   final ChatService service;
   final Set<int> excludeIds;
+  final int conversationId;
 
   @override
   State<_AddMembersScreen> createState() => _AddMembersScreenState();
@@ -488,7 +576,10 @@ class _AddMembersScreenState extends State<_AddMembersScreen> {
 
   Future<void> _load({String? search}) async {
     setState(() => _loading = true);
-    final users = await widget.service.directory(search: search);
+    final users = await widget.service.directory(
+      search: search,
+      conversationId: widget.conversationId,
+    );
     if (!mounted) return;
     setState(() {
       _users = users.where((u) => !widget.excludeIds.contains(u.id)).toList();

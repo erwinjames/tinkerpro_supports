@@ -6,7 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 const String _kDefaultBaseUrl = String.fromEnvironment(
   'TPS_BASE_URL',
-  defaultValue: 'https://support.tinkerpro.io',
+  defaultValue: 'https://support.tinkerpro.com',
 );
 
 class UploadTimeoutException implements Exception {
@@ -47,9 +47,18 @@ class ApiClient {
 
   static Future<ApiClient> load() async {
     final prefs = await SharedPreferences.getInstance();
+    var base = prefs.getString(_kBaseUrlKey) ?? _kDefaultBaseUrl;
+    final moved = base.replaceFirst(
+      '://support.tinkerpro.io',
+      '://support.tinkerpro.com',
+    );
+    if (moved != base) {
+      base = moved;
+      await prefs.setString(_kBaseUrlKey, base);
+    }
     return ApiClient._(
       prefs,
-      prefs.getString(_kBaseUrlKey) ?? _kDefaultBaseUrl,
+      base,
       prefs.getString(_kCookieKey) ?? '',
       prefs.getInt(_kUserIdKey),
       prefs.getString(_kUsernameKey),

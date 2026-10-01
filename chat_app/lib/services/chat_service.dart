@@ -91,12 +91,14 @@ class ChatService {
     return const [];
   }
 
-  Future<List<ChatUser>> directory({String? search}) async {
+  Future<List<ChatUser>> directory({String? search, int? conversationId}) async {
     try {
-      final query = (search != null && search.isNotEmpty)
-          ? <String, String>{'search': search}
-          : null;
-      final res = await api.get('chat.directory', query);
+      final query = <String, String>{
+        if (search != null && search.isNotEmpty) 'search': search,
+        if (conversationId != null && conversationId > 0)
+          'conversation_id': conversationId.toString(),
+      };
+      final res = await api.get('chat.directory', query.isEmpty ? null : query);
       if (_looksUnauthorized(res)) {
         throw ChatAuthException((res['message'] ?? '').toString());
       }
@@ -335,6 +337,20 @@ class ChatService {
     }
   }
 
+  Future<({bool ok, String? error})> removeParticipant(
+      int conversationId, int userId) async {
+    try {
+      final res = await api.post('chat.removeParticipant', body: {
+        'conversation_id': conversationId.toString(),
+        'user_id': userId.toString(),
+      });
+      if (res['success'] == true) return (ok: true, error: null);
+      return (ok: false, error: (res['message'] ?? '').toString());
+    } catch (e) {
+      return (ok: false, error: e.toString());
+    }
+  }
+
   Future<({bool ok, String? error})> deleteConversation(
       int conversationId) async {
     try {
@@ -478,9 +494,6 @@ class ChatService {
     }
   }
 
-  /// Alias the customer sees for this agent: the per-conversation override
-  /// if one is set, otherwise the account default. Mirrors the web accept
-  /// modal's prefill.
   Future<({String? alias, String? defaultAlias})> myAlias(
       int conversationId) async {
     try {
@@ -497,10 +510,6 @@ class ChatService {
     }
   }
 
-  /// Moves a Facebook page thread out of the request queue and into the
-  /// shared inbox. The server adds every active staff member as a
-  /// participant and broadcasts the conversation so it appears live for
-  /// whoever is entitled to see it.
   Future<bool> moveRequestToInbox(int conversationId) async {
     try {
       final res = await api.post('chat.moveRequestToInbox', body: {
@@ -512,10 +521,6 @@ class ChatService {
     }
   }
 
-  /// Reverse of [moveRequestToInbox]: returns the thread to the Page Chat
-  /// queue and drops members without Facebook access.
-  /// Returns `removed` — how many members the server pruned for lacking
-  /// Facebook access — so the caller can say what actually happened.
   Future<({bool ok, int removed})> returnRequestToFacebook(
       int conversationId) async {
     try {

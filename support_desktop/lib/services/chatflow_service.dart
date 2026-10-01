@@ -131,6 +131,22 @@ class ChatflowService {
   Future<ChatflowResult> leaveConversation(int id) =>
       _post('chat.leaveConversation', {'conversation_id': '$id'});
 
+  Future<ChatflowResult> removeParticipant(int id, int userId) =>
+      _post('chat.removeParticipant', {'conversation_id': '$id', 'user_id': '$userId'});
+
+  Future<List<ChatUser>> directoryFor(int conversationId, {String? search}) async {
+    final r = await _get('chat.directory', {
+      'conversation_id': '$conversationId',
+      if (search != null && search.isNotEmpty) 'search': search,
+    });
+    final raw = r.data['users'];
+    if (!r.ok || raw is! List) return const [];
+    return [
+      for (final u in raw)
+        if (u is Map) ChatUser.fromJson(Map<String, dynamic>.from(u)),
+    ];
+  }
+
   Future<ChatflowResult> addParticipants(int id, List<int> userIds) =>
       _post('chat.addParticipants', {'conversation_id': '$id', 'user_ids': userIds.join(',')});
 

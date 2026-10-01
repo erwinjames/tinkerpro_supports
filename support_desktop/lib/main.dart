@@ -71,7 +71,7 @@ import 'screens/web/zreading_screen.dart';
 import 'widgets/brand_asset.dart';
 import 'widgets/toast_host.dart';
 
-const String kLiveServerUrl = 'https://support.tinkerpro.io';
+const String kLiveServerUrl = 'https://support.tinkerpro.com';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();

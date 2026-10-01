@@ -2440,7 +2440,7 @@ class _DesktopAppPaneState extends State<DesktopAppPane> {
         keyboardType: TextInputType.url,
         decoration: const InputDecoration(
           labelText: 'Server URL',
-          hintText: 'https://support.tinkerpro.io',
+          hintText: 'https://support.tinkerpro.com',
         ),
         onSubmitted: (v) => Navigator.of(ctx).pop(v.trim()),
       ),

@@ -10,11 +10,11 @@ on:
       base_url:
         description: 'TPS_BASE_URL (support backend)'
         required: true
-        default: 'https://support.tinkerpro.io'
+        default: 'https://support.tinkerpro.com'
       soketi_host:
         description: 'CHAT_SOKETI_HOST (WebSocket host — usually the base_url host)'
         required: true
-        default: 'support.tinkerpro.io'
+        default: 'support.tinkerpro.com'
   push:
     tags:
       - 'sd-v*'
@@ -56,8 +56,8 @@ jobs:
 
       - name: Build Windows release
         env:
-          BASE_URL:    ${{ github.event.inputs.base_url    || 'https://support.tinkerpro.io' }}
-          SOKETI_HOST: ${{ github.event.inputs.soketi_host || 'support.tinkerpro.io' }}
+          BASE_URL:    ${{ github.event.inputs.base_url    || 'https://support.tinkerpro.com' }}
+          SOKETI_HOST: ${{ github.event.inputs.soketi_host || 'support.tinkerpro.com' }}
         run: |
           flutter build windows --release `
             --dart-define="TPS_BASE_URL=$env:BASE_URL" `

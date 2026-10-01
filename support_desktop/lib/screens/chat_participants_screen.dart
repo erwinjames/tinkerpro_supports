@@ -86,6 +86,43 @@ class _ChatParticipantsScreenState extends State<ChatParticipantsScreen> {
     return d.createdBy == widget.myUserId || d.type == 'group';
   }
 
+  bool get _canRemove {
+    final d = _detail;
+    if (d == null || d.type == 'dm') return false;
+    return d.participants.any(
+      (p) => p.id == widget.myUserId && p.role.trim() == 'super_admin',
+    );
+  }
+
+  Future<void> _remove(ConversationMember member) async {
+    if (_busy) return;
+    final confirmed = await showWebModal<bool>(
+      context,
+      title: 'Remove member?',
+      icon: Icons.person_remove_alt_1_outlined,
+      width: 460,
+      builder: (ctx) => Text(
+        '${member.displayName} will be removed from this conversation and stop receiving its messages.',
+        style: Theme.of(ctx).textTheme.bodyMedium,
+      ),
+      actions: (ctx) => [
+        GhostButton(label: 'Cancel', onPressed: () => Navigator.pop(ctx, false)),
+        DangerButton(label: 'Remove', onPressed: () => Navigator.pop(ctx, true)),
+      ],
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() => _busy = true);
+    final r = await _flow.removeParticipant(widget.conversationId, member.id);
+    if (!mounted) return;
+    setState(() => _busy = false);
+    if (r.ok) {
+      await _load();
+    } else {
+      final m = (r.message ?? '').trim();
+      _toast(m.isEmpty ? 'Could not remove member' : m);
+    }
+  }
+
   bool get _canLeave {
     final d = _detail;
     if (d == null) return false;
@@ -101,7 +138,10 @@ class _ChatParticipantsScreenState extends State<ChatParticipantsScreen> {
     if (_detail == null) return;
     final picked = await showDialog<List<int>>(
       context: context,
-      builder: (_) => _AddMembersModal(service: widget.service),
+      builder: (_) => _AddMembersModal(
+        flow: _flow,
+        conversationId: widget.conversationId,
+      ),
     );
     if (!mounted || picked == null || picked.isEmpty) return;
     setState(() => _busy = true);
@@ -221,10 +261,11 @@ class _ChatParticipantsScreenState extends State<ChatParticipantsScreen> {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.stretch,
                           children: [
-                            WebTableHeader(cells: const [
-                              Expanded(child: Text('MEMBER')),
-                              SizedBox(width: 120, child: Text('ROLE')),
-                              SizedBox(width: 130, child: Text('STATUS')),
+                            WebTableHeader(cells: [
+                              const Expanded(child: Text('MEMBER')),
+                              const SizedBox(width: 120, child: Text('ROLE')),
+                              const SizedBox(width: 130, child: Text('STATUS')),
+                              if (_canRemove) const SizedBox(width: 44),
                             ]),
                             Expanded(
                               child: ListView.builder(
@@ -237,6 +278,10 @@ class _ChatParticipantsScreenState extends State<ChatParticipantsScreen> {
                                     liveOnline: widget
                                         .realtime.onlineUsers.value
                                         .contains(p.id),
+                                    showRemove: _canRemove,
+                                    onRemove: _canRemove && p.id != widget.myUserId
+                                        ? (_busy ? null : () => _remove(p))
+                                        : null,
                                   );
                                 },
                               ),
@@ -316,10 +361,14 @@ class _MemberRow extends StatelessWidget {
     required this.member,
     required this.isMe,
     required this.liveOnline,
+    this.showRemove = false,
+    this.onRemove,
   });
   final ConversationMember member;
   final bool isMe;
   final bool liveOnline;
+  final bool showRemove;
+  final VoidCallback? onRemove;
 
   @override
   Widget build(BuildContext context) {
@@ -372,14 +421,27 @@ class _MemberRow extends StatelessWidget {
             ),
           ),
         ),
+        if (showRemove)
+          SizedBox(
+            width: 44,
+            child: isMe
+                ? const SizedBox.shrink()
+                : IconButton(
+                    tooltip: 'Remove from group',
+                    icon: const Icon(Icons.person_remove_alt_1_outlined,
+                        size: 18, color: Brand.danger),
+                    onPressed: onRemove,
+                  ),
+          ),
       ],
     );
   }
 }
 
 class _AddMembersModal extends StatefulWidget {
-  const _AddMembersModal({required this.service});
-  final ChatService service;
+  const _AddMembersModal({required this.flow, required this.conversationId});
+  final ChatflowService flow;
+  final int conversationId;
 
   @override
   State<_AddMembersModal> createState() => _AddMembersModalState();
@@ -407,7 +469,10 @@ class _AddMembersModalState extends State<_AddMembersModal> {
 
   Future<void> _load({String? search}) async {
     setState(() => _loading = true);
-    final users = await widget.service.directory(search: search);
+    final users = await widget.flow.directoryFor(
+      widget.conversationId,
+      search: search,
+    );
     if (!mounted) return;
     setState(() {
       _users = users;
